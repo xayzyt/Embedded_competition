@@ -1,0 +1,17 @@
+{
+  "pages": [
+    "pages/role/index",
+    "pages/sender-dispatch/index",
+    "pages/user-orders/index",
+    "pages/order-panel/index"
+  ],
+  "window": {
+    "navigationBarTitleText": "SkyAnchor",
+    "navigationBarBackgroundColor": "#ffffff",
+    "navigationBarTextStyle": "black",
+    "backgroundColor": "#f5f7fb",
+    "backgroundTextStyle": "light"
+  },
+  "style": "v2",
+  "sitemapLocation": "sitemap.json"
+}

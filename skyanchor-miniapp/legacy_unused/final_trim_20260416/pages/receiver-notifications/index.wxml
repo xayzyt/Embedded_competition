@@ -1,0 +1,37 @@
+<view class="page">
+  <view class="hero">
+    <view class="title">收货端通知</view>
+    <view class="subtitle">这里会显示订单送达、失败、取消等通知，后续可直接接入真实收货端。</view>
+  </view>
+
+  <view class="card">
+    <view class="field">
+      <text class="field-label">收货人 ID</text>
+      <input class="input" value="{{receiverId}}" bindinput="handleInput" />
+    </view>
+
+    <label class="field-label">
+      <checkbox checked="{{unreadOnly}}" bindchange="toggleUnreadOnly" /> 只看未读
+    </label>
+
+    <button class="primary-btn" loading="{{loading}}" bindtap="fetchNotifications">刷新通知</button>
+  </view>
+
+  <view class="card">
+    <view class="section-title">通知列表</view>
+    <block wx:if="{{notifications.length}}">
+      <block wx:for="{{notifications}}" wx:key="id">
+        <view class="list-item">
+          <view class="item-title">{{item.title}}</view>
+          <view class="item-subtitle">{{item.content}}</view>
+          <view class="item-meta">订单: {{item.order_id}} | 类型: {{item.type}}</view>
+          <view class="button-row" style="margin-top: 14rpx;">
+            <button class="ghost-btn" size="mini" data-order-id="{{item.order_id}}" bindtap="openOrder">查看订单</button>
+            <button wx:if="{{!item.read_flag}}" class="primary-btn" size="mini" data-notification-id="{{item.id}}" bindtap="markRead">标记已读</button>
+          </view>
+        </view>
+      </block>
+    </block>
+    <view wx:else class="empty">暂无通知</view>
+  </view>
+</view>

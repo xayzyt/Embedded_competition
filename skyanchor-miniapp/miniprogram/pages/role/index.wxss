@@ -1,0 +1,59 @@
+/* Shared styles live in app.wxss */
+
+.role-page {
+  padding-top: 0;
+}
+
+.role-shell {
+  flex: 1;
+  width: 100%;
+  max-width: 640rpx;
+  margin: 0 auto;
+  padding: 24rpx 32rpx 56rpx;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+}
+
+.role-title {
+  text-align: center;
+  width: 100%;
+  font-size: 80rpx;
+  line-height: 1.04;
+  margin-bottom: 20rpx;
+}
+
+.role-subtitle {
+  text-align: center;
+  width: 100%;
+  font-size: 34rpx;
+  color: #475569;
+  line-height: 1.45;
+  margin-bottom: 0;
+}
+
+.role-copy {
+  text-align: center;
+  width: 100%;
+  color: #64748b;
+  font-size: 26rpx;
+  line-height: 1.5;
+  margin-top: 34rpx;
+  margin-bottom: 72rpx;
+}
+
+.role-button-row {
+  width: 100%;
+  max-width: 420rpx;
+  flex-direction: column;
+  gap: 24rpx;
+}
+
+.role-btn {
+  width: 100%;
+  line-height: 88rpx;
+  font-size: 30rpx;
+  box-shadow: 0 10rpx 20rpx rgba(15, 23, 42, 0.06);
+}

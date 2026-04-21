@@ -1,0 +1,121 @@
+### Health
+GET http://127.0.0.1:8000/health
+
+### Create order
+POST http://127.0.0.1:8000/api/orders
+Content-Type: application/json
+
+{
+  "receiver_id": "receiver_003"
+}
+
+### Assign one order to drone 0 or 1
+POST http://127.0.0.1:8000/api/orders/REPLACE_ORDER_ID/assign
+Content-Type: application/json
+
+{
+  "device_name": "0"
+}
+
+### List all orders
+GET http://127.0.0.1:8000/api/orders
+
+### Get one order
+GET http://127.0.0.1:8000/api/orders/REPLACE_ORDER_ID
+
+### Start one order
+POST http://127.0.0.1:8000/api/orders/REPLACE_ORDER_ID/start
+
+### Cancel one order
+POST http://127.0.0.1:8000/api/orders/REPLACE_ORDER_ID/cancel
+
+### Receiver notifications
+GET http://127.0.0.1:8000/api/notifications?user_id=receiver_003
+
+### Mark notification read
+POST http://127.0.0.1:8000/api/notifications/1/read
+
+### Debug: simulate delivered
+POST http://127.0.0.1:8000/api/debug/orders/REPLACE_ORDER_ID/state
+Content-Type: application/json
+
+{
+  "status": "delivered",
+  "note": "mock delivered",
+  "matched_tag_id": 3,
+  "last_device_state": "completed"
+}
+
+###
+# Recommended demo flow
+# Start order of operations:
+# 1. skyanchor-server
+# 2. verify GET /health returns ok=true and mqtt_started=true
+# 3. power on the board and wait for device state
+# 4. open WeChat DevTools
+
+### Demo flow: health check
+GET http://127.0.0.1:8000/health
+
+### Demo flow: create order with the fixed profile
+POST http://127.0.0.1:8000/api/orders
+Content-Type: application/json
+
+{
+  "receiver_id": "receiver_003"
+}
+
+### Demo flow: assign drone 0
+POST http://127.0.0.1:8000/api/orders/REPLACE_ORDER_ID/assign
+Content-Type: application/json
+
+{
+  "device_name": "0"
+}
+
+### Demo flow: start order
+POST http://127.0.0.1:8000/api/orders/REPLACE_ORDER_ID/start
+
+### Demo flow: inspect order detail
+GET http://127.0.0.1:8000/api/orders/REPLACE_ORDER_ID
+
+### Demo flow: inspect receiver notifications
+GET http://127.0.0.1:8000/api/notifications?user_id=receiver_003
+
+### Demo fallback: simulate failed
+POST http://127.0.0.1:8000/api/debug/orders/REPLACE_ORDER_ID/state
+Content-Type: application/json
+
+{
+  "status": "failed",
+  "note": "mock failed",
+  "last_device_state": "fault"
+}
+
+###
+# Closed-loop verified profile
+# receiver_id = receiver_003
+# target_id = 3
+# device_name = 0 or 1
+
+### Closed-loop: create order
+POST http://127.0.0.1:8000/api/orders
+Content-Type: application/json
+
+{
+  "receiver_id": "receiver_003"
+}
+
+### Closed-loop: assign drone 0 or 1
+POST http://127.0.0.1:8000/api/orders/REPLACE_ORDER_ID/assign
+Content-Type: application/json
+
+{
+  "device_name": "0"
+}
+
+### Closed-loop: start order
+POST http://127.0.0.1:8000/api/orders/REPLACE_ORDER_ID/start
+
+### Closed-loop: inspect delivered notification
+GET http://127.0.0.1:8000/api/notifications?user_id=receiver_003

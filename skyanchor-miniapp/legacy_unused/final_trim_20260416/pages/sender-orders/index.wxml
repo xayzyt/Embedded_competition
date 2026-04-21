@@ -1,0 +1,54 @@
+<view class="page">
+  <view class="hero">
+    <view class="title">配送员界面</view>
+    <view class="subtitle">先填写并保存配送员信息，再创建订单或查看自己名下的配送任务。</view>
+  </view>
+
+  <view class="service-banner status-{{serviceState}}">
+    {{serviceMessage}}
+  </view>
+
+  <view class="card">
+    <view class="section-title">配送员信息</view>
+    <view class="field">
+      <text class="field-label">配送员 ID</text>
+      <input class="input" value="{{senderId}}" bindinput="handleInput" />
+      <view class="field-help">联调默认配送员 ID 已预填，可直接保存后进入下单。</view>
+    </view>
+
+    <view class="button-row compact">
+      <button class="ghost-btn" bindtap="saveSender">保存信息</button>
+      <button class="primary-btn" bindtap="openCreate">创建订单</button>
+      <button class="ghost-btn" loading="{{loading}}" bindtap="fetchOrders">刷新订单</button>
+    </view>
+  </view>
+
+  <view class="card">
+    <view class="section-title">我的订单</view>
+    <view class="section-caption">点击任一订单卡片，可进入详情页查看状态流转和事件记录。</view>
+    <block wx:if="{{loadError}}">
+      <view class="empty">{{loadError}}</view>
+    </block>
+    <block wx:elif="{{!senderId}}">
+      <view class="empty">请先填写并保存配送员 ID，再拉取你的订单列表。</view>
+    </block>
+    <block wx:elif="{{loading && !orders.length}}">
+      <view class="empty">正在加载订单列表...</view>
+    </block>
+    <block wx:elif="{{orders.length}}">
+      <block wx:for="{{orders}}" wx:key="order_id">
+        <view class="list-item" data-order-id="{{item.order_id}}" bindtap="openDetail">
+          <view class="item-title">{{item.order_id}}</view>
+          <view class="item-subtitle">目标 ID: {{item.target_id}} | 设备: {{item.device_name}}</view>
+          <view class="item-meta">收货人: {{item.receiver_id}}</view>
+          <view class="status-badge status-{{item.status}}">{{item.status_text}}</view>
+        </view>
+      </block>
+    </block>
+    <view wx:else class="empty">还没有订单，先去创建一笔配送任务吧。</view>
+  </view>
+  <view class="page-footnote">
+    <view>全国大学生嵌入式芯片与系统设计竞赛</view>
+    <view class="page-footnote-team">地线引力队</view>
+  </view>
+</view>

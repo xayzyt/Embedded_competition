@@ -1,0 +1,4 @@
+checkbox {
+  transform: scale(0.8);
+  margin-right: 10rpx;
+}

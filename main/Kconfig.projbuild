@@ -1,0 +1,85 @@
+menu "SkyAnchor Cloud / EMQX Config"
+
+config SKY_WIFI_SSID
+    string "Wi-Fi SSID"
+    default ""
+    help
+        路由器 SSID。板载 ESP32-C6 作为联网协处理器，P4 通过官方 host 路线接入 Wi‑Fi。
+
+config SKY_WIFI_PASSWORD
+    string "Wi-Fi password"
+    default ""
+    help
+        路由器密码；开放网络可留空。
+
+config SKY_WIFI_MAXIMUM_RETRY
+    int "Wi-Fi reconnect retry count"
+    range 1 255
+    default 8
+    help
+        Wi‑Fi 断开后，station 模式的重连重试计数。
+
+config SKY_MQTT_BROKER_URI
+    string "EMQX broker URI"
+    default ""
+    help
+        例如 mqtts://xxxxxxxx.ala.cn-hangzhou.emqxsl.cn:8883
+
+config SKY_MQTT_USERNAME
+    string "EMQX username"
+    default ""
+    help
+        在 EMQX Cloud Authentication 里创建的用户名。
+
+config SKY_MQTT_PASSWORD
+    string "EMQX password"
+    default ""
+    help
+        在 EMQX Cloud Authentication 里创建的密码。
+
+config SKY_MQTT_CLIENT_ID
+    string "MQTT client ID"
+    default "skyanchor-p4"
+    help
+        建议保持唯一，例如 skyanchor-p4。
+
+config SKY_MQTT_DEVICE_NAME
+    string "Logical device name"
+    default "skyanchor-p4"
+    help
+        仅用于拼接业务 topic 和状态上报里的 device 字段。
+
+config SKY_MQTT_TOPIC_PREFIX
+    string "Business topic prefix"
+    default "skyanchor"
+    help
+        业务 topic 前缀。最终 topic 形如 skyanchor/<device>/cmd|ack|state。
+
+config SKY_MQTT_KEEPALIVE_SEC
+    int "MQTT keepalive seconds"
+    range 15 300
+    default 60
+    help
+        MQTT Keepalive 时间。
+
+config SKY_MQTT_QOS
+    int "MQTT QoS"
+    range 0 1
+    default 1
+    help
+        命令、应答与状态上报使用的 QoS。
+
+config SKY_MQTT_USE_CERT_BUNDLE
+    bool "Use ESP x509 certificate bundle for TLS verify"
+    default y
+    help
+        推荐开启。使用 IDF 自带的证书包校验 EMQX 服务端证书。
+
+config SKY_MQTT_SKIP_SERVER_CERT_VERIFY
+    bool "Skip server cert verification (debug only)"
+    default n
+    depends on !SKY_MQTT_USE_CERT_BUNDLE
+    help
+        仅在调试阶段临时使用，不建议正式演示或答辩时开启。
+
+endmenu

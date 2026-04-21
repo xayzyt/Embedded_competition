@@ -1,0 +1,95 @@
+<view class="page">
+  <view class="hero">
+    <view class="title">订单详情</view>
+    <view class="subtitle">这里可以查看真实订单状态，也可以通过调试按钮模拟设备状态流转。</view>
+  </view>
+
+  <view class="service-banner status-{{serviceState}}">
+    {{serviceMessage}}
+  </view>
+
+  <view class="card" wx:if="{{loadError}}">
+    <view class="section-title">订单状态</view>
+    <view class="empty">{{loadError}}</view>
+    <view class="button-row">
+      <button class="primary-btn" loading="{{loading}}" bindtap="fetchDetail">重新加载</button>
+    </view>
+  </view>
+
+  <view class="card" wx:elif="{{loading && !order}}">
+    <view class="section-title">订单状态</view>
+    <view class="empty">正在加载订单详情...</view>
+  </view>
+
+  <view class="card" wx:if="{{order}}">
+    <view class="section-title">{{order.order_id}}</view>
+    <view class="section-caption">这里展示当前订单的真实业务信息，适合作为答辩时的主状态页。</view>
+    <view class="kv">
+      <text class="kv-key">状态</text>
+      <text class="kv-value">{{order.status_text}}</text>
+    </view>
+    <view class="kv">
+      <text class="kv-key">目标 ID</text>
+      <text class="kv-value">{{order.target_id}}</text>
+    </view>
+    <view class="kv">
+      <text class="kv-key">设备</text>
+      <text class="kv-value">{{order.device_name}}</text>
+    </view>
+    <view class="kv">
+      <text class="kv-key">收货人</text>
+      <text class="kv-value">{{order.receiver_id}}</text>
+    </view>
+    <view class="kv">
+      <text class="kv-key">备注</text>
+      <text class="kv-value">{{order.note_text}}</text>
+    </view>
+    <view class="button-row detail-action-row {{isReceiverView ? 'single-action-row' : ''}}">
+      <button class="ghost-btn" loading="{{loading}}" bindtap="fetchDetail">刷新</button>
+      <button wx:if="{{!isReceiverView}}" class="primary-btn" disabled="{{!order.can_start}}" bindtap="startOrder">开始配送</button>
+      <button wx:if="{{!isReceiverView}}" class="warn-btn" disabled="{{!order.can_cancel}}" bindtap="cancelOrder">取消订单</button>
+    </view>
+  </view>
+
+  <!--
+  <view class="card" wx:if="{{order}}">
+    <view class="section-title">真实业务动作</view>
+    <view class="section-caption">优先使用这里的按钮演示真实流程，调试按钮只作为状态模拟补充。</view>
+    <view class="button-row">
+      <button class="ghost-btn" loading="{{loading}}" bindtap="fetchDetail">刷新</button>
+      <button class="primary-btn" disabled="{{!order.can_start}}" bindtap="startOrder">开始配送</button>
+      <button class="warn-btn" disabled="{{!order.can_cancel}}" bindtap="cancelOrder">取消订单</button>
+    </view>
+    <view class="action-note">当订单已进入终态后，相关动作会自动禁用，避免演示时触发无效操作。</view>
+  </view>
+
+  <view class="card" wx:if="{{order}}">
+    <view class="section-title">演示调试</view>
+    <view class="section-caption">以下按钮保留给联调和答辩演示使用，默认作为次级能力展示。</view>
+    <view class="button-row">
+      <button class="ghost-btn" bindtap="mockActing">模拟执行中</button>
+      <button class="primary-btn" bindtap="mockDelivered">模拟已送达</button>
+      <button class="warn-btn" bindtap="mockFailed">模拟失败</button>
+    </view>
+  </view>
+
+  <view class="card" wx:if="{{order}}">
+    <view class="section-title">事件记录</view>
+    <view class="section-caption">事件会按时间顺序展示，便于解释订单从创建到完成的完整状态流转。</view>
+    <block wx:if="{{events.length}}">
+      <block wx:for="{{events}}" wx:key="id">
+        <view class="list-item">
+          <view class="item-title">{{item.event_label}}</view>
+          <view class="item-subtitle">{{item.event_text}}</view>
+          <view class="item-meta">{{item.created_at}}</view>
+        </view>
+      </block>
+    </block>
+    <view wx:else class="empty">暂无事件记录</view>
+  </view>
+  -->
+  <view class="page-footnote">
+    <view>全国大学生嵌入式芯片与系统设计竞赛</view>
+    <view class="page-footnote-team">地线引力队</view>
+  </view>
+</view>

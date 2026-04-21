@@ -1,0 +1,31 @@
+<view class="page">
+  <view class="hero">
+    <view class="title">我要下单</view>
+    <view class="subtitle">确认用户信息后直接提交订单，配送端会手动选择无人机执行配送。</view>
+  </view>
+
+  <view class="service-banner status-{{serviceState}}">
+    {{serviceMessage}}
+  </view>
+
+  <view class="card">
+    <view class="section-title">当前用户</view>
+    <view class="kv">
+      <text class="kv-key">用户 ID</text>
+      <text class="kv-value">{{receiverId}}</text>
+    </view>
+  </view>
+
+  <view class="card">
+    <view class="section-title">提交订单</view>
+    <view class="section-caption">订单提交后会进入配送调度台，等待配送端手动选择无人机并开始配送。</view>
+    <view class="button-row">
+      <button class="primary-btn" loading="{{creating}}" bindtap="submitOrder">提交订单</button>
+    </view>
+  </view>
+
+  <view class="page-footnote">
+    <view>全国大学生嵌入式芯片与系统设计竞赛</view>
+    <view class="page-footnote-team">地线引力队</view>
+  </view>
+</view>

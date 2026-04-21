@@ -1,0 +1,55 @@
+﻿<view class="page">
+  <view class="hero">
+    <view class="title">用户界面</view>
+    <view class="subtitle">先保存你的用户身份，然后提交订单并查看配送状态。</view>
+  </view>
+
+  <view class="service-banner status-{{serviceState}}">
+    {{serviceMessage}}
+  </view>
+
+  <view class="card">
+    <view class="section-title">用户信息</view>
+    <view class="field">
+      <text class="field-label">用户 ID</text>
+      <input class="input" value="{{receiverId}}" bindinput="handleInput" />
+      <view class="field-help">默认已预填演示用户，你也可以改成自己的用户 ID 再保存。</view>
+    </view>
+
+    <view class="button-row compact">
+      <button class="ghost-btn" bindtap="saveReceiver">保存信息</button>
+      <button class="primary-btn" loading="{{creating}}" bindtap="openCreateOrder">我要下单</button>
+      <button class="ghost-btn" loading="{{loading}}" bindtap="fetchOrders">刷新订单</button>
+    </view>
+  </view>
+
+  <view class="card">
+    <view class="section-title">我的订单</view>
+    <view class="section-caption">这里显示当前用户提交的订单，点击卡片即可进入订单详情。</view>
+    <block wx:if="{{loadError}}">
+      <view class="empty">{{loadError}}</view>
+    </block>
+    <block wx:elif="{{!receiverId}}">
+      <view class="empty">请先填写并保存用户 ID，再查看与你相关的订单。</view>
+    </block>
+    <block wx:elif="{{loading && !orders.length}}">
+      <view class="empty">正在加载订单列表...</view>
+    </block>
+    <block wx:elif="{{orders.length}}">
+      <block wx:for="{{orders}}" wx:key="order_id">
+        <view class="list-item" data-order-id="{{item.order_id}}" bindtap="openOrder">
+          <view class="item-title">{{item.order_id}}</view>
+          <view class="item-subtitle">AprilTag号：{{item.apriltag_text}}</view>
+          <view class="item-meta">创建时间：{{item.created_at}}</view>
+          <view class="status-badge status-{{item.status}}">{{item.status_text}}</view>
+        </view>
+      </block>
+    </block>
+    <view wx:else class="empty">还没有订单，去提交第一笔配送请求吧。</view>
+  </view>
+
+  <view class="page-footnote">
+    <view>第九届（2026）全国大学生嵌入式芯片与系统设计竞赛</view>
+    <view class="page-footnote-team">地线引力队</view>
+  </view>
+</view>

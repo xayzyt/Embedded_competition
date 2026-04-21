@@ -1,0 +1,9 @@
+{
+  "desc": "SkyAnchor mini program sitemap",
+  "rules": [
+    {
+      "action": "allow",
+      "page": "*"
+    }
+  ]
+}

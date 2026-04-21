@@ -1,0 +1,10 @@
+{
+  "name": "skyanchor-service",
+  "version": "1.0.0",
+  "description": "SkyAnchor 小程序聚合云函数",
+  "main": "index.js",
+  "dependencies": {
+    "mqtt": "^5.10.4",
+    "wx-server-sdk": "^3.0.1"
+  }
+}

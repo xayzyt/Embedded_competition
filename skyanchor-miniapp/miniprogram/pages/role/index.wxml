@@ -1,0 +1,15 @@
+﻿<view class="page role-page">
+  <view class="role-shell">
+    <view class="title role-title">SkyAnchor</view>
+    <view class="subtitle role-subtitle">嵌入式智能配送演示系统</view>
+    <view class="role-copy">请选择当前身份进入系统</view>
+    <view class="button-row role-button-row">
+      <button class="primary-btn role-btn" bindtap="openReceiverCenter">我是用户</button>
+      <button class="ghost-btn role-btn" bindtap="openSenderCenter">我是配送员</button>
+    </view>
+  </view>
+  <view class="page-footnote">
+    <view>第九届（2026）全国大学生嵌入式芯片与系统设计竞赛</view>
+    <view class="page-footnote-team">地线引力队</view>
+  </view>
+</view>
