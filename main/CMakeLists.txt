@@ -1,5 +1,4 @@
 idf_component_register(
-   
     SRCS
         "main.c"
         "app_ctrl.c"
