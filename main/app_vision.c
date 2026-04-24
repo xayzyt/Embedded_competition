@@ -1,42 +1,63 @@
-#include "app_vision.h"
-#include <stdio.h>
-#include <string.h>
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "esp_log.h"
+/*
+ * app_vision.c - 视觉识别任务调度模块（详细注释版）
+ *
+ * 这个文件位于 app_camera.c 和 app_apriltag.c 之间：
+ * - app_camera.c 提交 RGB565 帧；
+ * - 本文件把 RGB565 缩小/转成灰度图；
+ * - 后台 FreeRTOS 任务调用 app_apriltag_detect_tag36h11()；
+ * - 把识别结果缓存起来，并更新 UI 上的视觉文本。
+ *
+ * 设计重点是“不要卡住摄像头预览和 LVGL”：提交帧时只做轻量拷贝/转换，真正耗时的 AprilTag 检测放到后台任务里跑。
+ */
+
+#include "app_vision.h"                            // 项目自定义模块头文件，声明 app_vision 对外提供的接口。
+#include <stdio.h>                                 // C 标准输入输出库，主要用于 snprintf/printf 这类格式化字符串操作。
+#include <string.h>                                // 字符串和内存处理函数，例如 memset、memcpy、strlen、strstr。
+#include "freertos/FreeRTOS.h"                     // FreeRTOS 基础定义，任务、队列、事件组等都依赖它。
+#include "freertos/task.h"                         // FreeRTOS 任务 API，例如 xTaskCreate、vTaskDelay、任务句柄。
+#include "esp_log.h"                               // ESP-IDF 日志系统，提供 ESP_LOGI/ESP_LOGE 等调试输出。
 #include "esp_timer.h"
-#include "app_apriltag.h"
-#include "app_ui.h"
-#define VISION_TASK_STACK_SIZE         (16 * 1024)
-#define VISION_TASK_PRIORITY           4
+#include "app_apriltag.h"                          // 项目自定义模块头文件，声明 app_apriltag 对外提供的接口。
+#include "app_ui.h"                                // 项目自定义模块头文件，声明 app_ui 对外提供的接口。
+#define VISION_TASK_STACK_SIZE         (16 * 1024)       // FreeRTOS 任务栈大小，单位一般是字节。
+#define VISION_TASK_PRIORITY           4                 // FreeRTOS 任务优先级，数值越大优先级越高。
 #define VISION_TASK_CORE_ID            1
 #define VISION_POLL_PERIOD_MS          25
 #define VISION_HEARTBEAT_MS            1000
-#define VISION_GRAY_WIDTH              240
-#define VISION_GRAY_HEIGHT             180
+#define VISION_GRAY_WIDTH              240               // 宽度相关参数，通常对应图像或显示尺寸。
+#define VISION_GRAY_HEIGHT             180               // 高度相关参数，通常对应图像或显示尺寸。
 #define VISION_GRAY_BUF_SIZE           (VISION_GRAY_WIDTH * VISION_GRAY_HEIGHT)
 #define VISION_LOST_RESET_FRAMES       2U
 #define VISION_STABLE_DECAY_ON_LOST    1U
-static const char *TAG = "app_vision";
+static const char *TAG = "app_vision";                           // ESP-IDF 日志标签，串口日志会用它标明当前消息来自哪个模块。
+/*
+ * 结构体类型：把同一类运行时数据或协议字段打包在一起，方便函数之间传递。
+ */
 typedef struct {
     app_vision_gray_frame_info_t info;
     uint8_t gray[VISION_GRAY_BUF_SIZE];
 } app_vision_gray_slot_t;
-static TaskHandle_t s_vision_task = NULL;
-static bool s_vision_inited = false;
-static portMUX_TYPE s_vision_mux = portMUX_INITIALIZER_UNLOCKED;
-static app_vision_frame_info_t s_latest_frame = {0};
-static app_vision_gray_slot_t s_gray_slot = {0};
-static app_vision_gray_slot_t s_task_slot = {0};
-static app_vision_gray_slot_t s_submit_slot = {0};
-static app_vision_result_t s_latest_result = {0};
-static uint32_t s_submit_seq = 0;
-static uint32_t s_submit_overwrite = 0;
-static bool s_first_submit_logged = false;
+static TaskHandle_t s_vision_task = NULL;                        // 模块级静态变量 s_vision_task，只在本文件内部使用，避免被其他文件直接修改。
+static bool s_vision_inited = false;                             // 模块级静态变量 s_vision_inited，只在本文件内部使用，避免被其他文件直接修改。
+static portMUX_TYPE s_vision_mux = portMUX_INITIALIZER_UNLOCKED; // 模块级静态变量 s_vision_mux，只在本文件内部使用，避免被其他文件直接修改。
+static app_vision_frame_info_t s_latest_frame = {0};             // 模块级静态变量 s_latest_frame，只在本文件内部使用，避免被其他文件直接修改。
+static app_vision_gray_slot_t s_gray_slot = {0};                 // 模块级静态变量 s_gray_slot，只在本文件内部使用，避免被其他文件直接修改。
+static app_vision_gray_slot_t s_task_slot = {0};                 // 模块级静态变量 s_task_slot，只在本文件内部使用，避免被其他文件直接修改。
+static app_vision_gray_slot_t s_submit_slot = {0};               // 模块级静态变量 s_submit_slot，只在本文件内部使用，避免被其他文件直接修改。
+static app_vision_result_t s_latest_result = {0};                // 模块级静态变量 s_latest_result，只在本文件内部使用，避免被其他文件直接修改。
+static uint32_t s_submit_seq = 0;                                // 模块级静态变量 s_submit_seq，只在本文件内部使用，避免被其他文件直接修改。
+static uint32_t s_submit_overwrite = 0;                          // 模块级静态变量 s_submit_overwrite，只在本文件内部使用，避免被其他文件直接修改。
+static bool s_first_submit_logged = false;                       // 模块级静态变量 s_first_submit_logged，只在本文件内部使用，避免被其他文件直接修改。
+/*
+ * 把 FreeRTOS tick 转成毫秒时间，用于检测耗时统计。
+ */
 static inline uint32_t app_vision_now_ms(void)
 {
     return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
 }
+/*
+ * 把 RGB565 像素转换成灰度值，降低 AprilTag 检测计算量。
+ */
 static inline uint8_t app_rgb565_to_gray(uint16_t pixel)
 {
     uint32_t r = (pixel >> 11) & 0x1F;
@@ -47,38 +68,60 @@ static inline uint8_t app_rgb565_to_gray(uint16_t pixel)
     b = (b * 255U) / 31U;
     return (uint8_t)((r * 77U + g * 150U + b * 29U) >> 8);
 }
+/*
+ * 在临界区中复制最新提交帧，避免后台任务读到一半被摄像头任务改写。
+ */
 static void app_vision_snapshot(app_vision_frame_info_t *meta_out,
                                 app_vision_gray_slot_t *slot_out,
                                 uint32_t *overwrite_out)
 {
+    // 进入临界区：下面代码会访问跨任务共享变量，必须短时间关中断/加锁保护。
     taskENTER_CRITICAL(&s_vision_mux);
     *meta_out = s_latest_frame;
     memcpy(slot_out, &s_gray_slot, sizeof(app_vision_gray_slot_t));
     *overwrite_out = s_submit_overwrite;
+    // 退出临界区：共享变量访问结束，恢复正常调度/中断。
     taskEXIT_CRITICAL(&s_vision_mux);
 }
+/*
+ * 线程安全保存最新视觉识别结果。
+ */
 static void app_vision_store_result(const app_vision_result_t *result)
 {
+    // 进入临界区：下面代码会访问跨任务共享变量，必须短时间关中断/加锁保护。
     taskENTER_CRITICAL(&s_vision_mux);
     s_latest_result = *result;
+    // 退出临界区：共享变量访问结束，恢复正常调度/中断。
     taskEXIT_CRITICAL(&s_vision_mux);
 }
+/*
+ * 读取最新视觉识别结果，供接驳判定模块使用。
+ */
 bool app_vision_get_latest_result(app_vision_result_t *out)
 {
+    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
     if (out == NULL) {
         return false;
     }
+    // 进入临界区：下面代码会访问跨任务共享变量，必须短时间关中断/加锁保护。
     taskENTER_CRITICAL(&s_vision_mux);
     *out = s_latest_result;
+    // 退出临界区：共享变量访问结束，恢复正常调度/中断。
     taskEXIT_CRITICAL(&s_vision_mux);
     return out->valid;
 }
+/*
+ * 在 UI 上显示视觉任务仍在等待有效图像帧。
+ */
 static void app_vision_set_wait_text(uint32_t heartbeat)
 {
     char buf[64];
     snprintf(buf, sizeof(buf), "tag: wait #%lu", (unsigned long)heartbeat);
     app_ui_set_vision_text(buf);
 }
+/*
+ * 把 AprilTag 检测结果转换成项目统一的 app_vision_result_t，并更新稳定/丢失计数。
+ */
 static void app_vision_update_result(const app_vision_gray_slot_t *slot,
                                      const app_apriltag_result_t *tag,
                                      uint32_t detect_ms,
@@ -87,6 +130,7 @@ static void app_vision_update_result(const app_vision_gray_slot_t *slot,
                                      uint16_t *last_tag_id)
 {
     app_vision_result_t result = {0};
+    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
     if (tag != NULL && tag->valid) {
         if (*last_tag_id == tag->id) {
             if (*stable_count < UINT16_MAX) {
@@ -135,6 +179,7 @@ static void app_vision_update_result(const app_vision_gray_slot_t *slot,
                  (double)result.edge_px_avg,
                  (int)result.top_edge_angle_deg);
         app_ui_set_vision_text(buf);
+        // 信息日志：用于确认程序执行到了哪个阶段。
         ESP_LOGI(TAG,
                  "tag seq=%lu id=%u hm=%u rot=%u th=%u border=%u area=%ld center=(%ld,%ld) bbox=(%ld,%ld,%ld,%ld) edge=%.1f ang=%.1f stable=%u detect=%lums",
                  (unsigned long)result.frame_seq,
@@ -180,6 +225,9 @@ static void app_vision_update_result(const app_vision_gray_slot_t *slot,
              (unsigned long)detect_ms);
     app_ui_set_vision_text(buf);
 }
+/*
+ * 视觉后台任务，持续获取最新灰度帧并调用 AprilTag 检测。
+ */
 static void app_vision_task(void *arg)
 {
     (void)arg;
@@ -219,6 +267,7 @@ static void app_vision_task(void *arg)
                                          &last_tag_id);
             }
             if (last_seq != 0 && s_task_slot.info.seq > (last_seq + 1)) {
+                // 警告日志：系统还能继续运行，但某个功能可能降级或不完整。
                 ESP_LOGW(TAG,
                          "vision frame jump: last=%lu now=%lu lost=%lu overwrite=%lu",
                          (unsigned long)last_seq,
@@ -248,19 +297,26 @@ static void app_vision_task(void *arg)
                 last_heartbeat_tick = now;
             }
         }
+        // 任务延时让出 CPU，避免 while 循环空转占满系统。
         vTaskDelay(pdMS_TO_TICKS(VISION_POLL_PERIOD_MS));
     }
 }
+/*
+ * 初始化视觉模块状态和 AprilTag 底层缓冲区。
+ */
 esp_err_t app_vision_init(void)
 {
     if (s_vision_inited) {
+        // 正常返回 ESP_OK，表示该步骤执行成功。
         return ESP_OK;
     }
     esp_err_t ret = app_apriltag_init();
     if (ret != ESP_OK) {
+        // 错误日志：这类信息通常需要你优先查看，因为它意味着某个关键步骤失败。
         ESP_LOGE(TAG, "app_apriltag_init failed: %s", esp_err_to_name(ret));
         return ret;
     }
+    // 进入临界区：下面代码会访问跨任务共享变量，必须短时间关中断/加锁保护。
     taskENTER_CRITICAL(&s_vision_mux);
     memset(&s_latest_frame, 0, sizeof(s_latest_frame));
     memset(&s_gray_slot, 0, sizeof(s_gray_slot));
@@ -270,19 +326,28 @@ esp_err_t app_vision_init(void)
     s_submit_seq = 0;
     s_submit_overwrite = 0;
     s_first_submit_logged = false;
+    // 退出临界区：共享变量访问结束，恢复正常调度/中断。
     taskEXIT_CRITICAL(&s_vision_mux);
+    // 信息日志：用于确认程序执行到了哪个阶段。
     ESP_LOGI(TAG, "vision init done, gray=%dx%d", VISION_GRAY_WIDTH, VISION_GRAY_HEIGHT);
     s_vision_inited = true;
+    // 正常返回 ESP_OK，表示该步骤执行成功。
     return ESP_OK;
 }
+/*
+ * 创建视觉任务，开始后台识别。
+ */
 esp_err_t app_vision_start(void)
 {
     if (!s_vision_inited) {
         return ESP_ERR_INVALID_STATE;
     }
+    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
     if (s_vision_task != NULL) {
+        // 正常返回 ESP_OK，表示该步骤执行成功。
         return ESP_OK;
     }
+    // 创建并固定 FreeRTOS 任务到指定 CPU 核，减少任务迁移带来的抖动。
     BaseType_t ret = xTaskCreatePinnedToCore(app_vision_task,
                                              "app_vision",
                                              VISION_TASK_STACK_SIZE,
@@ -291,19 +356,27 @@ esp_err_t app_vision_start(void)
                                              &s_vision_task,
                                              VISION_TASK_CORE_ID);
     if (ret != pdPASS) {
+        // 错误日志：这类信息通常需要你优先查看，因为它意味着某个关键步骤失败。
         ESP_LOGE(TAG, "create vision task failed");
         s_vision_task = NULL;
         return ESP_FAIL;
     }
+    // 信息日志：用于确认程序执行到了哪个阶段。
     ESP_LOGI(TAG, "vision task started");
+    // 正常返回 ESP_OK，表示该步骤执行成功。
     return ESP_OK;
 }
+/*
+ * 摄像头模块提交 RGB565 帧，本函数抽样/缩放/转灰度后交给视觉任务处理。
+ */
 esp_err_t app_vision_submit_frame(const uint8_t *rgb565,
                                   uint32_t width,
                                   uint32_t height,
                                   size_t len)
 {
+    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
     if (rgb565 == NULL || width == 0 || height == 0) {
+        // 参数不合法时立即返回错误码，避免后面继续访问非法内存。
         return ESP_ERR_INVALID_ARG;
     }
     const size_t min_len = (size_t)width * (size_t)height * 2U;
@@ -331,6 +404,7 @@ esp_err_t app_vision_submit_frame(const uint8_t *rgb565,
             s_submit_slot.gray[gy * VISION_GRAY_WIDTH + gx] = app_rgb565_to_gray(pixel);
         }
     }
+    // 进入临界区：下面代码会访问跨任务共享变量，必须短时间关中断/加锁保护。
     taskENTER_CRITICAL(&s_vision_mux);
     if (s_gray_slot.info.seq != 0) {
         s_submit_overwrite++;
@@ -344,8 +418,10 @@ esp_err_t app_vision_submit_frame(const uint8_t *rgb565,
     s_submit_slot.info.seq = s_submit_seq;
     s_submit_slot.info.tick_ms = s_latest_frame.tick_ms;
     memcpy(&s_gray_slot, &s_submit_slot, sizeof(app_vision_gray_slot_t));
+    // 退出临界区：共享变量访问结束，恢复正常调度/中断。
     taskEXIT_CRITICAL(&s_vision_mux);
     if (!s_first_submit_logged) {
+        // 信息日志：用于确认程序执行到了哪个阶段。
         ESP_LOGI(TAG,
                  "first gray frame ready: src=%lux%lu gray=%dx%d len=%lu",
                  (unsigned long)width,
@@ -355,5 +431,6 @@ esp_err_t app_vision_submit_frame(const uint8_t *rgb565,
                  (unsigned long)len);
         s_first_submit_logged = true;
     }
+    // 正常返回 ESP_OK，表示该步骤执行成功。
     return ESP_OK;
 }

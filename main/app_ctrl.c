@@ -1,32 +1,50 @@
-#include "app_ctrl.h"
-#include <inttypes.h>
-#include <stdbool.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "esp_err.h"
-#include "esp_log.h"
-#include "app_ch32_link.h"
-#include "app_dock_judge.h"
-#include "app_task.h"
-#include "app_ui.h"
-#include "app_vision.h"
-#include "bsp/esp-bsp.h"
-#include "bsp_display_port.h"
-static const char *TAG = "app_ctrl";
-#define CTRL_TASK_STACK_SIZE            (7 * 1024)
-#define CTRL_TASK_PRIORITY              5
+/*
+ * app_ctrl.c - 接驳主控制状态机模块（详细注释版）
+ *
+ * 这个文件是 SkyAnchor 的“业务大脑”之一，负责把视觉判定、任务状态、CH32 执行反馈串成完整流程。
+ * 典型链路是：
+ * 1. app_dock_judge 判断无人机已经对准且允许接驳；
+ * 2. app_ctrl 下发 START_DOCK / OPEN / EXTEND 等命令给 CH32；
+ * 3. CH32 执行舱门、托盘、称重、回收、上锁，并不断回传状态；
+ * 4. app_ctrl 根据 CH32 状态更新 UI、任务状态和云端快照；
+ * 5. 异常时进入冷却、保护或等待人工处理。
+ *
+ * 这个模块最需要注意的是“防重复触发”：识别结果每帧都会更新，如果不加冷却和状态门控，
+ * 可能会反复给 CH32 下发开舱命令。因此文件里有 retrigger cooldown、busy deadline、cargo wait window 等保护逻辑。
+ */
+
+#include "app_ctrl.h"                              // 项目自定义模块头文件，声明 app_ctrl 对外提供的接口。
+#include <inttypes.h>                              // 跨平台整数格式化宏，方便日志打印固定宽度整数。
+#include <stdbool.h>                               // C99 布尔类型支持，提供 bool、true、false。
+#include <stdio.h>                                 // C 标准输入输出库，主要用于 snprintf/printf 这类格式化字符串操作。
+#include <stdlib.h>                                // 标准库函数，例如 strtol、atoi、内存/数值转换等。
+#include <string.h>                                // 字符串和内存处理函数，例如 memset、memcpy、strlen、strstr。
+#include "freertos/FreeRTOS.h"                     // FreeRTOS 基础定义，任务、队列、事件组等都依赖它。
+#include "freertos/task.h"                         // FreeRTOS 任务 API，例如 xTaskCreate、vTaskDelay、任务句柄。
+#include "esp_err.h"                               // ESP-IDF 错误码类型 esp_err_t 和 ESP_OK 等定义。
+#include "esp_log.h"                               // ESP-IDF 日志系统，提供 ESP_LOGI/ESP_LOGE 等调试输出。
+#include "app_ch32_link.h"                         // 项目自定义模块头文件，声明 app_ch32_link 对外提供的接口。
+#include "app_dock_judge.h"                        // 项目自定义模块头文件，声明 app_dock_judge 对外提供的接口。
+#include "app_task.h"                              // 项目自定义模块头文件，声明 app_task 对外提供的接口。
+#include "app_ui.h"                                // 项目自定义模块头文件，声明 app_ui 对外提供的接口。
+#include "app_vision.h"                            // 项目自定义模块头文件，声明 app_vision 对外提供的接口。
+#include "bsp/esp-bsp.h"                           // 乐鑫 BSP 通用接口，常用于显示、触摸、音频等板级资源。
+#include "bsp_display_port.h"                      // 项目自定义 BSP 封装头文件，用来屏蔽底层显示板级差异。
+static const char *TAG = "app_ctrl";                             // ESP-IDF 日志标签，串口日志会用它标明当前消息来自哪个模块。
+#define CTRL_TASK_STACK_SIZE            (7 * 1024)       // FreeRTOS 任务栈大小，单位一般是字节。
+#define CTRL_TASK_PRIORITY              5                // FreeRTOS 任务优先级，数值越大优先级越高。
 #define CTRL_TASK_CORE_ID               1
 #define CTRL_POLL_MS                    60U
-#define CTRL_READY_PROBE_INTERVAL_MS    1000U
-#define CTRL_DOCK_CMD                   ('A')
+#define CTRL_READY_PROBE_INTERVAL_MS    1000U            // 周期/间隔参数，用于控制采样或刷新频率。
+#define CTRL_DOCK_CMD                   ('A')            // 命令码或命令字符串相关定义。
 #define CTRL_ACK_WAIT_MS                2000U
-#define CTRL_BUSY_TIMEOUT_MS            20000U
+#define CTRL_BUSY_TIMEOUT_MS            20000U           // 超时时间，避免外设或通信异常时一直阻塞。
 #define CTRL_NOTICE_SHOW_MS             1600U
 #define CTRL_RETRIGGER_COOLDOWN_MS      1800U
 #define CTRL_AUTO_DOCK_ENABLE           (1)
+/*
+ * 结构体类型：把同一类运行时数据或协议字段打包在一起，方便函数之间传递。
+ */
 typedef struct {
     bool inited;
     bool ch32_ready;
@@ -44,19 +62,29 @@ typedef struct {
     uint32_t retrigger_deadline_ms;
     char notice[96];
 } app_ctrl_runtime_t;
-static TaskHandle_t s_ctrl_task = NULL;
-static portMUX_TYPE s_ctrl_mux = portMUX_INITIALIZER_UNLOCKED;
-static app_ctrl_runtime_t s_rt = {0};
+static TaskHandle_t s_ctrl_task = NULL;                          // 模块级静态变量 s_ctrl_task，只在本文件内部使用，避免被其他文件直接修改。
+static portMUX_TYPE s_ctrl_mux = portMUX_INITIALIZER_UNLOCKED;   // 模块级静态变量 s_ctrl_mux，只在本文件内部使用，避免被其他文件直接修改。
+static app_ctrl_runtime_t s_rt = {0};                            // 模块级静态变量 s_rt，只在本文件内部使用，避免被其他文件直接修改。
+/*
+ * 把 FreeRTOS tick 转成毫秒时间，用于超时和冷却判断。
+ */
 static inline uint32_t app_ctrl_now_ms(void)
 {
     return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
 }
+/*
+ * 判断某个截止时间是否仍然有效，处理 tick 溢出时仍保持正确。
+ */
 static inline bool app_ctrl_deadline_active(uint32_t deadline_ms, uint32_t now_ms)
 {
     return (deadline_ms != 0U) && ((int32_t)(deadline_ms - now_ms) > 0);
 }
+/*
+ * 在已经持有状态锁时设置 UI/状态提示文本和保持时间。
+ */
 static void app_ctrl_set_notice_locked(const char *text, uint32_t hold_ms)
 {
+    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
     if (text == NULL) {
         s_rt.notice[0] = '\0';
         s_rt.notice_deadline_ms = 0;
@@ -65,18 +93,30 @@ static void app_ctrl_set_notice_locked(const char *text, uint32_t hold_ms)
     strlcpy(s_rt.notice, text, sizeof(s_rt.notice));
     s_rt.notice_deadline_ms = app_ctrl_now_ms() + hold_ms;
 }
+/*
+ * 线程安全地设置控制提示文本。
+ */
 static void app_ctrl_set_notice(const char *text, uint32_t hold_ms)
 {
+    // 进入临界区：下面代码会访问跨任务共享变量，必须短时间关中断/加锁保护。
     taskENTER_CRITICAL(&s_ctrl_mux);
     app_ctrl_set_notice_locked(text, hold_ms);
+    // 退出临界区：共享变量访问结束，恢复正常调度/中断。
     taskEXIT_CRITICAL(&s_ctrl_mux);
 }
+/*
+ * 启动防重复触发冷却时间，避免一直接收到 ready 视觉结果时反复下发接驳命令。
+ */
 static void app_ctrl_start_retrigger_cooldown_locked(uint32_t hold_ms)
 {
     s_rt.retrigger_deadline_ms = app_ctrl_now_ms() + hold_ms;
 }
+/*
+ * 从旧版 CH32 文本反馈中判断动作是否完成。
+ */
 static bool app_ctrl_line_has_done_keyword(const char *line)
 {
+    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
     if (line == NULL) {
         return false;
     }
@@ -89,8 +129,12 @@ static bool app_ctrl_line_has_done_keyword(const char *line)
            (strstr(line, "FLOW_OK") != NULL) ||
            (strstr(line, "IDLE") != NULL);
 }
+/*
+ * 从旧版文本行判断托盘是否已经伸出并进入等待货物阶段。
+ */
 static bool app_ctrl_line_indicates_cargo_wait_window(const char *line)
 {
+    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
     if (line == NULL) {
         return false;
     }
@@ -101,6 +145,9 @@ static bool app_ctrl_line_indicates_cargo_wait_window(const char *line)
            (strstr(line, "drawer has been fully extended") != NULL) ||
            (strstr(line, "tray has been fully extended") != NULL);
 }
+/*
+ * 判断新版协议阶段是否代表 CH32 正在执行动作。
+ */
 static bool app_ctrl_proto_stage_is_busy(app_ch32_proto_stage_t stage)
 {
     switch (stage) {
@@ -118,20 +165,32 @@ static bool app_ctrl_proto_stage_is_busy(app_ch32_proto_stage_t stage)
             return false;
     }
 }
+/*
+ * 判断新版协议阶段是否处于等待货物放入托盘的窗口。
+ */
 static bool app_ctrl_proto_stage_is_cargo_wait_window(app_ch32_proto_stage_t stage)
 {
     return (stage == APP_CH32_STAGE_TRAY_EXTENDED) ||
            (stage == APP_CH32_STAGE_WAITING_CARGO);
 }
+/*
+ * 根据 flags 判断托盘是否已经伸出。
+ */
 static bool app_ctrl_proto_flags_indicate_tray_out(uint16_t flags)
 {
     return (flags & APP_CH32_FLAG_LIMIT_TRAY_OUT) != 0U;
 }
+/*
+ * 判断错误是否属于等待货物阶段的软错误，避免过早进入硬故障。
+ */
 static bool app_ctrl_proto_error_is_cargo_wait_soft(uint8_t proto_error)
 {
     return (proto_error == APP_CH32_ERR_TIMEOUT) ||
            (proto_error == APP_CH32_ERR_WEIGHT);
 }
+/*
+ * 把 CH32 阶段转换为适合显示在 UI 上的状态文本。
+ */
 static const char *app_ctrl_proto_stage_status_text(app_ch32_proto_stage_t stage)
 {
     switch (stage) {
@@ -153,10 +212,16 @@ static const char *app_ctrl_proto_stage_status_text(app_ch32_proto_stage_t stage
         default:                             return "dock: CH32 online";
     }
 }
+/*
+ * 判断该阶段是否需要 busy 超时保护。
+ */
 static bool app_ctrl_proto_stage_uses_busy_deadline(app_ch32_proto_stage_t stage)
 {
     return !app_ctrl_proto_stage_is_cargo_wait_window(stage);
 }
+/*
+ * 判断当前错误是否可以按等待货物阶段处理，防止投递等待时误判成严重故障。
+ */
 static bool app_ctrl_is_soft_waiting_cargo_error(app_ch32_proto_stage_t prev_stage,
                                                  uint16_t prev_flags,
                                                  app_ch32_proto_stage_t stage,
@@ -185,6 +250,9 @@ static bool app_ctrl_is_soft_waiting_cargo_error(app_ch32_proto_stage_t prev_sta
             (stage == APP_CH32_STAGE_TRAY_EXTENDED) ||
             (stage == APP_CH32_STAGE_WAITING_CARGO));
 }
+/*
+ * 进入或延长等待货物状态，给无人机投放货物留出时间。
+ */
 static void app_ctrl_hold_waiting_cargo_locked(void)
 {
     s_rt.cargo_wait_window_seen = true;
@@ -194,6 +262,9 @@ static void app_ctrl_hold_waiting_cargo_locked(void)
     s_rt.busy_deadline_ms = 0;
     app_ctrl_set_notice_locked("dock: waiting cargo", CTRL_NOTICE_SHOW_MS);
 }
+/*
+ * 组合接驳调试详情文本，给 UI 的 dock dbg 区域显示。
+ */
 static void app_ctrl_compose_detail(const app_dock_judge_result_t *dock,
                                     bool has_weight,
                                     int32_t weight_g,
@@ -201,6 +272,7 @@ static void app_ctrl_compose_detail(const app_dock_judge_result_t *dock,
                                     char *buf,
                                     size_t buf_len)
 {
+    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
     if ((dock == NULL) || (buf == NULL) || (buf_len == 0U)) {
         return;
     }
@@ -235,10 +307,14 @@ static void app_ctrl_compose_detail(const app_dock_judge_result_t *dock,
              has_weight ? "" : "-",
              has_weight ? (long)weight_g : 0L);
 }
+/*
+ * 根据接驳判定结果生成引导提示，例如向左/向右/靠近/远离。
+ */
 static void app_ctrl_compose_guidance(const app_dock_judge_result_t *dock,
                                       char *buf,
                                       size_t buf_len)
 {
+    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
     if ((dock == NULL) || (buf == NULL) || (buf_len == 0U)) {
         return;
     }
@@ -274,12 +350,16 @@ static void app_ctrl_compose_guidance(const app_dock_judge_result_t *dock,
     }
     app_dock_judge_format_status(dock, buf, buf_len);
 }
+/*
+ * 组合任务状态文本，把任务层状态和接驳层状态合并显示。
+ */
 static void app_ctrl_compose_task_status(const app_task_snapshot_t *task,
                                          const app_dock_judge_result_t *dock,
                                          bool ch32_ready,
                                          char *buf,
                                          size_t buf_len)
 {
+    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
     if (buf == NULL || buf_len == 0U || task == NULL) {
         return;
     }
@@ -326,8 +406,12 @@ static void app_ctrl_compose_task_status(const app_task_snapshot_t *task,
             break;
     }
 }
+/*
+ * 在持锁状态下把 CH32 新版协议消息合并进主控状态机。
+ */
 static void app_ctrl_apply_proto_msg_locked(const app_ch32_line_t *msg)
 {
+    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
     if (msg == NULL) {
         return;
     }
@@ -348,6 +432,9 @@ static void app_ctrl_apply_proto_msg_locked(const app_ch32_line_t *msg)
             s_rt.last_proto_flags = msg->proto_flags;
         }
         if (app_ctrl_proto_stage_is_cargo_wait_window(msg->proto_stage) ||
+/*
+ * 根据 flags 判断托盘是否已经伸出。
+ */
             ((msg->payload_len >= 8U) && app_ctrl_proto_flags_indicate_tray_out(msg->proto_flags))) {
             s_rt.cargo_wait_window_seen = true;
         }
@@ -396,24 +483,32 @@ static void app_ctrl_apply_proto_msg_locked(const app_ch32_line_t *msg)
         }
     }
 }
+/*
+ * CH32 通信模块收到消息后的上层回调入口，负责更新控制状态。
+ */
 void app_ctrl_on_ch32_line(const app_ch32_line_t *msg, void *user_ctx)
 {
     (void)user_ctx;
+    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
     if (msg == NULL) {
         return;
     }
+    // 进入临界区：下面代码会访问跨任务共享变量，必须短时间关中断/加锁保护。
     taskENTER_CRITICAL(&s_ctrl_mux);
     if (msg->is_proto) {
         app_ctrl_apply_proto_msg_locked(msg);
+        // 退出临界区：共享变量访问结束，恢复正常调度/中断。
         taskEXIT_CRITICAL(&s_ctrl_mux);
         return;
     }
     if (msg->type == APP_CH32_LINE_STATUS) {
+        // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
         if (strstr(msg->line, "CH32_READY") != NULL) {
             s_rt.ch32_ready = true;
             app_ctrl_set_notice_locked("dock: CH32 ready", CTRL_NOTICE_SHOW_MS);
         }
         const char *w = strstr(msg->line, "WEIGHT=");
+        // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
         if (w != NULL) {
             s_rt.last_weight_g = (int32_t)strtol(w + 7, NULL, 10);
             s_rt.has_weight = true;
@@ -439,8 +534,12 @@ void app_ctrl_on_ch32_line(const app_ch32_line_t *msg, void *user_ctx)
         app_ctrl_start_retrigger_cooldown_locked(CTRL_RETRIGGER_COOLDOWN_MS);
         app_ctrl_set_notice_locked("dock: CH32 error", CTRL_NOTICE_SHOW_MS);
     }
+    // 退出临界区：共享变量访问结束，恢复正常调度/中断。
     taskEXIT_CRITICAL(&s_ctrl_mux);
 }
+/*
+ * 处理触摸屏交互，例如本地启动或取消任务，避免 UI 操作直接越级控制电机。
+ */
 static void app_ctrl_handle_touch(const app_task_snapshot_t *task,
                                   bool dock_busy,
                                   uint32_t now_ms)
@@ -456,14 +555,18 @@ static void app_ctrl_handle_touch(const app_task_snapshot_t *task,
         return;
     }
     app_ui_set_coord(x, y);
+    // 进入临界区：下面代码会访问跨任务共享变量，必须短时间关中断/加锁保护。
     taskENTER_CRITICAL(&s_ctrl_mux);
     const uint32_t last_touch_ms = s_rt.last_touch_ms;
+    // 退出临界区：共享变量访问结束，恢复正常调度/中断。
     taskEXIT_CRITICAL(&s_ctrl_mux);
     if (now_ms - last_touch_ms < CTRL_TOUCH_DEBOUNCE_MS) {
         return;
     }
+    // 进入临界区：下面代码会访问跨任务共享变量，必须短时间关中断/加锁保护。
     taskENTER_CRITICAL(&s_ctrl_mux);
     s_rt.last_touch_ms = now_ms;
+    // 退出临界区：共享变量访问结束，恢复正常调度/中断。
     taskEXIT_CRITICAL(&s_ctrl_mux);
     const int32_t w = BSP_LCD_H_RES;
     const int32_t h = BSP_LCD_V_RES;
@@ -500,6 +603,9 @@ static void app_ctrl_handle_touch(const app_task_snapshot_t *task,
         return;
     }
     if (dock_busy) {
+/*
+ * 向 CH32 发送控制命令，内部会根据协议状态选择合适发送方式。
+ */
         (void)app_ch32_link_send_cmd('S');
         app_task_cancel("manual abort");
         app_ctrl_set_notice("manual abort sent", CTRL_NOTICE_SHOW_MS);
@@ -509,6 +615,9 @@ static void app_ctrl_handle_touch(const app_task_snapshot_t *task,
     }
 #endif
 }
+/*
+ * 控制后台任务，周期性读取视觉/接驳判定结果，并决定是否触发 CH32 接驳流程。
+ */
 static void app_ctrl_task(void *arg)
 {
     (void)arg;
@@ -519,8 +628,17 @@ static void app_ctrl_task(void *arg)
         app_vision_result_t vision = {0};
         app_dock_judge_result_t dock = {0};
         app_task_snapshot_t task = {0};
+/*
+ * 读取最新视觉识别结果，供接驳判定模块使用。
+ */
         (void)app_vision_get_latest_result(&vision);
+/*
+ * 接驳判定核心函数：根据最新视觉结果更新状态机，并输出当前是否可接驳。
+ */
         (void)app_dock_judge_process(&vision, &dock);
+/*
+ * 读取当前任务快照，给 UI 或 MQTT 状态上报使用。
+ */
         (void)app_task_get_snapshot(&task);
         bool ch32_ready = false;
         bool dock_busy = false;
@@ -536,6 +654,7 @@ static void app_ctrl_task(void *arg)
         uint32_t retrigger_deadline_ms = 0;
         char notice[96] = {0};
         uint16_t applied_target_id = 0;
+        // 进入临界区：下面代码会访问跨任务共享变量，必须短时间关中断/加锁保护。
         taskENTER_CRITICAL(&s_ctrl_mux);
         s_rt.ch32_ready = app_ch32_link_is_ready();
         ch32_ready = s_rt.ch32_ready;
@@ -552,24 +671,34 @@ static void app_ctrl_task(void *arg)
         retrigger_deadline_ms = s_rt.retrigger_deadline_ms;
         applied_target_id = s_rt.applied_target_id;
         strlcpy(notice, s_rt.notice, sizeof(notice));
+        // 退出临界区：共享变量访问结束，恢复正常调度/中断。
         taskEXIT_CRITICAL(&s_ctrl_mux);
         if ((task.target_dirty) || (applied_target_id != task.target_id)) {
             if (app_dock_judge_set_target_id(task.target_id, true) == ESP_OK) {
+                // 进入临界区：下面代码会访问跨任务共享变量，必须短时间关中断/加锁保护。
                 taskENTER_CRITICAL(&s_ctrl_mux);
                 s_rt.applied_target_id = task.target_id;
+                // 退出临界区：共享变量访问结束，恢复正常调度/中断。
                 taskEXIT_CRITICAL(&s_ctrl_mux);
+                // 信息日志：用于确认程序执行到了哪个阶段。
                 ESP_LOGI(TAG, "applied target id => %u", (unsigned)task.target_id);
             }
         }
         app_ctrl_handle_touch(&task, dock_busy, now_ms);
         if (!ch32_ready && (now_ms - last_probe_ms >= CTRL_READY_PROBE_INTERVAL_MS)) {
+            // 进入临界区：下面代码会访问跨任务共享变量，必须短时间关中断/加锁保护。
             taskENTER_CRITICAL(&s_ctrl_mux);
             s_rt.last_ready_probe_ms = now_ms;
+            // 退出临界区：共享变量访问结束，恢复正常调度/中断。
             taskEXIT_CRITICAL(&s_ctrl_mux);
+/*
+ * 主动探测 CH32 是否在线且 ready，常用于系统启动阶段。
+ */
             (void)app_ch32_link_probe_ready(200);
         }
         if (dock_busy && (busy_deadline_ms != 0U) && ((int32_t)(now_ms - busy_deadline_ms) >= 0)) {
             if (app_ctrl_proto_stage_is_cargo_wait_window(proto_stage) || cargo_wait_window_seen) {
+                // 进入临界区：下面代码会访问跨任务共享变量，必须短时间关中断/加锁保护。
                 taskENTER_CRITICAL(&s_ctrl_mux);
                 app_ctrl_hold_waiting_cargo_locked();
                 taskEXIT_CRITICAL(&s_ctrl_mux);
@@ -590,6 +719,9 @@ static void app_ctrl_task(void *arg)
                 proto_error = APP_CH32_ERR_TIMEOUT;
                 if (task.active || task.state == APP_TASK_STATE_DOCKING) {
                     app_task_mark_fault("CH32 timeout");
+/*
+ * 读取当前任务快照，给 UI 或 MQTT 状态上报使用。
+ */
                     (void)app_task_get_snapshot(&task);
                 }
             }
@@ -614,6 +746,9 @@ static void app_ctrl_task(void *arg)
         const bool retrigger_blocked = app_ctrl_deadline_active(retrigger_deadline_ms, now_ms);
         if (task.active && (task.state == APP_TASK_STATE_WAIT_APPROACH) && ready_level) {
             app_task_mark_auth_passed(dock.tag_id);
+/*
+ * 读取当前任务快照，给 UI 或 MQTT 状态上报使用。
+ */
             (void)app_task_get_snapshot(&task);
             app_ctrl_set_notice("auth passed / ready to dock", CTRL_NOTICE_SHOW_MS);
         }
@@ -622,6 +757,7 @@ static void app_ctrl_task(void *arg)
             if (!ch32_ready) {
                 app_ctrl_set_notice("dock: ready but CH32 not ready", CTRL_NOTICE_SHOW_MS);
             } else {
+                // 信息日志：用于确认程序执行到了哪个阶段。
                 ESP_LOGI(TAG,
                          "READY rising edge -> send @%c (id=%u dx=%ld dy=%ld z=%ld score=%u)",
                          CTRL_DOCK_CMD,
@@ -645,8 +781,12 @@ static void app_ctrl_task(void *arg)
                     dock_busy = true;
                     cargo_wait_window_seen = false;
                     app_task_mark_docking_started();
+/*
+ * 读取当前任务快照，给 UI 或 MQTT 状态上报使用。
+ */
                     (void)app_task_get_snapshot(&task);
                 } else {
+                    // 警告日志：系统还能继续运行，但某个功能可能降级或不完整。
                     ESP_LOGW(TAG, "send @%c failed: %s", CTRL_DOCK_CMD, esp_err_to_name(ret));
                     taskENTER_CRITICAL(&s_ctrl_mux);
                     s_rt.last_proto_error = APP_CH32_ERR_INTERNAL;
@@ -654,6 +794,9 @@ static void app_ctrl_task(void *arg)
                     taskEXIT_CRITICAL(&s_ctrl_mux);
                     app_ctrl_set_notice("dock: CH32 ack timeout", CTRL_NOTICE_SHOW_MS);
                     app_task_mark_fault("CH32 ack timeout");
+/*
+ * 读取当前任务快照，给 UI 或 MQTT 状态上报使用。
+ */
                     (void)app_task_get_snapshot(&task);
                 }
             }
@@ -661,21 +804,33 @@ static void app_ctrl_task(void *arg)
 #endif
         if (!prev_dock_busy && dock_busy && task.active && task.state != APP_TASK_STATE_DOCKING) {
             app_task_mark_docking_started();
+/*
+ * 读取当前任务快照，给 UI 或 MQTT 状态上报使用。
+ */
             (void)app_task_get_snapshot(&task);
         }
         if (prev_dock_busy && !dock_busy) {
             if (proto_error == APP_CH32_ERR_NONE) {
                 if (task.state == APP_TASK_STATE_DOCKING || task.active) {
                     app_task_mark_completed("dock cycle done");
+/*
+ * 读取当前任务快照，给 UI 或 MQTT 状态上报使用。
+ */
                     (void)app_task_get_snapshot(&task);
                 }
             } else {
                 app_task_mark_fault(app_ch32_link_proto_error_name(proto_error));
+/*
+ * 读取当前任务快照，给 UI 或 MQTT 状态上报使用。
+ */
                 (void)app_task_get_snapshot(&task);
             }
         }
         if ((proto_error != APP_CH32_ERR_NONE) && !dock_busy && (task.active || task.state == APP_TASK_STATE_DOCKING)) {
             app_task_mark_fault(app_ch32_link_proto_error_name(proto_error));
+/*
+ * 读取当前任务快照，给 UI 或 MQTT 状态上报使用。
+ */
             (void)app_task_get_snapshot(&task);
         }
         prev_ready_level = ready_level;
@@ -705,12 +860,17 @@ static void app_ctrl_task(void *arg)
         app_ui_set_vision_text(task_brief);
         app_ui_set_dock_text(detail);
         app_ui_update_hud(&vision, &dock);
+        // 任务延时让出 CPU，避免 while 循环空转占满系统。
         vTaskDelay(pdMS_TO_TICKS(CTRL_POLL_MS));
     }
 }
+/*
+ * 初始化控制模块运行时状态和互斥资源。
+ */
 esp_err_t app_ctrl_init(void)
 {
     if (s_rt.inited) {
+        // 正常返回 ESP_OK，表示该步骤执行成功。
         return ESP_OK;
     }
     taskENTER_CRITICAL(&s_ctrl_mux);
@@ -719,17 +879,25 @@ esp_err_t app_ctrl_init(void)
     s_rt.last_proto_error = APP_CH32_ERR_NONE;
     s_rt.inited = true;
     taskEXIT_CRITICAL(&s_ctrl_mux);
+    // 信息日志：用于确认程序执行到了哪个阶段。
     ESP_LOGI(TAG, "ctrl init done (auto_dock=%d)", CTRL_AUTO_DOCK_ENABLE);
+    // 正常返回 ESP_OK，表示该步骤执行成功。
     return ESP_OK;
 }
+/*
+ * 创建并启动接驳控制任务。
+ */
 esp_err_t app_ctrl_start(void)
 {
     if (!s_rt.inited) {
         return ESP_ERR_INVALID_STATE;
     }
+    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
     if (s_ctrl_task != NULL) {
+        // 正常返回 ESP_OK，表示该步骤执行成功。
         return ESP_OK;
     }
+    // 创建并固定 FreeRTOS 任务到指定 CPU 核，减少任务迁移带来的抖动。
     BaseType_t ret = xTaskCreatePinnedToCore(app_ctrl_task,
                                              "app_ctrl",
                                              CTRL_TASK_STACK_SIZE,
@@ -741,6 +909,8 @@ esp_err_t app_ctrl_start(void)
         s_ctrl_task = NULL;
         return ESP_FAIL;
     }
+    // 信息日志：用于确认程序执行到了哪个阶段。
     ESP_LOGI(TAG, "ctrl task started");
+    // 正常返回 ESP_OK，表示该步骤执行成功。
     return ESP_OK;
 }

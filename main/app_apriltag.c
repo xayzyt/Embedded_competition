@@ -1,31 +1,49 @@
-#include "app_apriltag.h"
-#include <float.h>
-#include <math.h>
-#include <stdbool.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <string.h>
-#include "esp_log.h"
-#include "esp_heap_caps.h"
-#define AT_MAX_WIDTH            360
-#define AT_MAX_HEIGHT           280
-#define AT_MAX_PIXELS           (AT_MAX_WIDTH * AT_MAX_HEIGHT)
-#define AT_MIN_AREA             160
-#define AT_MIN_SIDE             20
-#define AT_MAX_CANDIDATES       10
-#define AT_MAX_HAMMING          4
-#define AT_GRID_SIZE            8
-#define AT_DATA_GRID            6
-#define AT_RING_CELLS           28
-#define AT_EPS                  1e-6f
-#define AT_EDGE_MARGIN          1U
-#define AT_MAX_BOX_PCT          78U
-#define AT_MAX_BOX_AREA_PCT     72U
-static const char *TAG = "app_apriltag";
-static uint8_t *s_binary = NULL;
-static uint8_t *s_visited = NULL;
-static uint32_t *s_queue = NULL;
-static bool s_inited = false;
+/*
+ * app_apriltag.c - AprilTag Tag36h11 轻量识别模块（详细注释版）
+ *
+ * 这个文件负责在 ESP32-P4 本地对灰度图进行 AprilTag 识别。它没有依赖大型视觉库，
+ * 而是自己完成二值化、候选区域连通域搜索、四边形校验、透视采样、bit 解码、码表匹配等流程。
+ *
+ * 在你的 SkyAnchor 项目里，它处在“视觉底层算法”位置：
+ * - app_camera.c 负责采集摄像头画面；
+ * - app_vision.c 把 RGB565 画面转成灰度图，并调用本文件的 app_apriltag_detect_tag36h11()；
+ * - app_dock_judge.c 再根据识别结果判断无人机 ID、距离和稳定性是否满足接驳条件。
+ *
+ * 注意：文件中 s_tag36h11_codes[] 是 Tag36h11 官方码族的查表数据，属于纯数据表，
+ * 不需要逐个常量解释；真正需要理解的是“从图像找候选框 -> 采样网格 -> 计算汉明距离 -> 输出 tag 结果”的流程。
+ */
+
+#include "app_apriltag.h"                          // 项目自定义模块头文件，声明 app_apriltag 对外提供的接口。
+#include <float.h>                                 // 浮点数极值定义，用于几何计算时初始化最小/最大值。
+#include <math.h>                                  // 数学函数，例如 sqrtf、fabsf、atan2f，用于图像几何计算。
+#include <stdbool.h>                               // C99 布尔类型支持，提供 bool、true、false。
+#include <stdint.h>                                // 固定宽度整数类型，例如 uint8_t、uint16_t、uint32_t，嵌入式代码常用。
+#include <stdio.h>                                 // C 标准输入输出库，主要用于 snprintf/printf 这类格式化字符串操作。
+#include <string.h>                                // 字符串和内存处理函数，例如 memset、memcpy、strlen、strstr。
+#include "esp_log.h"                               // ESP-IDF 日志系统，提供 ESP_LOGI/ESP_LOGE 等调试输出。
+#include "esp_heap_caps.h"                         // 带内存能力属性的堆分配接口，例如申请 PSRAM/DMA 可访问内存。
+#define AT_MAX_WIDTH            360                      // 最大门限，用于限制资源或过滤异常数据。
+#define AT_MAX_HEIGHT           280                      // 最大门限，用于限制资源或过滤异常数据。
+#define AT_MAX_PIXELS           (AT_MAX_WIDTH * AT_MAX_HEIGHT) // 最大门限，用于限制资源或过滤异常数据。
+#define AT_MIN_AREA             160                      // 最小门限，用于过滤异常数据。
+#define AT_MIN_SIDE             20                       // 最小门限，用于过滤异常数据。
+#define AT_MAX_CANDIDATES       10                       // 最大门限，用于限制资源或过滤异常数据。
+#define AT_MAX_HAMMING          4                        // 最大门限，用于限制资源或过滤异常数据。
+#define AT_GRID_SIZE            8                        // AprilTag 网格尺寸相关定义。
+#define AT_DATA_GRID            6                        // AprilTag 网格尺寸相关定义。
+#define AT_RING_CELLS           28                       // AprilTag 检测算法相关常量。
+#define AT_EPS                  1e-6f                    // 浮点计算中的极小值，用来避免除零或病态矩阵。
+#define AT_EDGE_MARGIN          1U                       // AprilTag 检测算法相关常量。
+#define AT_MAX_BOX_PCT          78U                      // 最大门限，用于限制资源或过滤异常数据。
+#define AT_MAX_BOX_AREA_PCT     72U                      // 最大门限，用于限制资源或过滤异常数据。
+static const char *TAG = "app_apriltag";                         // ESP-IDF 日志标签，串口日志会用它标明当前消息来自哪个模块。
+static uint8_t *s_binary = NULL;                                 // 模块级静态变量 s_binary，只在本文件内部使用，避免被其他文件直接修改。
+static uint8_t *s_visited = NULL;                                // 模块级静态变量 s_visited，只在本文件内部使用，避免被其他文件直接修改。
+static uint32_t *s_queue = NULL;                                 // 模块级静态变量 s_queue，只在本文件内部使用，避免被其他文件直接修改。
+static bool s_inited = false;                                    // 模块级静态变量 s_inited，只在本文件内部使用，避免被其他文件直接修改。
+/*
+ * Tag36h11 合法码表。检测时会把采样出的 6x6 数据位打包成编码，然后遍历这个表寻找汉明距离最近的 ID。这里是纯数据，不建议逐个常量解释，否则反而影响阅读。
+ */
 static const uint64_t s_tag36h11_codes[587] = {
     0x21a146babULL,
     0x92d18fe9bULL,
@@ -615,16 +633,22 @@ static const uint64_t s_tag36h11_codes[587] = {
     0xdf1609a24ULL,
     0xced27dc17ULL,
 };
-static const uint8_t s_tag36h11_bit_x[36] = {
+static const uint8_t s_tag36h11_bit_x[36] = {                    // 模块级静态变量 s_tag36h11_bit_x，只在本文件内部使用，避免被其他文件直接修改。
     1,2,3,4,5,2,3,4,3,6,6,6,6,6,5,5,5,4,6,5,4,3,2,5,4,3,4,1,1,1,1,1,2,2,2,3
 };
-static const uint8_t s_tag36h11_bit_y[36] = {
+static const uint8_t s_tag36h11_bit_y[36] = {                    // 模块级静态变量 s_tag36h11_bit_y，只在本文件内部使用，避免被其他文件直接修改。
     1,1,1,1,1,2,2,2,3,1,2,3,4,5,2,3,4,3,6,6,6,6,6,5,5,5,4,6,5,4,3,2,5,4,3,4
 };
+/*
+ * 结构体类型：把同一类运行时数据或协议字段打包在一起，方便函数之间传递。
+ */
 typedef struct {
     float x;
     float y;
 } at_pt_t;
+/*
+ * 结构体类型：把同一类运行时数据或协议字段打包在一起，方便函数之间传递。
+ */
 typedef struct {
     bool valid;
     uint32_t area;
@@ -640,6 +664,9 @@ typedef struct {
     at_pt_t bl;
     uint32_t score;
 } at_candidate_t;
+/*
+ * 枚举类型：用一组有名字的常量表示状态/类型，比直接写数字更清晰，也方便调试。
+ */
 typedef enum {
     AT_DBG_NONE = 0,
     AT_DBG_FAIL_VALIDATE_QUAD,
@@ -648,6 +675,9 @@ typedef enum {
     AT_DBG_FAIL_BORDER,
     AT_DBG_FAIL_HAMMING,
 } at_dbg_fail_stage_t;
+/*
+ * 结构体类型：把同一类运行时数据或协议字段打包在一起，方便函数之间传递。
+ */
 typedef struct {
     bool used;
     at_dbg_fail_stage_t fail_stage;
@@ -669,6 +699,9 @@ typedef struct {
     uint8_t cells[AT_GRID_SIZE][AT_GRID_SIZE];
     uint8_t bits0[AT_DATA_GRID][AT_DATA_GRID];
 } at_debug_info_t;
+/*
+ * 枚举类型：用一组有名字的常量表示状态/类型，比直接写数字更清晰，也方便调试。
+ */
 typedef enum {
     AT_BITS_IDENTITY = 0,
     AT_BITS_MIRROR_X,
@@ -678,6 +711,9 @@ typedef enum {
     AT_BITS_TRANSPOSE_MIRROR_Y,
     AT_BITS_TRANSFORM_COUNT,
 } at_bits_transform_t;
+/*
+ * 枚举类型：用一组有名字的常量表示状态/类型，比直接写数字更清晰，也方便调试。
+ */
 typedef enum {
     AT_PACK_FAMILY_MSB = 0,
     AT_PACK_FAMILY_LSB,
@@ -687,6 +723,9 @@ typedef enum {
     AT_PACK_COL_LSB,
     AT_PACK_MODE_COUNT,
 } at_pack_mode_t;
+/*
+ * 把调试失败阶段枚举转换成可读字符串，方便串口日志直接看出 AprilTag 解码失败卡在哪一步。
+ */
 static const char *at_dbg_fail_stage_str(at_dbg_fail_stage_t s)
 {
     switch (s) {
@@ -699,6 +738,9 @@ static const char *at_dbg_fail_stage_str(at_dbg_fail_stage_t s)
     default: return "unknown";
     }
 }
+/*
+ * 打印 8x8 采样网格的明暗结果，用于调试标签边框/单元格采样是否正确。
+ */
 static void at_dbg_log_cells(const uint8_t cells[AT_GRID_SIZE][AT_GRID_SIZE])
 {
     for (uint32_t r = 0; r < AT_GRID_SIZE; r++) {
@@ -709,9 +751,13 @@ static void at_dbg_log_cells(const uint8_t cells[AT_GRID_SIZE][AT_GRID_SIZE])
                             (unsigned)cells[r][c], (c + 1U < AT_GRID_SIZE) ? " " : "");
             if (off >= (int)sizeof(row)) break;
         }
+        // 警告日志：系统还能继续运行，但某个功能可能降级或不完整。
         ESP_LOGW(TAG, "cells[%u]: %s", (unsigned)r, row);
     }
 }
+/*
+ * 打印 6x6 数据区 bit 矩阵，用于核对最终参与 Tag36h11 编码匹配的数据位。
+ */
 static void at_dbg_log_bits(const uint8_t bits[AT_DATA_GRID][AT_DATA_GRID])
 {
     for (uint32_t r = 0; r < AT_DATA_GRID; r++) {
@@ -720,12 +766,18 @@ static void at_dbg_log_bits(const uint8_t bits[AT_DATA_GRID][AT_DATA_GRID])
             row[c] = bits[r][c] ? '1' : '0';
         }
         row[AT_DATA_GRID] = '\0';
+        // 警告日志：系统还能继续运行，但某个功能可能降级或不完整。
         ESP_LOGW(TAG, "bits[%u]: %s", (unsigned)r, row);
     }
 }
+/*
+ * 集中输出某个候选框的调试信息，包括候选序号、图像尺寸、失败阶段等。
+ */
 static void at_dbg_log_info(const at_debug_info_t *dbg, int cand_index, uint32_t width, uint32_t height)
 {
+    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
     if (dbg == NULL || !dbg->used) return;
+    // 警告日志：系统还能继续运行，但某个功能可能降级或不完整。
     ESP_LOGW(TAG,
              "dbg cand=%d fail=%s frame=%ux%u area=%u bbox=[%u,%u %ux%u] center=(%.1f,%.1f)",
              cand_index,
@@ -739,12 +791,14 @@ static void at_dbg_log_info(const at_debug_info_t *dbg, int cand_index, uint32_t
              (unsigned)(dbg->cand.max_y - dbg->cand.min_y + 1U),
              dbg->cand.cx,
              dbg->cand.cy);
+    // 警告日志：系统还能继续运行，但某个功能可能降级或不完整。
     ESP_LOGW(TAG,
              "dbg quad tl=(%.1f,%.1f) tr=(%.1f,%.1f) br=(%.1f,%.1f) bl=(%.1f,%.1f)",
              dbg->cand.tl.x, dbg->cand.tl.y,
              dbg->cand.tr.x, dbg->cand.tr.y,
              dbg->cand.br.x, dbg->cand.br.y,
              dbg->cand.bl.x, dbg->cand.bl.y);
+    // 警告日志：系统还能继续运行，但某个功能可能降级或不完整。
     ESP_LOGW(TAG,
              "dbg thr otsu=%u decode=%u black=%u dark=%u white=%u border=%u%% best(id=%u rot=%u ham=%u mode=%s)",
              (unsigned)dbg->otsu_threshold,
@@ -758,6 +812,7 @@ static void at_dbg_log_info(const at_debug_info_t *dbg, int cand_index, uint32_t
              (unsigned)dbg->best_hamming,
              dbg->best_desc);
     for (int rot = 0; rot < 4; rot++) {
+        // 警告日志：系统还能继续运行，但某个功能可能降级或不完整。
         ESP_LOGW(TAG,
                  "dbg rot=%d mode=%s code=0x%09llx best_id=%u ham=%u",
                  rot,
@@ -769,10 +824,16 @@ static void at_dbg_log_info(const at_debug_info_t *dbg, int cand_index, uint32_t
     at_dbg_log_cells(dbg->cells);
     at_dbg_log_bits(dbg->bits0);
 }
+/*
+ * 把二维图像坐标 (x,y) 转成一维数组下标，灰度图/二值图都按行优先连续存储。
+ */
 static inline uint32_t at_index(uint32_t x, uint32_t y, uint32_t width)
 {
     return y * width + x;
 }
+/*
+ * 使用 Otsu 大津法自动计算灰度阈值，让二值化不依赖固定光照条件。
+ */
 static uint8_t at_otsu_threshold(const uint8_t *gray, uint32_t width, uint32_t height)
 {
     uint32_t hist[256] = {0};
@@ -802,6 +863,9 @@ static uint8_t at_otsu_threshold(const uint8_t *gray, uint32_t width, uint32_t h
     }
     return best_t;
 }
+/*
+ * 计算两个 64 位编码之间的汉明距离，用于判断采样出的 tag code 最接近哪个合法 ID。
+ */
 static inline uint32_t at_hamming64(uint64_t a, uint64_t b)
 {
     uint64_t x = a ^ b;
@@ -813,6 +877,9 @@ static inline uint32_t at_hamming64(uint64_t a, uint64_t b)
     return c;
 #endif
 }
+/*
+ * 根据阈值把灰度图转成黑白二值图，后续连通域搜索只在二值图上进行。
+ */
 static void at_threshold_binary(const uint8_t *gray, uint32_t width, uint32_t height, uint8_t threshold)
 {
     const uint32_t total = width * height;
@@ -821,6 +888,9 @@ static void at_threshold_binary(const uint8_t *gray, uint32_t width, uint32_t he
         s_visited[i] = 0U;
     }
 }
+/*
+ * 根据连通域面积、宽高、比例等条件过滤明显不像 AprilTag 的区域。
+ */
 static bool at_filter_component(uint32_t area,
                                 uint32_t min_x,
                                 uint32_t min_y,
@@ -843,16 +913,24 @@ static bool at_filter_component(uint32_t area,
     *score_out = score;
     return true;
 }
+/*
+ * 判断候选框是否贴到图像边缘；贴边目标通常不完整，容易误判。
+ */
 static bool at_candidate_touch_edge(const at_candidate_t *cand, uint32_t width, uint32_t height, uint32_t margin)
 {
+    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
     if (cand == NULL || width == 0U || height == 0U) return true;
     if (cand->min_x <= margin || cand->min_y <= margin) return true;
     if (cand->max_x + margin >= width - 1U) return true;
     if (cand->max_y + margin >= height - 1U) return true;
     return false;
 }
+/*
+ * 过滤过大的候选框，避免整片阴影/屏幕边缘被误认为 tag。
+ */
 static bool at_candidate_too_large(const at_candidate_t *cand, uint32_t width, uint32_t height)
 {
+    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
     if (cand == NULL || width == 0U || height == 0U) return true;
     uint32_t bw = cand->max_x - cand->min_x + 1U;
     uint32_t bh = cand->max_y - cand->min_y + 1U;
@@ -862,6 +940,9 @@ static bool at_candidate_too_large(const at_candidate_t *cand, uint32_t width, u
     if ((box_area * 100U) >= (width * height * AT_MAX_BOX_AREA_PCT)) return true;
     return false;
 }
+/*
+ * 把新的候选区域按面积/质量插入候选列表，只保留最值得继续解码的前几个候选。
+ */
 static void at_insert_candidate(at_candidate_t *cands, int *count, const at_candidate_t *cand)
 {
     if (!cand->valid) return;
@@ -877,6 +958,9 @@ static void at_insert_candidate(at_candidate_t *cands, int *count, const at_cand
         if (cand->score > cands[worst].score) cands[worst] = *cand;
     }
 }
+/*
+ * 在二值图上做连通域搜索，找到可能是 AprilTag 黑色外框的候选区域。
+ */
 static int at_collect_candidates(uint32_t width, uint32_t height, at_candidate_t *cands)
 {
     int count = 0;
@@ -949,12 +1033,18 @@ static int at_collect_candidates(uint32_t width, uint32_t height, at_candidate_t
     }
     return count;
 }
+/*
+ * 计算两个点之间的平方距离，避免不必要的 sqrt，提高几何判断效率。
+ */
 static float at_dist2(const at_pt_t *a, const at_pt_t *b)
 {
     float dx = a->x - b->x;
     float dy = a->y - b->y;
     return dx * dx + dy * dy;
 }
+/*
+ * 检查候选框是否像一个合理四边形，过滤太小、比例异常或形状不稳定的区域。
+ */
 static bool at_validate_quad(const at_candidate_t *cand)
 {
     float d0 = at_dist2(&cand->tl, &cand->tr);
@@ -966,6 +1056,9 @@ static bool at_validate_quad(const at_candidate_t *cand)
     if (at_dist2(&cand->tr, &cand->bl) < 100.0f) return false;
     return true;
 }
+/*
+ * 求解从标准 tag 网格坐标到图像四边形坐标的单应矩阵，用于透视校正采样。
+ */
 static bool at_solve_homography(const at_pt_t quad[4], float H[9])
 {
     float A[8][9];
@@ -1026,6 +1119,9 @@ static bool at_solve_homography(const at_pt_t quad[4], float H[9])
     H[6] = A[6][8]; H[7] = A[7][8]; H[8] = 1.0f;
     return true;
 }
+/*
+ * 使用单应矩阵把标准网格点投影到原图坐标，找到应该采样的像素位置。
+ */
 static void at_project(const float H[9], float u, float v, float *x, float *y)
 {
     float den = H[6] * u + H[7] * v + H[8];
@@ -1033,6 +1129,9 @@ static void at_project(const float H[9], float u, float v, float *x, float *y)
     *x = (H[0] * u + H[1] * v + H[2]) / den;
     *y = (H[3] * u + H[4] * v + H[5]) / den;
 }
+/*
+ * 对灰度图做双线性插值采样，比直接取整像素更平滑，减少边界抖动。
+ */
 static uint8_t at_sample_bilinear(const uint8_t *gray, uint32_t width, uint32_t height, float x, float y)
 {
     if (x < 0.0f) x = 0.0f;
@@ -1056,6 +1155,9 @@ static uint8_t at_sample_bilinear(const uint8_t *gray, uint32_t width, uint32_t 
     if (v > 255.0f) v = 255.0f;
     return (uint8_t)(v + 0.5f);
 }
+/*
+ * 在某个 tag 单元格中心附近取样，判断该格更偏黑还是偏白。
+ */
 static uint8_t at_sample_cell(const uint8_t *gray, uint32_t width, uint32_t height, const float H[9], float gx, float gy)
 {
     static const float offs[5][2] = { {0.5f, 0.5f}, {0.3f, 0.5f}, {0.7f, 0.5f}, {0.5f, 0.3f}, {0.5f, 0.7f} };
@@ -1067,6 +1169,9 @@ static uint8_t at_sample_cell(const uint8_t *gray, uint32_t width, uint32_t heig
     }
     return (uint8_t)(sum / 5U);
 }
+/*
+ * 把 6x6 数据区顺时针旋转，用于尝试 tag 的不同朝向。
+ */
 static void at_rotate_bits_cw(const uint8_t src[AT_DATA_GRID][AT_DATA_GRID], uint8_t dst[AT_DATA_GRID][AT_DATA_GRID])
 {
     for (uint32_t r = 0; r < AT_DATA_GRID; r++) {
@@ -1075,6 +1180,9 @@ static void at_rotate_bits_cw(const uint8_t src[AT_DATA_GRID][AT_DATA_GRID], uin
         }
     }
 }
+/*
+ * 把 bit 旋转/翻转方式转换为文本，便于调试不同方向的解码结果。
+ */
 static const char *at_transform_name(at_bits_transform_t tf)
 {
     switch (tf) {
@@ -1087,6 +1195,9 @@ static const char *at_transform_name(at_bits_transform_t tf)
     default: return "?";
     }
 }
+/*
+ * 把 bit 打包模式转换为文本，便于调试不同编码顺序。
+ */
 static const char *at_pack_mode_name(at_pack_mode_t mode)
 {
     switch (mode) {
@@ -1099,6 +1210,9 @@ static const char *at_pack_mode_name(at_pack_mode_t mode)
     default: return "?";
     }
 }
+/*
+ * 按旋转/翻转方式变换 6x6 bit 矩阵，用于尝试不同方向或镜像情况下的编码匹配。
+ */
 static void at_transform_bits(const uint8_t src[AT_DATA_GRID][AT_DATA_GRID],
                               at_bits_transform_t tf,
                               uint8_t dst[AT_DATA_GRID][AT_DATA_GRID])
@@ -1131,6 +1245,9 @@ static void at_transform_bits(const uint8_t src[AT_DATA_GRID][AT_DATA_GRID],
         }
     }
 }
+/*
+ * 按 Tag36h11 码族约定顺序把 6x6 数据位打包成 64 位编码。
+ */
 static uint64_t at_build_code_family(const uint8_t bits[AT_DATA_GRID][AT_DATA_GRID], bool lsb_first)
 {
     uint64_t code = 0;
@@ -1151,6 +1268,9 @@ static uint64_t at_build_code_family(const uint8_t bits[AT_DATA_GRID][AT_DATA_GR
     }
     return code;
 }
+/*
+ * 按行优先方式把 6x6 bit 打包成编码，用于兼容不同采样/码表组织方式。
+ */
 static uint64_t at_build_code_row_major(const uint8_t bits[AT_DATA_GRID][AT_DATA_GRID], bool lsb_first)
 {
     uint64_t code = 0;
@@ -1166,6 +1286,9 @@ static uint64_t at_build_code_row_major(const uint8_t bits[AT_DATA_GRID][AT_DATA
     }
     return code;
 }
+/*
+ * 按列优先方式把 6x6 bit 打包成编码，用于辅助排查或兼容不同 bit 顺序。
+ */
 static uint64_t at_build_code_col_major(const uint8_t bits[AT_DATA_GRID][AT_DATA_GRID], bool lsb_first)
 {
     uint64_t code = 0;
@@ -1181,6 +1304,9 @@ static uint64_t at_build_code_col_major(const uint8_t bits[AT_DATA_GRID][AT_DATA
     }
     return code;
 }
+/*
+ * 根据指定打包模式生成候选编码，然后与合法 Tag36h11 码表匹配。
+ */
 static uint64_t at_build_code_variant(const uint8_t bits[AT_DATA_GRID][AT_DATA_GRID], at_pack_mode_t mode)
 {
     switch (mode) {
@@ -1200,6 +1326,9 @@ static uint64_t at_build_code_variant(const uint8_t bits[AT_DATA_GRID][AT_DATA_G
         return 0ULL;
     }
 }
+/*
+ * 遍历 Tag36h11 码表，找出与当前编码汉明距离最小的 tag ID。
+ */
 static void at_match_code(uint64_t code, uint16_t *best_id, uint32_t *best_h)
 {
     *best_h = UINT32_MAX;
@@ -1213,6 +1342,9 @@ static void at_match_code(uint64_t code, uint16_t *best_id, uint32_t *best_h)
         }
     }
 }
+/*
+ * 对单个候选四边形完成透视采样、边框校验、bit 解码和码表匹配。
+ */
 static bool at_decode_with_quad(const uint8_t *gray,
                                 uint32_t width,
                                 uint32_t height,
@@ -1401,31 +1533,46 @@ static bool at_decode_with_quad(const uint8_t *gray,
     if (dbg) dbg->fail_stage = AT_DBG_NONE;
     return true;
 }
+/*
+ * 初始化 AprilTag 模块所需的工作缓冲区，例如二值图、访问标记和 BFS 队列。
+ */
 esp_err_t app_apriltag_init(void)
 {
+    // 正常返回 ESP_OK，表示该步骤执行成功。
     if (s_inited) return ESP_OK;
     s_binary = (uint8_t *)heap_caps_malloc(AT_MAX_PIXELS, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     s_visited = (uint8_t *)heap_caps_malloc(AT_MAX_PIXELS, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     s_queue = (uint32_t *)heap_caps_malloc(sizeof(uint32_t) * AT_MAX_PIXELS, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
     if (s_binary == NULL || s_visited == NULL || s_queue == NULL) {
+        // 释放 heap_caps 分配的缓冲区。
         if (s_binary) heap_caps_free(s_binary);
+        // 释放 heap_caps 分配的缓冲区。
         if (s_visited) heap_caps_free(s_visited);
+        // 释放 heap_caps 分配的缓冲区。
         if (s_queue) heap_caps_free(s_queue);
         s_binary = NULL;
         s_visited = NULL;
         s_queue = NULL;
+        // 内存不足是嵌入式项目常见问题，这里返回错误让上层决定是否停止初始化。
         return ESP_ERR_NO_MEM;
     }
     s_inited = true;
+    // 信息日志：用于确认程序执行到了哪个阶段。
     ESP_LOGI(TAG, "local perspective tag36h11 detector ready");
+    // 正常返回 ESP_OK，表示该步骤执行成功。
     return ESP_OK;
 }
+/*
+ * 对一帧灰度图执行完整 Tag36h11 检测，输出 ID、中心点、边框、角点、汉明距离等结果。
+ */
 bool app_apriltag_detect_tag36h11(const uint8_t *gray,
                                   uint32_t width,
                                   uint32_t height,
                                   app_apriltag_result_t *out)
 {
     if (!s_inited) return false;
+    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
     if (gray == NULL || out == NULL || width == 0U || height == 0U) return false;
     if (width > AT_MAX_WIDTH || height > AT_MAX_HEIGHT || (width * height) > AT_MAX_PIXELS) return false;
     memset(out, 0, sizeof(*out));

@@ -1,8 +1,25 @@
-#include "app_dock_judge.h"
-#include <stdio.h>
-#include <string.h>
-#include "esp_log.h"
-static const char *TAG = "app_dock";
+/*
+ * app_dock_judge.c - 无人机接驳条件判定模块（详细注释版）
+ *
+ * 这个文件不直接控制电机，也不直接做图像识别，而是把 app_vision.c 输出的 AprilTag 结果转成“是否允许接驳”的工程判断。
+ * 它会检查：
+ * - 识别到的 tag ID 是否是目标无人机；
+ * - 目标是否在画面中心附近；
+ * - 根据标签成像边长估算出的距离是否在安全范围内；
+ * - 多帧稳定计数是否达标；
+ * - 识别丢失时是否需要保留上一帧状态，避免 UI 和状态机抖动。
+ *
+ * 这个模块相当于视觉算法和控制状态机之间的“安全闸门”。
+ */
+
+#include "app_dock_judge.h"                        // 项目自定义模块头文件，声明 app_dock_judge 对外提供的接口。
+#include <stdio.h>                                 // C 标准输入输出库，主要用于 snprintf/printf 这类格式化字符串操作。
+#include <string.h>                                // 字符串和内存处理函数，例如 memset、memcpy、strlen、strstr。
+#include "esp_log.h"                               // ESP-IDF 日志系统，提供 ESP_LOGI/ESP_LOGE 等调试输出。
+static const char *TAG = "app_dock";                             // ESP-IDF 日志标签，串口日志会用它标明当前消息来自哪个模块。
+/*
+ * 结构体类型：把同一类运行时数据或协议字段打包在一起，方便函数之间传递。
+ */
 typedef struct {
     bool have_filter;
     uint16_t last_tag_id;
@@ -20,17 +37,26 @@ typedef struct {
     float filtered_angle_deg;
     app_dock_state_t last_state;
 } app_dock_judge_runtime_t;
-static app_dock_judge_config_t s_cfg = {0};
-static app_dock_judge_runtime_t s_rt = {0};
-static bool s_inited = false;
+static app_dock_judge_config_t s_cfg = {0};                      // 模块级静态变量 s_cfg，只在本文件内部使用，避免被其他文件直接修改。
+static app_dock_judge_runtime_t s_rt = {0};                      // 模块级静态变量 s_rt，只在本文件内部使用，避免被其他文件直接修改。
+static bool s_inited = false;                                    // 模块级静态变量 s_inited，只在本文件内部使用，避免被其他文件直接修改。
+/*
+ * 求 int32 绝对值，用于中心偏移和距离波动计算。
+ */
 static inline int32_t app_abs_i32(int32_t v)
 {
     return (v >= 0) ? v : -v;
 }
+/*
+ * 饱和自增 uint8，避免稳定计数超过最大值后溢出归零。
+ */
 static inline uint8_t app_sat_inc_u8(uint8_t v)
 {
     return (v == UINT8_MAX) ? UINT8_MAX : (uint8_t)(v + 1U);
 }
+/*
+ * 整数指数滑动平均滤波，用来平滑中心点、距离等抖动数据。
+ */
 static int32_t app_filter_ema_i32(int32_t prev, int32_t sample, uint8_t shift)
 {
     if (shift == 0U) {
@@ -40,6 +66,9 @@ static int32_t app_filter_ema_i32(int32_t prev, int32_t sample, uint8_t shift)
     return prev + ((delta >= 0) ? ((delta + (1 << (shift - 1))) >> shift)
                                 : -(((-delta) + (1 << (shift - 1))) >> shift));
 }
+/*
+ * 浮点指数滑动平均滤波，用来平滑边长或角度等浮点量。
+ */
 static float app_filter_ema_f32(float prev, float sample, uint8_t shift)
 {
     if (shift == 0U) {
@@ -48,12 +77,18 @@ static float app_filter_ema_f32(float prev, float sample, uint8_t shift)
     const float alpha = 1.0f / (float)(1U << shift);
     return prev + (sample - prev) * alpha;
 }
+/*
+ * 把数值限制在指定范围内，避免异常输入影响判定。
+ */
 static int32_t app_clip_i32(int32_t v, int32_t lo, int32_t hi)
 {
     if (v < lo) return lo;
     if (v > hi) return hi;
     return v;
 }
+/*
+ * 把视觉识别结果写入接驳运行时，并对中心点、距离等关键量做滤波。
+ */
 static void app_dock_apply_filter(const app_vision_result_t *vision)
 {
     if (!s_rt.have_filter || (s_rt.last_tag_id != vision->tag_id)) {
@@ -94,6 +129,9 @@ static void app_dock_apply_filter(const app_vision_result_t *vision)
                                                  vision->top_edge_angle_deg,
                                                  s_cfg.ema_shift);
 }
+/*
+ * 根据标签真实尺寸、焦距和图像边长估算无人机距离。
+ */
 static int32_t app_dock_estimate_distance_mm(float edge_px)
 {
     if (edge_px <= 1.0f || s_cfg.focal_length_px <= 1.0f || s_cfg.tag_size_mm <= 0) {
@@ -101,6 +139,9 @@ static int32_t app_dock_estimate_distance_mm(float edge_px)
     }
     return (int32_t)((s_cfg.focal_length_px * (float)s_cfg.tag_size_mm / edge_px) + 0.5f);
 }
+/*
+ * 把中心偏移、距离合法性、稳定帧数等信息换算成悬停稳定评分。
+ */
 static uint8_t app_dock_calc_hover_score(const app_dock_judge_result_t *out)
 {
     int32_t center_x_score = 0;
@@ -110,7 +151,13 @@ static uint8_t app_dock_calc_hover_score(const app_dock_judge_result_t *out)
     int32_t dist_score = 0;
     const int32_t x_den = (s_cfg.center_x_tol > 0) ? (s_cfg.center_x_tol * 2) : 1;
     const int32_t y_den = (s_cfg.center_y_tol > 0) ? (s_cfg.center_y_tol * 2) : 1;
+/*
+ * 把数值限制在指定范围内，避免异常输入影响判定。
+ */
     center_x_score = 100 - app_clip_i32((app_abs_i32(out->dx) * 100) / x_den, 0, 100);
+/*
+ * 把数值限制在指定范围内，避免异常输入影响判定。
+ */
     center_y_score = 100 - app_clip_i32((app_abs_i32(out->dy) * 100) / y_den, 0, 100);
     if (s_cfg.min_stable_count > 0) {
         stable_score = app_clip_i32(((int32_t)out->stable_count * 100) / (int32_t)s_cfg.min_stable_count, 0, 100);
@@ -126,6 +173,9 @@ static uint8_t app_dock_calc_hover_score(const app_dock_judge_result_t *out)
             } else {
                 const int32_t target_mid = (s_cfg.min_distance_mm + s_cfg.max_distance_mm) / 2;
                 const int32_t tol = ((s_cfg.max_distance_mm - s_cfg.min_distance_mm) / 2) + 1;
+/*
+ * 把数值限制在指定范围内，避免异常输入影响判定。
+ */
                 dist_score = 100 - app_clip_i32((app_abs_i32(out->est_distance_mm - target_mid) * 100) / tol, 0, 100);
             }
         } else {
@@ -145,6 +195,9 @@ static uint8_t app_dock_calc_hover_score(const app_dock_judge_result_t *out)
     }
     return (uint8_t)app_clip_i32(score, 0, 100);
 }
+/*
+ * 把视觉结果和滤波后的运行时数据填入基础判定结果结构体。
+ */
 static void app_dock_fill_result_base(const app_vision_result_t *vision,
                                       app_dock_judge_result_t *out)
 {
@@ -172,8 +225,12 @@ static void app_dock_fill_result_base(const app_vision_result_t *vision,
     out->invalid_hold_count = s_rt.invalid_hold_count;
     out->est_distance_mm = app_dock_estimate_distance_mm(s_rt.filtered_edge_px);
 }
+/*
+ * 生成默认接驳判定参数，main.c 可以在此基础上修改目标 ID、距离阈值等。
+ */
 void app_dock_judge_get_default_config(app_dock_judge_config_t *out)
 {
+    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
     if (out == NULL) {
         return;
     }
@@ -200,14 +257,20 @@ void app_dock_judge_get_default_config(app_dock_judge_config_t *out)
     out->wrong_id_enter_frames = 2;
     out->lost_hold_frames = 3;
 }
+/*
+ * 初始化接驳判定模块配置和运行时状态。
+ */
 esp_err_t app_dock_judge_init(const app_dock_judge_config_t *cfg)
 {
+    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
     if (cfg == NULL) {
+        // 参数不合法时立即返回错误码，避免后面继续访问非法内存。
         return ESP_ERR_INVALID_ARG;
     }
     s_cfg = *cfg;
     app_dock_judge_reset();
     s_inited = true;
+    // 信息日志：用于确认程序执行到了哪个阶段。
     ESP_LOGI(TAG,
              "dock init: target_en=%d target_id=%u ref=(%ld,%ld) tol=(%ld,%ld) area>=%ld bbox>=(%ld,%ld) stable>=%u tag=%ldmm focal=%.1fpx dist_gate=%d dist=[%ld,%ld]",
              s_cfg.use_target_id,
@@ -225,16 +288,25 @@ esp_err_t app_dock_judge_init(const app_dock_judge_config_t *cfg)
              s_cfg.use_distance_gate,
              (long)s_cfg.min_distance_mm,
              (long)s_cfg.max_distance_mm);
+    // 正常返回 ESP_OK，表示该步骤执行成功。
     return ESP_OK;
 }
+/*
+ * 读取当前接驳判定配置。
+ */
 esp_err_t app_dock_judge_get_config(app_dock_judge_config_t *out)
 {
+    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
     if (!s_inited || out == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
     *out = s_cfg;
+    // 正常返回 ESP_OK，表示该步骤执行成功。
     return ESP_OK;
 }
+/*
+ * 运行时修改目标 tag ID，可用于云端/小程序切换订单目标。
+ */
 esp_err_t app_dock_judge_set_target_id(uint16_t target_tag_id, bool enable_filter)
 {
     if (!s_inited) {
@@ -250,17 +322,26 @@ esp_err_t app_dock_judge_set_target_id(uint16_t target_tag_id, bool enable_filte
     s_rt.wrong_id_count = 0;
     s_rt.invalid_hold_count = 0;
     s_rt.last_state = APP_DOCK_STATE_SEARCHING;
+    // 信息日志：用于确认程序执行到了哪个阶段。
     ESP_LOGI(TAG, "dock target updated: enable=%d target_id=%u", s_cfg.use_target_id, (unsigned)s_cfg.target_tag_id);
+    // 正常返回 ESP_OK，表示该步骤执行成功。
     return ESP_OK;
 }
+/*
+ * 清空滤波和状态机历史，重新开始判断。
+ */
 void app_dock_judge_reset(void)
 {
     memset(&s_rt, 0, sizeof(s_rt));
     s_rt.last_state = APP_DOCK_STATE_SEARCHING;
 }
+/*
+ * 接驳判定核心函数：根据最新视觉结果更新状态机，并输出当前是否可接驳。
+ */
 bool app_dock_judge_process(const app_vision_result_t *vision,
                             app_dock_judge_result_t *out)
 {
+    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
     if (!s_inited || vision == NULL || out == NULL) {
         return false;
     }
@@ -393,6 +474,9 @@ bool app_dock_judge_process(const app_vision_result_t *vision,
     out->invalid_hold_count = s_rt.invalid_hold_count;
     return true;
 }
+/*
+ * 把接驳状态枚举转换为 UI/日志可读字符串。
+ */
 const char *app_dock_judge_state_to_text(app_dock_state_t state)
 {
     switch (state) {
@@ -410,10 +494,14 @@ const char *app_dock_judge_state_to_text(app_dock_state_t state)
             return "unknown";
     }
 }
+/*
+ * 把接驳判定结果格式化成短状态文本，适合显示在主状态栏。
+ */
 void app_dock_judge_format_status(const app_dock_judge_result_t *result,
                                   char *buf,
                                   size_t buf_len)
 {
+    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
     if (result == NULL || buf == NULL || buf_len == 0) {
         return;
     }
@@ -438,10 +526,14 @@ void app_dock_judge_format_status(const app_dock_judge_result_t *result,
             break;
     }
 }
+/*
+ * 把接驳判定结果格式化成详细调试文本，适合显示距离、偏移、分数等信息。
+ */
 void app_dock_judge_format_detail(const app_dock_judge_result_t *result,
                                   char *buf,
                                   size_t buf_len)
 {
+    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
     if (result == NULL || buf == NULL || buf_len == 0) {
         return;
     }
