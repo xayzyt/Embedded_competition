@@ -132,6 +132,12 @@ static void app_vision_update_result(const app_vision_gray_slot_t *slot,
     app_vision_result_t result = {0};
     // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
     if (tag != NULL && tag->valid) {
+        /*
+         * 连续稳定计数。
+         *
+         * 如果当前帧识别到的 tag ID 和上一帧相同，就累加 stable_count；
+         * 如果 ID 变化，说明跟踪目标发生切换，从 1 重新开始。
+         */
         if (*last_tag_id == tag->id) {
             if (*stable_count < UINT16_MAX) {
                 (*stable_count)++;
@@ -141,6 +147,13 @@ static void app_vision_update_result(const app_vision_gray_slot_t *slot,
             *last_tag_id = tag->id;
         }
         *lost_count = 0;
+
+        /*
+         * 把 app_apriltag.c 的底层识别结果转换成 app_vision_result_t。
+         *
+         * app_vision_result_t 是视觉模块对外输出的统一格式，
+         * 后续 app_dock_judge.c 和 app_ui.c 都只依赖这个结构。
+         */
         result.valid = true;
         result.tag_id = tag->id;
         result.hamming = tag->hamming;
@@ -168,7 +181,15 @@ static void app_vision_update_result(const app_vision_gray_slot_t *slot,
         result.detect_ms = detect_ms;
         result.stable_count = *stable_count;
         result.lost_count = *lost_count;
+
+        /*
+         * 保存最新结果，供控制任务异步读取。
+         */
         app_vision_store_result(&result);
+
+        /*
+         * 更新 UI 上的简短视觉状态。
+         */
         char buf[128];
         snprintf(buf,
                  sizeof(buf),
@@ -201,6 +222,14 @@ static void app_vision_update_result(const app_vision_gray_slot_t *slot,
                  (unsigned long)result.detect_ms);
         return;
     }
+
+    /*
+     * 没有识别到 tag 的路径。
+     *
+     * lost_count 用来记录连续丢失帧数；
+     * stable_count 不会马上清零，而是先按 VISION_STABLE_DECAY_ON_LOST 衰减，
+     * 这样短暂漏检不会立刻把接驳判定打回零稳定度。
+     */
     if (*lost_count < UINT16_MAX) {
         (*lost_count)++;
     }
@@ -210,6 +239,13 @@ static void app_vision_update_result(const app_vision_gray_slot_t *slot,
         *stable_count = 0;
         *last_tag_id = 0;
     }
+
+    /*
+     * 输出一帧 valid=false 的结果。
+     *
+     * 即使没有 tag，也要更新 frame_seq / detect_ms / lost_count，
+     * 这样 app_dock_judge.c 能知道当前是“没有新帧”还是“新帧确实没识别到 tag”。
+     */
     result.valid = false;
     result.frame_seq = slot->info.seq;
     result.detect_ms = detect_ms;
@@ -230,27 +266,64 @@ static void app_vision_update_result(const app_vision_gray_slot_t *slot,
  */
 static void app_vision_task(void *arg)
 {
+    /*
+     * 本任务没有使用外部参数。
+     */
     (void)arg;
+
+    /*
+     * heartbeat 用于在长时间没有新帧时更新 UI，证明视觉任务本身仍然活着。
+     * last_seq 用于避免重复处理同一帧。
+     * last_overwrite 用于统计提交帧被覆盖的情况。
+     */
     uint32_t heartbeat = 0;
     uint32_t last_seq = 0;
     uint32_t last_overwrite = 0;
     TickType_t last_heartbeat_tick = xTaskGetTickCount();
+
+    /*
+     * 识别稳定性状态。
+     *
+     * 这些计数保存在视觉任务本地，而不是 app_apriltag.c 中，
+     * 因为 AprilTag 检测只负责单帧识别，不负责跨帧状态。
+     */
     uint16_t stable_count = 0;
     uint16_t lost_count = 0;
     uint16_t last_tag_id = 0;
+
     app_ui_set_vision_text("tag: wait frame");
+
     while (1) {
         app_vision_frame_info_t meta;
         uint32_t overwrite = 0;
+
+        /*
+         * 快照最新灰度帧。
+         *
+         * app_camera.c 可能随时提交新帧，所以这里通过临界区复制一份到 s_task_slot，
+         * 让 AprilTag 检测期间不会被摄像头任务改写。
+         */
         app_vision_snapshot(&meta, &s_task_slot, &overwrite);
+
+        /*
+         * 发现新的灰度帧：执行 AprilTag 检测。
+         */
         if (s_task_slot.info.seq != 0 && s_task_slot.info.seq != last_seq) {
             int64_t start_us = esp_timer_get_time();
             app_apriltag_result_t tag = {0};
+
+            /*
+             * 真正耗时的识别在后台任务里执行，避免阻塞摄像头预览回调。
+             */
             bool found = app_apriltag_detect_tag36h11(s_task_slot.gray,
                                                       s_task_slot.info.gray_width,
                                                       s_task_slot.info.gray_height,
                                                       &tag);
             uint32_t detect_ms = (uint32_t)((esp_timer_get_time() - start_us) / 1000ULL);
+
+            /*
+             * 不管 found 与否，都通过 app_vision_update_result() 统一更新稳定计数和 UI。
+             */
             if (found) {
                 app_vision_update_result(&s_task_slot,
                                          &tag,
@@ -266,6 +339,11 @@ static void app_vision_task(void *arg)
                                          &lost_count,
                                          &last_tag_id);
             }
+
+            /*
+             * 如果 seq 跳号，说明视觉任务处理速度跟不上摄像头提交速度，
+             * 中间有帧被覆盖或跳过。这不是致命错误，但会影响识别连续性。
+             */
             if (last_seq != 0 && s_task_slot.info.seq > (last_seq + 1)) {
                 // 警告日志：系统还能继续运行，但某个功能可能降级或不完整。
                 ESP_LOGW(TAG,
@@ -279,6 +357,10 @@ static void app_vision_task(void *arg)
             last_overwrite = overwrite;
             last_heartbeat_tick = xTaskGetTickCount();
         } else if (meta.seq != 0 && meta.seq != last_seq) {
+            /*
+             * 有新的原始帧元信息，但灰度 slot 还没准备好或没有新识别结果。
+             * 这里给 UI 一个轻量反馈，避免一直停留在旧文本。
+             */
             char buf[64];
             snprintf(buf,
                      sizeof(buf),
@@ -290,6 +372,9 @@ static void app_vision_task(void *arg)
             last_seq = meta.seq;
             last_heartbeat_tick = xTaskGetTickCount();
         } else {
+            /*
+             * 没有新帧时，周期性刷新等待文本。
+             */
             TickType_t now = xTaskGetTickCount();
             if ((now - last_heartbeat_tick) >= pdMS_TO_TICKS(VISION_HEARTBEAT_MS)) {
                 heartbeat++;

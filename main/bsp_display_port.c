@@ -27,6 +27,14 @@ bool app_display_init(void)
     }
     // 信息日志：用于确认程序执行到了哪个阶段。
     ESP_LOGI(TAG, "start display init (custom LVGL cfg)");
+
+    /*
+     * BSP 显示配置。
+     *
+     * buffer_size = 一次刷新 20 行，既能降低内存占用，又能满足 LVGL 刷屏；
+     * double_buffer=false 表示只使用单显示缓冲；
+     * buff_spiram=1 表示缓冲放 PSRAM，减少内部 SRAM 压力。
+     */
     bsp_display_cfg_t cfg = {
         .lvgl_port_cfg = ESP_LVGL_PORT_INIT_CONFIG(),
         .buffer_size = BSP_LCD_H_RES * 20,
@@ -37,8 +45,21 @@ bool app_display_init(void)
             .sw_rotate = 0,
         },
     };
+
+    /*
+     * 增大 LVGL port 任务栈。
+     * 当前 UI 叠加了 canvas、HUD、标签等对象，栈太小容易在复杂刷新时出问题。
+     */
     cfg.lvgl_port_cfg.task_stack = 8192;
+
+    /*
+     * 使用 BSP 提供的 MIPI-DSI lane bit rate。
+     */
     cfg.hw_cfg.dsi_bus.lane_bit_rate_mbps = BSP_LCD_MIPI_DSI_LANE_BITRATE_MBPS;
+
+    /*
+     * 启动显示和 LVGL port。
+     */
     s_disp = bsp_display_start_with_config(&cfg);
     // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
     if (s_disp == NULL) {
@@ -46,7 +67,16 @@ bool app_display_init(void)
         ESP_LOGE(TAG, "bsp_display_start_with_config failed");
         return false;
     }
+
+    /*
+     * 显示初始化成功后打开背光。
+     */
     bsp_display_backlight_on();
+
+    /*
+     * 获取触摸输入设备。
+     * 触摸不是系统必需项，即使没有触摸，也允许 UI 和摄像头预览继续运行。
+     */
     s_indev = bsp_display_get_input_dev();
     // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
     if (s_indev == NULL) {
@@ -83,6 +113,9 @@ bool app_display_touch_read(int32_t *x, int32_t *y)
         return false;
     }
 #if LVGL_VERSION_MAJOR >= 9
+    /*
+     * LVGL v9 使用 lv_indev_get_state/lv_indev_get_point 读取输入设备。
+     */
     if (lv_indev_get_state(s_indev) != LV_INDEV_STATE_PRESSED) {
         return false;
     }
@@ -92,6 +125,9 @@ bool app_display_touch_read(int32_t *x, int32_t *y)
     *y = point.y;
     return true;
 #else
+    /*
+     * LVGL v8 需要通过 driver.read_cb 主动读取输入数据。
+     */
     lv_indev_data_t data = {0};
     s_indev->driver.read_cb(&s_indev->driver, &data);
     if (data.state != LV_INDEV_STATE_PRESSED) {

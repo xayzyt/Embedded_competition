@@ -89,6 +89,11 @@ static bool app_cloud_json_get_string(const char *json,
     if (json == NULL || key == NULL || out == NULL || out_size == 0U) {
         return false;
     }
+
+    /*
+     * 构造简单 key 匹配串，例如 key=cmd 时查找 "cmd"。
+     * 本项目云端命令格式很固定，所以这里用轻量字符串扫描，避免引入完整 JSON 库。
+     */
     char pattern[48];
     snprintf(pattern, sizeof(pattern), "\"%s\"", key);
     const char *p = strstr(json, pattern);
@@ -97,6 +102,10 @@ static bool app_cloud_json_get_string(const char *json,
         return false;
     }
     p += strlen(pattern);
+
+    /*
+     * 跳过 key 和冒号之间可能存在的空白字符。
+     */
     while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') {
         p++;
     }
@@ -104,6 +113,10 @@ static bool app_cloud_json_get_string(const char *json,
         return false;
     }
     p++;
+
+    /*
+     * 跳过冒号后的空白，然后要求字符串值必须以双引号开始。
+     */
     while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') {
         p++;
     }
@@ -111,6 +124,11 @@ static bool app_cloud_json_get_string(const char *json,
         return false;
     }
     p++;
+
+    /*
+     * 拷贝字符串内容到 out。
+     * 对简单转义字符做最小处理：遇到反斜杠就跳过反斜杠本身，保留后一个字符。
+     */
     size_t i = 0;
     while (*p != '\0' && *p != '"' && i + 1U < out_size) {
         if (*p == '\\' && p[1] != '\0') {
@@ -135,6 +153,10 @@ static bool app_cloud_json_get_u16(const char *json,
     if (json == NULL || key == NULL || out == NULL) {
         return false;
     }
+
+    /*
+     * 仍然先通过 "key" 定位字段，然后手动解析冒号后的十进制数字。
+     */
     char pattern[48];
     snprintf(pattern, sizeof(pattern), "\"%s\"", key);
     const char *p = strstr(json, pattern);
@@ -156,6 +178,11 @@ static bool app_cloud_json_get_u16(const char *json,
     if (!isdigit((unsigned char)*p)) {
         return false;
     }
+
+    /*
+     * 逐字符累加，并在超过 uint16_t 范围时立即失败。
+     * 目标 tag ID 不应该超过 65535。
+     */
     unsigned value = 0U;
     while (isdigit((unsigned char)*p)) {
         value = value * 10U + (unsigned)(*p - '0');
@@ -177,18 +204,31 @@ static esp_err_t app_cloud_parse_command_json(const char *payload, app_cloud_cmd
         // 参数不合法时立即返回错误码，避免后面继续访问非法内存。
         return ESP_ERR_INVALID_ARG;
     }
+
+    /*
+     * 输出结构体清零。
+     * target_id 和 request_id 是可选字段，没解析到时保持默认值即可。
+     */
     memset(out, 0, sizeof(*out));
+
+    /*
+     * cmd 是必填字段。
+     * 没有 cmd 就不知道云端请求是 set_target、start_task 还是 cancel。
+     */
     if (!app_cloud_json_get_string(payload, "cmd", out->cmd, sizeof(out->cmd))) {
         // 参数不合法时立即返回错误码，避免后面继续访问非法内存。
         return ESP_ERR_INVALID_ARG;
     }
-/*
- * 从简单 JSON 字符串中提取 uint16 数值，例如目标 tag ID。
- */
+
+    /*
+     * target_id 是可选字段。
+     * set_target/start_task 通常会带它，cancel 可以不带。
+     */
     (void)app_cloud_json_get_u16(payload, "target_id", &out->target_id);
-/*
- * 从简单 JSON 字符串中提取指定 key 的字符串值，避免引入较重 JSON 库。
- */
+
+    /*
+     * request_id 也是可选字段，用来让云端把 ACK 对回原始请求。
+     */
     (void)app_cloud_json_get_string(payload, "request_id", out->request_id, sizeof(out->request_id));
     // 正常返回 ESP_OK，表示该步骤执行成功。
     return ESP_OK;
@@ -365,11 +405,29 @@ static void app_cloud_publish_task_snapshot_internal(const app_task_snapshot_t *
     if (snap == NULL) {
         return;
     }
+
+    /*
+     * 设备侧递增消息编号，方便云端排查重复上报或乱序。
+     */
     uint32_t seq = ++s_cloud.msg_seq;
+
+    /*
+     * 时间戳字段。
+     * 如果还没有 SNTP 校时，now 可能为 0，但字段保留便于后续升级。
+     */
     time_t now = 0;
     time(&now);
+
+    /*
+     * 给云端/小程序准备更容易直接判断的状态字段。
+     */
     int cargo_received = (snap->state == APP_TASK_STATE_COMPLETED) ? 1 : 0;
     int fault = (snap->state == APP_TASK_STATE_FAULT) ? 1 : 0;
+
+    /*
+     * 组装状态 JSON。
+     * 这里使用固定缓冲和 snprintf，避免动态内存分配。
+     */
     char json[APP_CLOUD_JSON_BUF_LEN];
     snprintf(json,
              sizeof(json),
@@ -630,18 +688,33 @@ static void app_cloud_handle_mqtt_data_event(esp_mqtt_event_handle_t event)
     if (event == NULL || event->topic == NULL || event->data == NULL) {
         return;
     }
+
+    /*
+     * esp-mqtt 事件里的 topic/data 是“指针 + 长度”，不保证以 '\0' 结尾。
+     * 所以这里先拷贝到本地缓冲，再手动补字符串结束符。
+     */
     char topic[APP_CLOUD_TOPIC_BUF_LEN];
     char payload[APP_CLOUD_JSON_BUF_LEN];
     int topic_len = event->topic_len;
     int data_len = event->data_len;
+
     if (topic_len <= 0) {
         return;
     }
+
+    /*
+     * topic 超过本地缓冲时截断，至少保证后续 strcmp 和日志打印安全。
+     */
     if ((size_t)topic_len >= sizeof(topic)) {
         topic_len = sizeof(topic) - 1;
     }
     memcpy(topic, event->topic, (size_t)topic_len);
     topic[topic_len] = '\0';
+
+    /*
+     * payload 同样限制长度。
+     * 这里的命令 JSON 很短，超过缓冲一般说明云端下发异常或协议不匹配。
+     */
     if (data_len < 0) {
         data_len = 0;
     }
@@ -654,10 +727,12 @@ static void app_cloud_handle_mqtt_data_event(esp_mqtt_event_handle_t event)
     payload[data_len] = '\0';
     // 信息日志：用于确认程序执行到了哪个阶段。
     ESP_LOGI(TAG, "mqtt rx topic=%s payload=%s", topic, payload);
+
+    /*
+     * 只处理命令 topic。
+     * ACK topic 和 state topic 是设备发布出去的，不应该在接收路径里反向消费。
+     */
     if (strcmp(topic, s_cloud.topic_cmd) == 0) {
-/*
- * 统一处理 MQTT 收到的命令 payload，并调用 app_task 执行业务动作。
- */
         (void)app_cloud_handle_command(payload, (size_t)data_len);
     }
 }

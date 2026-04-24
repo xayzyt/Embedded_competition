@@ -276,6 +276,13 @@ static void app_ctrl_compose_detail(const app_dock_judge_result_t *dock,
     if ((dock == NULL) || (buf == NULL) || (buf_len == 0U)) {
         return;
     }
+
+    /*
+     * 视觉无效时，调试区优先显示“等待有效 tag”或“保持上一帧”的信息。
+     *
+     * hold 状态对现场调试很重要：如果屏幕短暂保留识别框，
+     * 你需要知道这是新识别结果，还是 lost_hold_frames 带来的短暂保持。
+     */
     if (!dock->vision_valid) {
         if (dock->state != APP_DOCK_STATE_SEARCHING) {
             snprintf(buf,
@@ -293,6 +300,13 @@ static void app_ctrl_compose_detail(const app_dock_judge_result_t *dock,
         }
         return;
     }
+
+    /*
+     * 视觉有效时，把关键工程量压缩成一行：
+     * id / dx / dy / z / edge / angle / stable / score / weight。
+     *
+     * 这些字段基本覆盖了“为什么还没接驳”的主要原因。
+     */
     snprintf(buf,
              buf_len,
              "dock dbg: id:%u dx:%ld dy:%ld z:%ldmm e:%.1f ang:%d st:%u score:%u wt:%s%ldg",
@@ -318,6 +332,14 @@ static void app_ctrl_compose_guidance(const app_dock_judge_result_t *dock,
     if ((dock == NULL) || (buf == NULL) || (buf_len == 0U)) {
         return;
     }
+
+    /*
+     * 按“最先阻塞接驳的原因”生成提示。
+     *
+     * 这个顺序是有意设计的：
+     * 先确认是否看到目标，再确认 ID，再确认中心、距离、稳定性。
+     * 用户看到提示时可以按这个顺序调整无人机。
+     */
     if (!dock->vision_valid) {
         snprintf(buf, buf_len, "dock: searching target");
         return;
@@ -339,6 +361,10 @@ static void app_ctrl_compose_guidance(const app_dock_judge_result_t *dock,
         return;
     }
     if (!dock->distance_ok) {
+        /*
+         * 距离估算有效时区分 too near / too far；
+         * 距离估算无效时提示等待有效距离，而不是给出错误方向。
+         */
         if (dock->est_distance_mm > 0) {
             snprintf(buf,
                      buf_len,
@@ -363,6 +389,11 @@ static void app_ctrl_compose_task_status(const app_task_snapshot_t *task,
     if (buf == NULL || buf_len == 0U || task == NULL) {
         return;
     }
+
+    /*
+     * 任务层状态是“业务流程”，dock 判定是“视觉/安全条件”。
+     * 这里把两者合并成一行给主状态栏显示，让屏幕上既能看到任务阶段，也能看到当前阻塞原因。
+     */
     switch (task->state) {
         case APP_TASK_STATE_CONFIGURED:
             snprintf(buf,
@@ -371,6 +402,9 @@ static void app_ctrl_compose_task_status(const app_task_snapshot_t *task,
                      (unsigned)task->target_id);
             break;
         case APP_TASK_STATE_WAIT_APPROACH: {
+            /*
+             * 等待无人机靠近时，附带接驳引导提示。
+             */
             char guide[72] = {0};
             app_ctrl_compose_guidance(dock, guide, sizeof(guide));
             snprintf(buf, buf_len, "task: wait id=%u / %s", (unsigned)task->target_id, guide);
@@ -415,15 +449,37 @@ static void app_ctrl_apply_proto_msg_locked(const app_ch32_line_t *msg)
     if (msg == NULL) {
         return;
     }
+
+    /*
+     * 保存上一帧 CH32 状态。
+     *
+     * 某些 CH32 错误不是硬故障，例如已经进入等待货物窗口后短暂检测不到货物。
+     * 这类“软等待”要结合前一阶段和 flags 判断，不能只看当前错误码。
+     */
     const app_ch32_proto_stage_t prev_proto_stage = s_rt.last_proto_stage;
     const uint16_t prev_proto_flags = s_rt.last_proto_flags;
     const bool prev_cargo_wait_window_seen = s_rt.cargo_wait_window_seen;
+
+    /*
+     * 同步 CH32 ready 状态。
+     * app_ch32_link.c 会在收到 READY flag 或 ready 阶段时更新内部 ready 标志。
+     */
     s_rt.ch32_ready = app_ch32_link_is_ready();
+
+    /*
+     * 标准状态 payload 至少 8 字节，包含 flags 和 weight。
+     * 只有长度足够时才更新重量，避免短 ACK/NACK 把旧重量覆盖掉。
+     */
     if (msg->payload_len >= 8U) {
         s_rt.last_weight_g = msg->proto_weight_g;
         s_rt.has_weight = true;
         s_rt.last_proto_flags = msg->proto_flags;
     }
+
+    /*
+     * 只有状态类协议消息才会影响机械流程状态机。
+     * ACK/NACK 主要由 app_ch32_link_send_cmd_and_wait_ack() 消费。
+     */
     if ((msg->type == APP_CH32_LINE_PROTO_STATUS) ||
         (msg->type == APP_CH32_LINE_PROTO_EVENT) ||
         (msg->type == APP_CH32_LINE_PROTO_ERROR) ||
@@ -431,17 +487,30 @@ static void app_ctrl_apply_proto_msg_locked(const app_ch32_line_t *msg)
         if (msg->payload_len >= 8U) {
             s_rt.last_proto_flags = msg->proto_flags;
         }
+
+        /*
+         * cargo_wait_window_seen 表示 CH32 已经走到“等待货物/托盘已伸出”附近。
+         * 后续如果出现货物相关软错误，可以据此判断是继续等待还是进入故障。
+         */
         if (app_ctrl_proto_stage_is_cargo_wait_window(msg->proto_stage) ||
-/*
- * 根据 flags 判断托盘是否已经伸出。
- */
             ((msg->payload_len >= 8U) && app_ctrl_proto_flags_indicate_tray_out(msg->proto_flags))) {
             s_rt.cargo_wait_window_seen = true;
         }
+
+        /*
+         * 阶段变化时更新提示文案。
+         */
         if (s_rt.last_proto_stage != msg->proto_stage) {
             s_rt.last_proto_stage = msg->proto_stage;
             app_ctrl_set_notice_locked(app_ctrl_proto_stage_status_text(msg->proto_stage), CTRL_NOTICE_SHOW_MS);
         }
+
+        /*
+         * 错误处理。
+         *
+         * 先判断是否属于“等待货物窗口内的软等待错误”；
+         * 如果不是软等待，就记录错误、退出 busy，并启动防重复触发冷却。
+         */
         if ((msg->type == APP_CH32_LINE_PROTO_ERROR) || (msg->proto_stage == APP_CH32_STAGE_FAULT)) {
             if (app_ctrl_is_soft_waiting_cargo_error(prev_proto_stage,
                                                      prev_proto_flags,
@@ -463,6 +532,13 @@ static void app_ctrl_apply_proto_msg_locked(const app_ch32_line_t *msg)
             s_rt.notice_deadline_ms = app_ctrl_now_ms() + CTRL_NOTICE_SHOW_MS;
             return;
         }
+
+        /*
+         * busy 状态处理。
+         *
+         * CH32 flags 里显式 BUSY，或者 stage 属于机械动作阶段，都认为接驳流程正在执行。
+         * 某些阶段需要超时保护，某些阶段（例如等待货物）不应该简单按固定时间判超时。
+         */
         if (((msg->proto_flags & APP_CH32_FLAG_BUSY) != 0U) || app_ctrl_proto_stage_is_busy(msg->proto_stage)) {
             s_rt.dock_busy = true;
             if (app_ctrl_proto_stage_uses_busy_deadline(msg->proto_stage)) {
@@ -472,6 +548,13 @@ static void app_ctrl_apply_proto_msg_locked(const app_ch32_line_t *msg)
             }
             return;
         }
+
+        /*
+         * 安全结束或回到空闲状态。
+         *
+         * 这些阶段说明 CH32 当前不再执行危险机械动作，可以允许下一次接驳触发，
+         * 但仍会加一段 retrigger cooldown，避免视觉 ready 连续帧立刻重复下发命令。
+         */
         if ((msg->proto_stage == APP_CH32_STAGE_SAFE_LOCKED) ||
             (msg->proto_stage == APP_CH32_STAGE_COMPLETE) ||
             (msg->proto_stage == APP_CH32_STAGE_IDLE) ||
@@ -488,31 +571,58 @@ static void app_ctrl_apply_proto_msg_locked(const app_ch32_line_t *msg)
  */
 void app_ctrl_on_ch32_line(const app_ch32_line_t *msg, void *user_ctx)
 {
+    /*
+     * 当前回调没有使用 user_ctx。
+     * 保留参数是为了匹配 app_ch32_link_init() 的通用回调签名。
+     */
     (void)user_ctx;
+
     // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
     if (msg == NULL) {
         return;
     }
+
+    /*
+     * CH32 回调可能来自 UART RX 任务，而控制任务也会读取 s_rt。
+     * 所以修改 s_rt 前必须进入临界区。
+     */
     // 进入临界区：下面代码会访问跨任务共享变量，必须短时间关中断/加锁保护。
     taskENTER_CRITICAL(&s_ctrl_mux);
+
+    /*
+     * 新版二进制协议消息走结构化处理路径。
+     */
     if (msg->is_proto) {
         app_ctrl_apply_proto_msg_locked(msg);
         // 退出临界区：共享变量访问结束，恢复正常调度/中断。
         taskEXIT_CRITICAL(&s_ctrl_mux);
         return;
     }
+
+    /*
+     * 旧版文本协议状态行。
+     * 这里继续兼容 [STS] CH32_READY / WEIGHT=xxx / DONE 等文本关键字。
+     */
     if (msg->type == APP_CH32_LINE_STATUS) {
         // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
         if (strstr(msg->line, "CH32_READY") != NULL) {
             s_rt.ch32_ready = true;
             app_ctrl_set_notice_locked("dock: CH32 ready", CTRL_NOTICE_SHOW_MS);
         }
+
+        /*
+         * 旧文本协议中的重量字段形如 WEIGHT=123。
+         */
         const char *w = strstr(msg->line, "WEIGHT=");
         // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
         if (w != NULL) {
             s_rt.last_weight_g = (int32_t)strtol(w + 7, NULL, 10);
             s_rt.has_weight = true;
         }
+
+        /*
+         * 旧文本协议没有 stage 枚举，只能通过关键字判断是否进入等待货物窗口。
+         */
         if (app_ctrl_line_indicates_cargo_wait_window(msg->line)) {
             s_rt.cargo_wait_window_seen = true;
             s_rt.dock_busy = true;
@@ -520,6 +630,10 @@ void app_ctrl_on_ch32_line(const app_ch32_line_t *msg, void *user_ctx)
             s_rt.last_proto_stage = APP_CH32_STAGE_WAITING_CARGO;
             app_ctrl_set_notice_locked("dock: waiting cargo", CTRL_NOTICE_SHOW_MS);
         }
+
+        /*
+         * 检测到 DONE/COMPLETE/LOCKED 等完成关键字后，认为本轮机械流程结束。
+         */
         if (app_ctrl_line_has_done_keyword(msg->line)) {
             s_rt.dock_busy = false;
             s_rt.cargo_wait_window_seen = false;
@@ -529,6 +643,9 @@ void app_ctrl_on_ch32_line(const app_ch32_line_t *msg, void *user_ctx)
             app_ctrl_set_notice_locked("dock: CH32 cycle done", CTRL_NOTICE_SHOW_MS);
         }
     } else if (msg->type == APP_CH32_LINE_ERROR) {
+        /*
+         * 旧版错误行没有细分错误码，统一按 CH32 error 处理。
+         */
         s_rt.dock_busy = false;
         s_rt.busy_deadline_ms = 0;
         app_ctrl_start_retrigger_cooldown_locked(CTRL_RETRIGGER_COOLDOWN_MS);
@@ -544,6 +661,13 @@ static void app_ctrl_handle_touch(const app_task_snapshot_t *task,
                                   bool dock_busy,
                                   uint32_t now_ms)
 {
+    /*
+     * 当前版本禁用本地触摸控制。
+     *
+     * 项目主控制来源是云端任务和视觉自动接驳；
+     * 触摸逻辑保留在 #if 0 中，方便后续现场调试时重新启用，
+     * 但默认不让屏幕触摸直接改变任务或发送机械命令。
+     */
     (void)task;
     (void)dock_busy;
     (void)now_ms;
@@ -570,13 +694,27 @@ static void app_ctrl_handle_touch(const app_task_snapshot_t *task,
     taskEXIT_CRITICAL(&s_ctrl_mux);
     const int32_t w = BSP_LCD_H_RES;
     const int32_t h = BSP_LCD_V_RES;
+
+    /*
+     * 触摸区域划分：
+     * - 上半屏：调整目标 tag ID；
+     * - 左下：启动本地任务；
+     * - 右下：busy 时手动 abort，否则 reset idle。
+     */
     const bool top_half = (y < (h / 2));
     const bool left_half = (x < (w / 2));
     if (top_half) {
+        /*
+         * 接驳过程中禁止修改目标 ID，避免任务执行到一半切换目标。
+         */
         if (dock_busy || (task->state == APP_TASK_STATE_DOCKING)) {
             app_ctrl_set_notice("cfg locked while docking", CTRL_NOTICE_SHOW_MS);
             return;
         }
+
+        /*
+         * 上半屏左侧减小 tag ID，右侧增大 tag ID。
+         */
         uint16_t target = task->target_id;
         if (left_half) {
             target = (target > CTRL_TASK_ID_MIN) ? (uint16_t)(target - 1U) : CTRL_TASK_ID_MIN;
@@ -590,6 +728,10 @@ static void app_ctrl_handle_touch(const app_task_snapshot_t *task,
         }
         return;
     }
+
+    /*
+     * 左下区域：启动本地接驳任务。
+     */
     if (left_half) {
         if (dock_busy) {
             app_ctrl_set_notice("dock busy, cannot start", CTRL_NOTICE_SHOW_MS);
@@ -602,10 +744,11 @@ static void app_ctrl_handle_touch(const app_task_snapshot_t *task,
         }
         return;
     }
+
+    /*
+     * 右下区域：busy 时发送 abort；空闲时重置任务。
+     */
     if (dock_busy) {
-/*
- * 向 CH32 发送控制命令，内部会根据协议状态选择合适发送方式。
- */
         (void)app_ch32_link_send_cmd('S');
         app_task_cancel("manual abort");
         app_ctrl_set_notice("manual abort sent", CTRL_NOTICE_SHOW_MS);

@@ -86,9 +86,18 @@ static const char *fourcc_to_str(uint32_t fourcc, char out[5])
  */
 int app_video_open(char *dev, video_fmt_t init_fmt)
 {
+    /*
+     * V4L2 格式和能力查询结构体。
+     * default_format 用于读取驱动当前格式，actual_format 后面会再次读取最终生效格式。
+     */
     struct v4l2_format default_format = {0};
     struct v4l2_capability capability = {0};
     const int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+
+    /*
+     * 打开摄像头设备节点。
+     * ESP-IDF 的 esp-video 组件提供了类 Linux 的 /dev/video 接口。
+     */
     int fd = open(dev, O_RDONLY);
     if (fd < 0) {
         // 错误日志：这类信息通常需要你优先查看，因为它意味着某个关键步骤失败。
@@ -101,6 +110,10 @@ int app_video_open(char *dev, video_fmt_t init_fmt)
         ESP_LOGE(TAG, "VIDIOC_QUERYCAP failed");
         goto err;
     }
+
+    /*
+     * 打印驱动能力信息，方便确认当前打开的是哪一个摄像头设备。
+     */
     // 信息日志：用于确认程序执行到了哪个阶段。
     ESP_LOGI(TAG, "version: %d.%d.%d",
              (uint16_t)(capability.version >> 16),
@@ -110,6 +123,11 @@ int app_video_open(char *dev, video_fmt_t init_fmt)
     ESP_LOGI(TAG, "driver:  %s", capability.driver);
     ESP_LOGI(TAG, "card:    %s", capability.card);
     ESP_LOGI(TAG, "bus:     %s", capability.bus_info);
+
+    /*
+     * 读取当前默认格式。
+     * 分辨率通常由 BSP/传感器驱动决定，本函数只在需要时切换像素格式。
+     */
     default_format.type = type;
     // 调用 V4L2/驱动控制命令，这是视频设备配置和取帧的核心接口。
     if (ioctl(fd, VIDIOC_G_FMT, &default_format) != 0) {
@@ -128,6 +146,11 @@ int app_video_open(char *dev, video_fmt_t init_fmt)
                  default_format.fmt.pix.bytesperline,
                  default_format.fmt.pix.sizeimage);
     }
+
+    /*
+     * 如果当前像素格式不是调用者需要的格式，就请求切换。
+     * 宽高沿用驱动默认值，避免在这里硬编码传感器分辨率。
+     */
     if (default_format.fmt.pix.pixelformat != init_fmt) {
         struct v4l2_format request_format = {
             .type = type,
@@ -144,6 +167,10 @@ int app_video_open(char *dev, video_fmt_t init_fmt)
     }
 #if defined(BSP_CAMERA_VFLIP) && defined(BSP_CAMERA_HFLIP)
     {
+        /*
+         * 根据 BSP 配置设置摄像头水平/垂直翻转。
+         * 这一步用于让屏幕预览方向和实际安装方向一致。
+         */
         struct v4l2_ext_control control[1];
         struct v4l2_ext_controls ctrl = {
             .ctrl_class = V4L2_CID_USER_CLASS,
@@ -160,6 +187,12 @@ int app_video_open(char *dev, video_fmt_t init_fmt)
         ioctl(fd, VIDIOC_S_EXT_CTRLS, &ctrl);
     }
 #endif
+
+    /*
+     * 再读一次实际格式。
+     * 有些驱动可能无法完全满足请求格式，会返回最接近的格式；
+     * 后续缓冲大小必须以实际格式为准。
+     */
     struct v4l2_format actual_format = {0};
     actual_format.type = type;
     // 调用 V4L2/驱动控制命令，这是视频设备配置和取帧的核心接口。
@@ -179,8 +212,17 @@ int app_video_open(char *dev, video_fmt_t init_fmt)
                  actual_format.fmt.pix.bytesperline,
                  actual_format.fmt.pix.sizeimage);
     }
+
+    /*
+     * 保存实际图像尺寸，后续 DQBUF 回调会把这些宽高传给 app_camera.c。
+     */
     s_video.camera_buf_hes = actual_format.fmt.pix.width;
     s_video.camera_buf_ves = actual_format.fmt.pix.height;
+
+    /*
+     * 计算单帧缓冲大小。
+     * 优先使用驱动给出的 sizeimage；如果没有，则根据宽高和像素字节数估算。
+     */
     uint32_t bytes_per_pixel = 2;
     switch (actual_format.fmt.pix.pixelformat) {
         case APP_VIDEO_FMT_RGB888:
@@ -196,6 +238,9 @@ int app_video_open(char *dev, video_fmt_t init_fmt)
                               (size_t)actual_format.fmt.pix.width * actual_format.fmt.pix.height * bytes_per_pixel;
     return fd;
 err:
+    /*
+     * 任一步失败都关闭 fd，避免设备句柄泄漏。
+     */
     close(fd);
     return -1;
 }
@@ -204,6 +249,10 @@ err:
  */
 esp_err_t app_video_set_bufs(int video_fd, uint32_t fb_num, const void **fb)
 {
+    /*
+     * V4L2 至少需要双缓冲才能一边填充下一帧、一边处理当前帧。
+     * 也限制最大数量，避免 s_video.camera_buffer[] 越界。
+     */
     if (fb_num > MAX_BUFFER_COUNT) {
         // 错误日志：这类信息通常需要你优先查看，因为它意味着某个关键步骤失败。
         ESP_LOGE(TAG, "buffer num too large");
@@ -214,6 +263,11 @@ esp_err_t app_video_set_bufs(int video_fd, uint32_t fb_num, const void **fb)
         ESP_LOGE(TAG, "at least two buffers are required");
         return ESP_FAIL;
     }
+
+    /*
+     * 申请 V4L2 缓冲队列。
+     * 如果 fb 非空，使用 USERPTR 模式；否则使用 MMAP 模式。
+     */
     struct v4l2_requestbuffers req = {0};
     const int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     req.count = fb_num;
@@ -225,6 +279,11 @@ esp_err_t app_video_set_bufs(int video_fd, uint32_t fb_num, const void **fb)
         ESP_LOGE(TAG, "VIDIOC_REQBUFS failed");
         goto err;
     }
+
+    /*
+     * 逐个查询/绑定缓冲，并 QBUF 归还给驱动。
+     * 驱动只有拿到 QBUF 后，才会开始往这些缓冲里写摄像头帧。
+     */
     for (uint32_t i = 0; i < fb_num; i++) {
         struct v4l2_buffer buf = {0};
         buf.type = type;
@@ -236,6 +295,10 @@ esp_err_t app_video_set_bufs(int video_fd, uint32_t fb_num, const void **fb)
             ESP_LOGE(TAG, "VIDIOC_QUERYBUF failed");
             goto err;
         }
+
+        /*
+         * MMAP 模式：驱动分配缓冲，本端 mmap 映射出来使用。
+         */
         if (req.memory == V4L2_MEMORY_MMAP) {
             s_video.camera_buffer[i] = mmap(NULL, buf.length, PROT_READ | PROT_WRITE, MAP_SHARED, video_fd, buf.m.offset);
             // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
@@ -245,6 +308,10 @@ esp_err_t app_video_set_bufs(int video_fd, uint32_t fb_num, const void **fb)
                 goto err;
             }
         } else {
+            /*
+             * USERPTR 模式：上层已经分配好缓冲，本端把指针交给 V4L2 驱动。
+             * app_camera.c 使用这种模式把帧缓冲放到 PSRAM。
+             */
             if (!fb || !fb[i]) {
                 // 错误日志：这类信息通常需要你优先查看，因为它意味着某个关键步骤失败。
                 ESP_LOGE(TAG, "USERPTR buffer is NULL");
@@ -257,7 +324,6 @@ esp_err_t app_video_set_bufs(int video_fd, uint32_t fb_num, const void **fb)
         s_video.camera_buf_size = buf.length;
         // V4L2 归还图像缓冲，让驱动继续填充下一帧。
         if (ioctl(video_fd, VIDIOC_QBUF, &buf) != 0) {
-            // V4L2 归还图像缓冲，让驱动继续填充下一帧。
             // 错误日志：这类信息通常需要你优先查看，因为它意味着某个关键步骤失败。
             ESP_LOGE(TAG, "VIDIOC_QBUF failed");
             goto err;
@@ -266,6 +332,9 @@ esp_err_t app_video_set_bufs(int video_fd, uint32_t fb_num, const void **fb)
     // 正常返回 ESP_OK，表示该步骤执行成功。
     return ESP_OK;
 err:
+    /*
+     * 注册缓冲失败后关闭 video fd，让上层重新打开/初始化。
+     */
     close(video_fd);
     return ESP_FAIL;
 }
@@ -399,9 +468,16 @@ static inline esp_err_t video_stream_stop(int video_fd)
  */
 static void video_stream_task(void *arg)
 {
+    /*
+     * video_fd 通过任务参数传入。
+     */
     const int video_fd = *((int *)arg);
     int error_count = 0;
+
     while (1) {
+        /*
+         * 收到停止请求后，先清 bit，再 STREAMOFF，最后删除本任务。
+         */
         if (xEventGroupGetBits(s_video.video_event_group) & VIDEO_TASK_DELETE) {
             // 清除事件组 bit，避免旧事件影响下一次等待。
             xEventGroupClearBits(s_video.video_event_group, VIDEO_TASK_DELETE);
@@ -409,6 +485,11 @@ static void video_stream_task(void *arg)
             // 删除当前或指定任务，通常用于停止后台循环。
             vTaskDelete(NULL);
         }
+
+        /*
+         * DQBUF：从驱动取一帧已经写好的图像。
+         * 连续失败达到阈值时，尝试重启视频流恢复。
+         */
         if (video_receive_video_frame(video_fd) != ESP_OK) {
             error_count++;
             // 任务延时让出 CPU，避免 while 循环空转占满系统。
@@ -424,13 +505,25 @@ static void video_stream_task(void *arg)
             }
             continue;
         }
+
+        /*
+         * 把当前帧交给 app_camera.c 注册的回调。
+         */
         video_operation_video_frame();
+
+        /*
+         * QBUF：处理完后归还缓冲，驱动才能继续写下一帧。
+         */
         if (video_free_video_frame(video_fd) != ESP_OK) {
             error_count++;
             // 任务延时让出 CPU，避免 while 循环空转占满系统。
             vTaskDelay(pdMS_TO_TICKS(VIDEO_QBUF_RETRY_DELAY_MS));
             continue;
         }
+
+        /*
+         * DQBUF/QBUF 都成功，清零错误计数。
+         */
         error_count = 0;
     }
 }

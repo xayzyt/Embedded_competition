@@ -836,6 +836,10 @@ static inline uint32_t at_index(uint32_t x, uint32_t y, uint32_t width)
  */
 static uint8_t at_otsu_threshold(const uint8_t *gray, uint32_t width, uint32_t height)
 {
+    /*
+     * 统计 0~255 灰度直方图，同时计算整幅图灰度总和。
+     * Otsu 后面会用这些值快速计算前景/背景类间方差。
+     */
     uint32_t hist[256] = {0};
     const uint32_t total = width * height;
     uint64_t sum = 0;
@@ -844,6 +848,11 @@ static uint8_t at_otsu_threshold(const uint8_t *gray, uint32_t width, uint32_t h
         hist[v]++;
         sum += v;
     }
+
+    /*
+     * 遍历所有可能阈值，寻找类间方差最大的阈值。
+     * 这里用整数形式计算，避免在 ESP32 上频繁做浮点除法。
+     */
     uint64_t sum_b = 0;
     uint32_t w_b = 0;
     uint64_t best_between = 0;
@@ -898,15 +907,37 @@ static bool at_filter_component(uint32_t area,
                                 uint32_t max_y,
                                 uint32_t *score_out)
 {
+    /*
+     * 连通域外接矩形宽高。
+     */
     uint32_t w = max_x - min_x + 1U;
     uint32_t h = max_y - min_y + 1U;
+
+    /*
+     * 面积或边长太小的区域大概率是噪点、文字或图像纹理，不继续解码。
+     */
     if (area < AT_MIN_AREA || w < AT_MIN_SIDE || h < AT_MIN_SIDE) return false;
+
+    /*
+     * AprilTag 外框接近正方形。
+     * 如果长宽比例差距太大，通常不是有效 tag。
+     */
     uint32_t min_side = (w < h) ? w : h;
     uint32_t max_side = (w > h) ? w : h;
     if (min_side * 100U < max_side * 55U) return false;
+
+    /*
+     * 填充率过滤。
+     * 太稀疏可能是细线/噪点，太满可能是大块阴影。
+     */
     uint32_t box_area = w * h;
     uint32_t fill_pct = (area * 100U) / box_area;
     if (fill_pct < 12U || fill_pct > 92U) return false;
+
+    /*
+     * 候选评分：面积越大、越接近正方形越优先。
+     * 后续只保留前 AT_MAX_CANDIDATES 个候选，减少透视解码耗时。
+     */
     uint32_t score = area;
     score += min_side * 6U;
     score -= (max_side - min_side) * 5U;
@@ -964,10 +995,22 @@ static void at_insert_candidate(at_candidate_t *cands, int *count, const at_cand
 static int at_collect_candidates(uint32_t width, uint32_t height, at_candidate_t *cands)
 {
     int count = 0;
+
+    /*
+     * 扫描整张二值图，遇到未访问过的黑色像素就启动一次 BFS 连通域搜索。
+     */
     for (uint32_t y = 0; y < height; y++) {
         for (uint32_t x = 0; x < width; x++) {
             uint32_t idx = at_index(x, y, width);
             if (!s_binary[idx] || s_visited[idx]) continue;
+
+            /*
+             * BFS 队列和连通域统计量初始化。
+             *
+             * min/max 用来得到外接矩形；
+             * sum_x/sum_y 用来估算中心点；
+             * tl/tr/br/bl 用简单的 x+y、x-y 极值近似四角。
+             */
             uint32_t head = 0, tail = 0, area = 0;
             uint32_t min_x = x, max_x = x, min_y = y, max_y = y;
             uint64_t sum_x = 0, sum_y = 0;
@@ -975,10 +1018,15 @@ static int at_collect_candidates(uint32_t width, uint32_t height, at_candidate_t
             at_pt_t tl = {(float)x, (float)y}, tr = {(float)x, (float)y}, br = {(float)x, (float)y}, bl = {(float)x, (float)y};
             s_visited[idx] = 1U;
             s_queue[tail++] = idx;
+
+            /*
+             * 8 邻域 BFS，把同一片黑色连通区域全部找出来。
+             */
             while (head < tail) {
                 uint32_t cur = s_queue[head++];
                 uint32_t cx = cur % width;
                 uint32_t cy = cur / width;
+
                 area++;
                 sum_x += cx;
                 sum_y += cy;
@@ -988,10 +1036,23 @@ static int at_collect_candidates(uint32_t width, uint32_t height, at_candidate_t
                 if (cy > max_y) max_y = cy;
                 float fsum = (float)cx + (float)cy;
                 float fdiff = (float)cx - (float)cy;
+
+                /*
+                 * 使用极值估计四角：
+                 * - x+y 最小近似左上；
+                 * - x-y 最大近似右上；
+                 * - x+y 最大近似右下；
+                 * - x-y 最小近似左下。
+                 */
                 if (fsum < best_tl) { best_tl = fsum; tl.x = (float)cx; tl.y = (float)cy; }
                 if (fdiff > best_tr) { best_tr = fdiff; tr.x = (float)cx; tr.y = (float)cy; }
                 if (fsum > best_br) { best_br = fsum; br.x = (float)cx; br.y = (float)cy; }
                 if (fdiff < best_bl) { best_bl = fdiff; bl.x = (float)cx; bl.y = (float)cy; }
+
+                /*
+                 * 扫描当前像素周围 8 邻域。
+                 * 边界处 nx0/nx1/ny0/ny1 会自动夹住，避免越界。
+                 */
                 uint32_t nx0 = (cx > 0U) ? cx - 1U : cx;
                 uint32_t nx1 = (cx + 1U < width) ? cx + 1U : cx;
                 uint32_t ny0 = (cy > 0U) ? cy - 1U : cy;
@@ -1006,8 +1067,16 @@ static int at_collect_candidates(uint32_t width, uint32_t height, at_candidate_t
                     }
                 }
             }
+
+            /*
+             * 连通域搜索完成后先做快速几何过滤。
+             */
             uint32_t score = 0;
             if (!at_filter_component(area, min_x, min_y, max_x, max_y, &score)) continue;
+
+            /*
+             * 生成候选结构体。
+             */
             at_candidate_t cand = {0};
             cand.valid = true;
             cand.area = area;
@@ -1021,6 +1090,11 @@ static int at_collect_candidates(uint32_t width, uint32_t height, at_candidate_t
             cand.tr = tr;
             cand.br = br;
             cand.bl = bl;
+
+            /*
+             * 贴边或过大的候选不直接丢弃，而是降低评分。
+             * 这样在候选很少时仍然保留一点尝试机会，但优先级更低。
+             */
             if (at_candidate_touch_edge(&cand, width, height, AT_EDGE_MARGIN)) {
                 score /= 4U;
             }
@@ -1061,8 +1135,19 @@ static bool at_validate_quad(const at_candidate_t *cand)
  */
 static bool at_solve_homography(const at_pt_t quad[4], float H[9])
 {
+    /*
+     * 求从标准 8x8 tag 网格坐标 (u,v) 到图像四边形坐标 (x,y) 的单应矩阵。
+     *
+     * 四个角点可以提供 8 个方程，正好求解 H 的 8 个自由参数；
+     * H[8] 固定为 1。
+     */
     float A[8][9];
     const float uv[4][2] = { {0.0f, 0.0f}, {8.0f, 0.0f}, {8.0f, 8.0f}, {0.0f, 8.0f} };
+
+    /*
+     * 构造增广矩阵 A。
+     * 每个角点贡献两行方程：一行约束 x，一行约束 y。
+     */
     for (int i = 0; i < 4; i++) {
         float u = uv[i][0];
         float v = uv[i][1];
@@ -1087,6 +1172,11 @@ static bool at_solve_homography(const at_pt_t quad[4], float H[9])
         A[2 * i + 1][7] = -v * y;
         A[2 * i + 1][8] = y;
     }
+
+    /*
+     * 高斯-约旦消元。
+     * 每一列选择绝对值最大的 pivot，降低数值不稳定风险。
+     */
     for (int col = 0; col < 8; col++) {
         int pivot = col;
         float maxv = fabsf(A[col][col]);
@@ -1098,6 +1188,10 @@ static bool at_solve_homography(const at_pt_t quad[4], float H[9])
             }
         }
         if (maxv < AT_EPS) return false;
+
+        /*
+         * 把 pivot 行换到当前列。
+         */
         if (pivot != col) {
             for (int k = col; k < 9; k++) {
                 float tmp = A[col][k];
@@ -1105,8 +1199,16 @@ static bool at_solve_homography(const at_pt_t quad[4], float H[9])
                 A[pivot][k] = tmp;
             }
         }
+
+        /*
+         * 当前行归一化，让主元变成 1。
+         */
         float div = A[col][col];
         for (int k = col; k < 9; k++) A[col][k] /= div;
+
+        /*
+         * 消掉其它行的当前列。
+         */
         for (int row = 0; row < 8; row++) {
             if (row == col) continue;
             float factor = A[row][col];
@@ -1114,6 +1216,10 @@ static bool at_solve_homography(const at_pt_t quad[4], float H[9])
             for (int k = col; k < 9; k++) A[row][k] -= factor * A[col][k];
         }
     }
+
+    /*
+     * 消元完成后，最后一列就是 H 的前 8 个参数。
+     */
     H[0] = A[0][8]; H[1] = A[1][8]; H[2] = A[2][8];
     H[3] = A[3][8]; H[4] = A[4][8]; H[5] = A[5][8];
     H[6] = A[6][8]; H[7] = A[7][8]; H[8] = 1.0f;
@@ -1160,6 +1266,10 @@ static uint8_t at_sample_bilinear(const uint8_t *gray, uint32_t width, uint32_t 
  */
 static uint8_t at_sample_cell(const uint8_t *gray, uint32_t width, uint32_t height, const float H[9], float gx, float gy)
 {
+    /*
+     * 一个格子不只采中心点，而是采中心和上下左右共 5 个点求平均。
+     * 这样对轻微模糊、透视误差和像素边界抖动更稳。
+     */
     static const float offs[5][2] = { {0.5f, 0.5f}, {0.3f, 0.5f}, {0.7f, 0.5f}, {0.5f, 0.3f}, {0.5f, 0.7f} };
     uint32_t sum = 0;
     for (int i = 0; i < 5; i++) {
@@ -1217,6 +1327,12 @@ static void at_transform_bits(const uint8_t src[AT_DATA_GRID][AT_DATA_GRID],
                               at_bits_transform_t tf,
                               uint8_t dst[AT_DATA_GRID][AT_DATA_GRID])
 {
+    /*
+     * 对 6x6 数据区做不同几何变换。
+     *
+     * 这些变换用于提高对安装方向、镜像、采样顺序差异的容错能力。
+     * 最终会选择汉明距离最小的那一种。
+     */
     for (uint32_t r = 0; r < AT_DATA_GRID; r++) {
         for (uint32_t c = 0; c < AT_DATA_GRID; c++) {
             switch (tf) {
@@ -1353,6 +1469,10 @@ static bool at_decode_with_quad(const uint8_t *gray,
                                 app_apriltag_result_t *out,
                                 at_debug_info_t *dbg)
 {
+    /*
+     * 初始化调试信息。
+     * dbg 可以为空；不为空时记录每个失败阶段和中间采样结果，方便现场调参。
+     */
     if (dbg) {
         memset(dbg, 0, sizeof(*dbg));
         dbg->used = true;
@@ -1361,8 +1481,16 @@ static bool at_decode_with_quad(const uint8_t *gray,
         dbg->best_hamming = UINT32_MAX;
         for (int i = 0; i < 4; i++) dbg->rot_hamming[i] = UINT32_MAX;
     }
+
+    /*
+     * 候选四角按标准顺序：左上、右上、右下、左下。
+     */
     at_pt_t quad[4] = { cand->tl, cand->tr, cand->br, cand->bl };
     float H[9];
+
+    /*
+     * 先做四边形基本几何校验，再求透视单应矩阵。
+     */
     if (!at_validate_quad(cand)) {
         if (dbg) dbg->fail_stage = AT_DBG_FAIL_VALIDATE_QUAD;
         return false;
@@ -1371,6 +1499,13 @@ static bool at_decode_with_quad(const uint8_t *gray,
         if (dbg) dbg->fail_stage = AT_DBG_FAIL_HOMOGRAPHY;
         return false;
     }
+
+    /*
+     * 对标准 8x8 tag 网格逐格采样。
+     *
+     * 外圈是 AprilTag 的黑色边框；
+     * 内部 6x6 是 Tag36h11 的数据位。
+     */
     uint8_t cells[AT_GRID_SIZE][AT_GRID_SIZE];
     uint32_t border_sum = 0;
     uint8_t inner_vals[AT_DATA_GRID * AT_DATA_GRID];
@@ -1387,6 +1522,12 @@ static bool at_decode_with_quad(const uint8_t *gray,
             }
         }
     }
+
+    /*
+     * 对内部 6x6 灰度值排序。
+     * 后面用最暗 12 个和最亮 12 个估计黑/白均值，
+     * 比直接用全局 Otsu 阈值更适合单个候选区域。
+     */
     for (uint32_t i = 0; i < inner_idx; i++) {
         for (uint32_t j = i + 1; j < inner_idx; j++) {
             if (inner_vals[j] < inner_vals[i]) {
@@ -1394,6 +1535,13 @@ static bool at_decode_with_quad(const uint8_t *gray,
             }
         }
     }
+
+    /*
+     * 估计黑白阈值。
+     *
+     * border_sum 来自外圈黑框，dark_mean/white_mean 来自内部数据区。
+     * 如果图像对比度太低，就放弃这个候选。
+     */
     uint32_t black_mean = border_sum / AT_RING_CELLS;
     uint32_t bright_sum = 0;
     uint32_t dark_sum = 0;
@@ -1411,8 +1559,14 @@ static bool at_decode_with_quad(const uint8_t *gray,
         if (dbg) dbg->fail_stage = AT_DBG_FAIL_CONTRAST;
         return false;
     }
+
     uint8_t threshold = (uint8_t)((black_mean + white_mean) / 2U);
     if (dbg) dbg->decode_threshold = threshold;
+
+    /*
+     * 校验外圈黑框。
+     * Tag36h11 外圈应大部分为黑色；如果黑色比例太低，说明候选不像 tag。
+     */
     uint32_t border_dark = 0;
     for (uint32_t i = 0; i < AT_GRID_SIZE; i++) {
         border_dark += (cells[0][i] < threshold);
@@ -1428,6 +1582,10 @@ static bool at_decode_with_quad(const uint8_t *gray,
         if (dbg) dbg->fail_stage = AT_DBG_FAIL_BORDER;
         return false;
     }
+
+    /*
+     * 把内部 6x6 灰度采样转成 0/1 bit。
+     */
     uint8_t bits0[AT_DATA_GRID][AT_DATA_GRID] = {0};
     for (uint32_t gy = 0; gy < AT_DATA_GRID; gy++) {
         for (uint32_t gx = 0; gx < AT_DATA_GRID; gx++) {
@@ -1435,6 +1593,12 @@ static bool at_decode_with_quad(const uint8_t *gray,
             if (dbg) dbg->bits0[gy][gx] = bits0[gy][gx];
         }
     }
+
+    /*
+     * 尝试 4 个旋转角、多个镜像/转置变换、多个 bit 打包顺序。
+     *
+     * 这样做比只认一种方向更鲁棒，尤其适合摄像头安装方向、画面翻转还在调试阶段的工程。
+     */
     uint32_t best_hamming = 64U;
     uint16_t best_id = 0;
     uint8_t best_rot = 0;
@@ -1457,6 +1621,10 @@ static bool at_decode_with_quad(const uint8_t *gray,
                 uint16_t local_id = 0;
                 uint32_t local_h = UINT32_MAX;
                 at_match_code(code, &local_id, &local_h);
+
+                /*
+                 * 记录当前旋转角下的最佳匹配。
+                 */
                 if (local_h < rot_best_h) {
                     rot_best_h = local_h;
                     rot_best_id = local_id;
@@ -1464,6 +1632,10 @@ static bool at_decode_with_quad(const uint8_t *gray,
                     rot_best_tf = (at_bits_transform_t)tf;
                     rot_best_pack = (at_pack_mode_t)pack;
                 }
+
+                /*
+                 * 记录所有尝试中的全局最佳匹配。
+                 */
                 if (local_h < best_hamming) {
                     best_hamming = local_h;
                     best_id = local_id;
@@ -1480,6 +1652,9 @@ static bool at_decode_with_quad(const uint8_t *gray,
             }
         }
         if (dbg) {
+            /*
+             * 保存当前旋转角的调试信息。
+             */
             dbg->rot_code[rot] = rot_best_code;
             dbg->rot_id[rot] = rot_best_id;
             dbg->rot_hamming[rot] = rot_best_h;
@@ -1487,6 +1662,10 @@ static bool at_decode_with_quad(const uint8_t *gray,
                      at_transform_name(rot_best_tf), at_pack_mode_name(rot_best_pack));
         }
         if (best_hamming == 0U) break;
+
+        /*
+         * 当前旋转角没有完美匹配，继续尝试顺时针旋转 90 度。
+         */
         at_rotate_bits_cw(bits_rot, bits_tmp);
         memcpy(bits_rot, bits_tmp, sizeof(bits_rot));
     }
@@ -1501,6 +1680,10 @@ static bool at_decode_with_quad(const uint8_t *gray,
         if (dbg) dbg->fail_stage = AT_DBG_FAIL_HAMMING;
         return false;
     }
+
+    /*
+     * 匹配成功，把候选几何信息和解码信息写入输出结果。
+     */
     memset(out, 0, sizeof(*out));
     out->valid = true;
     out->id = best_id;
@@ -1523,11 +1706,19 @@ static bool at_decode_with_quad(const uint8_t *gray,
     out->corner_br_y = (int32_t)lroundf(cand->br.y);
     out->corner_bl_x = (int32_t)lroundf(cand->bl.x);
     out->corner_bl_y = (int32_t)lroundf(cand->bl.y);
+
+    /*
+     * 计算四条边的平均像素长度，用于后续粗略距离估算。
+     */
     const float edge_top = sqrtf(at_dist2(&cand->tl, &cand->tr));
     const float edge_right = sqrtf(at_dist2(&cand->tr, &cand->br));
     const float edge_bottom = sqrtf(at_dist2(&cand->br, &cand->bl));
     const float edge_left = sqrtf(at_dist2(&cand->bl, &cand->tl));
     out->edge_px_avg = (edge_top + edge_right + edge_bottom + edge_left) * 0.25f;
+
+    /*
+     * 顶边角度用于 UI/调试观察 tag 是否倾斜。
+     */
     out->top_edge_angle_deg = atan2f(cand->tr.y - cand->tl.y,
                                      cand->tr.x - cand->tl.x) * (180.0f / (float)M_PI);
     if (dbg) dbg->fail_stage = AT_DBG_NONE;
@@ -1571,21 +1762,45 @@ bool app_apriltag_detect_tag36h11(const uint8_t *gray,
                                   uint32_t height,
                                   app_apriltag_result_t *out)
 {
+    /*
+     * 必须先调用 app_apriltag_init() 分配工作缓冲。
+     */
     if (!s_inited) return false;
+
     // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
     if (gray == NULL || out == NULL || width == 0U || height == 0U) return false;
+
+    /*
+     * 限制输入尺寸，确保 s_binary/s_visited/s_queue 缓冲不会越界。
+     */
     if (width > AT_MAX_WIDTH || height > AT_MAX_HEIGHT || (width * height) > AT_MAX_PIXELS) return false;
+
     memset(out, 0, sizeof(*out));
+
+    /*
+     * 第一步：根据当前帧光照自动计算阈值，并二值化。
+     */
     uint8_t threshold = at_otsu_threshold(gray, width, height);
     at_threshold_binary(gray, width, height, threshold);
+
+    /*
+     * 第二步：在二值图中收集可能的 tag 候选区域。
+     */
     at_candidate_t cands[AT_MAX_CANDIDATES] = {0};
     int cand_count = at_collect_candidates(width, height, cands);
     if (cand_count <= 0) {
         return false;
     }
+
+    /*
+     * 第三步：逐个候选做透视采样和码表匹配，保留最佳结果。
+     */
     bool found = false;
     app_apriltag_result_t best = {0};
     for (int i = 0; i < cand_count; i++) {
+        /*
+         * 贴边或过大的候选在最终解码前再过滤一次。
+         */
         if (at_candidate_touch_edge(&cands[i], width, height, AT_EDGE_MARGIN)) {
             continue;
         }
@@ -1596,6 +1811,13 @@ bool app_apriltag_detect_tag36h11(const uint8_t *gray,
         at_debug_info_t dbg;
         bool ok = at_decode_with_quad(gray, width, height, &cands[i], threshold, &cur, &dbg);
         if (!ok) continue;
+
+        /*
+         * 多个候选都能解码时，优先选择：
+         * 1. 汉明距离更小；
+         * 2. 黑边比例更高；
+         * 3. 区域面积更大。
+         */
         if (!found || cur.hamming < best.hamming ||
             (cur.hamming == best.hamming && cur.border_dark_pct > best.border_dark_pct) ||
             (cur.hamming == best.hamming && cur.border_dark_pct == best.border_dark_pct && cur.area > best.area)) {
@@ -1606,6 +1828,10 @@ bool app_apriltag_detect_tag36h11(const uint8_t *gray,
     if (!found) {
         return false;
     }
+
+    /*
+     * 如果候选解码没有写入 threshold，就回填整帧 Otsu 阈值，方便调试显示。
+     */
     if (best.threshold == 0U) best.threshold = threshold;
     *out = best;
     return true;

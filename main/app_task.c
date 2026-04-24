@@ -142,6 +142,10 @@ esp_err_t app_task_register_event_callback(app_task_event_cb_t cb, void *user_ct
  */
 esp_err_t app_task_init(uint16_t default_target_id)
 {
+    /*
+     * 初始化函数可能被重复调用。
+     * 先在临界区内检查 inited，避免多任务场景下重复清空任务状态。
+     */
     // 进入临界区：下面代码会访问跨任务共享变量，必须短时间关中断/加锁保护。
     taskENTER_CRITICAL(&s_mux);
     if (s_rt.inited) {
@@ -152,9 +156,21 @@ esp_err_t app_task_init(uint16_t default_target_id)
     }
     // 退出临界区：共享变量访问结束，恢复正常调度/中断。
     taskEXIT_CRITICAL(&s_mux);
+
+    /*
+     * 从 NVS 加载上次保存的目标 tag ID。
+     * 如果 NVS 没有记录或读取失败，就使用 main.c 传进来的默认 ID。
+     */
     uint16_t loaded_target = app_task_load_target_id(default_target_id);
+
     // 进入临界区：下面代码会访问跨任务共享变量，必须短时间关中断/加锁保护。
     taskENTER_CRITICAL(&s_mux);
+
+    /*
+     * 初始化运行时状态。
+     * 启动后默认进入 CONFIGURED，而不是 IDLE，
+     * 表示系统已经有一个可用目标 ID，只是在等待任务开始。
+     */
     memset(&s_rt, 0, sizeof(s_rt));
     s_rt.inited = true;
     s_rt.target_id = loaded_target;
@@ -186,20 +202,38 @@ uint16_t app_task_get_target_id(void)
  */
 esp_err_t app_task_set_target_id(uint16_t target_id, bool persist)
 {
+    /*
+     * 任务模块必须先初始化，才能修改目标 ID。
+     */
     if (!s_rt.inited) {
         return ESP_ERR_INVALID_STATE;
     }
+
     // 进入临界区：下面代码会访问跨任务共享变量，必须短时间关中断/加锁保护。
     taskENTER_CRITICAL(&s_mux);
+
+    /*
+     * 更新目标 ID 后，清掉已经匹配过的 tag。
+     * target_dirty 用来告诉 UI/云端：目标配置发生了变化。
+     */
     s_rt.target_id = target_id;
     s_rt.matched_tag_id = 0;
     s_rt.target_dirty = true;
+
+    /*
+     * 如果当前没有活跃任务，修改目标 ID 后保持在 CONFIGURED 状态。
+     * 如果任务正在进行，则只更新目标，不强行打断当前状态。
+     */
     if (!s_rt.active) {
         app_task_change_state_locked(APP_TASK_STATE_CONFIGURED, "target updated");
     }
     // 退出临界区：共享变量访问结束，恢复正常调度/中断。
     taskEXIT_CRITICAL(&s_mux);
     if (persist) {
+        /*
+         * 需要持久化时写入 NVS。
+         * 失败时返回错误，但内存中的 target_id 已经更新，系统仍可继续运行。
+         */
         esp_err_t ret = app_task_persist_target_id(target_id);
         if (ret != ESP_OK) {
             // 警告日志：系统还能继续运行，但某个功能可能降级或不完整。
@@ -218,11 +252,24 @@ esp_err_t app_task_set_target_id(uint16_t target_id, bool persist)
  */
 esp_err_t app_task_start_with_target(uint16_t target_id, const char *source)
 {
+    /*
+     * 开始任务前必须完成 app_task_init()。
+     */
     if (!s_rt.inited) {
         return ESP_ERR_INVALID_STATE;
     }
+
     // 进入临界区：下面代码会访问跨任务共享变量，必须短时间关中断/加锁保护。
     taskENTER_CRITICAL(&s_mux);
+
+    /*
+     * 一单新任务开始：
+     * - 设置目标 tag ID；
+     * - 标记 active；
+     * - 清空 matched_tag_id；
+     * - 记录来源 local/remote/touch；
+     * - 进入 WAIT_APPROACH，等待无人机靠近并通过视觉鉴权。
+     */
     s_rt.target_id = target_id;
     s_rt.target_dirty = true;
     s_rt.active = true;
@@ -257,6 +304,11 @@ esp_err_t app_task_submit_remote_request(uint16_t target_id, const char *source)
 void app_task_mark_auth_passed(uint16_t matched_tag_id)
 {
     bool changed = false;
+
+    /*
+     * 只有活跃任务且处于 WAIT_APPROACH 时，视觉鉴权通过才会改变任务状态。
+     * 这样可以避免重复调用把已完成/已取消任务重新改成 auth_passed。
+     */
     // 进入临界区：下面代码会访问跨任务共享变量，必须短时间关中断/加锁保护。
     taskENTER_CRITICAL(&s_mux);
     if (s_rt.active && s_rt.state == APP_TASK_STATE_WAIT_APPROACH) {
@@ -275,6 +327,10 @@ void app_task_mark_auth_passed(uint16_t matched_tag_id)
 void app_task_mark_docking_started(void)
 {
     bool changed = false;
+
+    /*
+     * 只有等待靠近或鉴权通过后的任务，才能进入 DOCKING。
+     */
     taskENTER_CRITICAL(&s_mux);
     if (s_rt.active &&
         (s_rt.state == APP_TASK_STATE_WAIT_APPROACH || s_rt.state == APP_TASK_STATE_AUTH_PASSED)) {
@@ -291,6 +347,9 @@ void app_task_mark_docking_started(void)
  */
 void app_task_mark_completed(const char *note)
 {
+    /*
+     * 完成后 active=false，表示这一单任务已经闭环。
+     */
     taskENTER_CRITICAL(&s_mux);
     s_rt.active = false;
     app_task_change_state_locked(APP_TASK_STATE_COMPLETED, note != NULL ? note : "task completed");
@@ -302,6 +361,10 @@ void app_task_mark_completed(const char *note)
  */
 void app_task_mark_fault(const char *note)
 {
+    /*
+     * 故障状态同样结束当前 active 任务。
+     * note 会被云端状态上报带出去，便于小程序/服务器显示原因。
+     */
     taskENTER_CRITICAL(&s_mux);
     s_rt.active = false;
     app_task_change_state_locked(APP_TASK_STATE_FAULT, note != NULL ? note : "task fault");
@@ -313,6 +376,9 @@ void app_task_mark_fault(const char *note)
  */
 void app_task_cancel(const char *note)
 {
+    /*
+     * 取消任务时清掉 matched_tag_id，避免下一单任务误用上一单鉴权结果。
+     */
     taskENTER_CRITICAL(&s_mux);
     s_rt.active = false;
     s_rt.matched_tag_id = 0;
@@ -325,6 +391,10 @@ void app_task_cancel(const char *note)
  */
 void app_task_reset_idle(void)
 {
+    /*
+     * reset_idle 实际回到 CONFIGURED。
+     * 这样目标 ID 仍然保留，系统可以直接开始下一单任务。
+     */
     taskENTER_CRITICAL(&s_mux);
     s_rt.active = false;
     s_rt.matched_tag_id = 0;
@@ -341,6 +411,11 @@ bool app_task_get_snapshot(app_task_snapshot_t *out)
     if (out == NULL) {
         return false;
     }
+
+    /*
+     * 快照是跨模块通信用的只读副本。
+     * app_cloud.c 会把它转成 MQTT JSON，app_ctrl.c/UI 也可以用它显示任务状态。
+     */
     taskENTER_CRITICAL(&s_mux);
     out->inited = s_rt.inited;
     out->active = s_rt.active;
@@ -351,6 +426,10 @@ bool app_task_get_snapshot(app_task_snapshot_t *out)
     out->state_since_ms = s_rt.state_since_ms;
     strlcpy(out->source, s_rt.source, sizeof(out->source));
     strlcpy(out->note, s_rt.note, sizeof(out->note));
+
+    /*
+     * target_dirty 被读取后清除，表示“目标变更”已经被观察到。
+     */
     s_rt.target_dirty = false;
     taskEXIT_CRITICAL(&s_mux);
     return true;

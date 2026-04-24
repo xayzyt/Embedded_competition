@@ -259,6 +259,12 @@ static void app_ui_map_bbox_to_screen(const app_vision_result_t *vision,
     if ((vision == NULL) || (x == NULL) || (y == NULL) || (w == NULL) || (h == NULL)) {
         return;
     }
+
+    /*
+     * 视觉算法输出的是源灰度图坐标系中的 bbox。
+     * 先取出四个角点，而不是只换算左上和右下，
+     * 是因为摄像头画面可能被 90/180/270 度旋转。
+     */
     float src_x1 = (float)vision->bbox_x;
     float src_y1 = (float)vision->bbox_y;
     float src_x2 = (float)(vision->bbox_x + vision->bbox_w);
@@ -269,14 +275,28 @@ static void app_ui_map_bbox_to_screen(const app_vision_result_t *vision,
         {src_x2, src_y2},
         {src_x1, src_y2},
     };
+
+    /*
+     * 根据摄像头旋转角度，得到旋转后的源图宽高。
+     */
     int32_t rot_w = HUD_SRC_W;
     int32_t rot_h = HUD_SRC_H;
     app_ui_get_rotated_dims(&rot_w, &rot_h);
+
+    /*
+     * 摄像头画面在屏幕上是等比例适配显示的。
+     * fit_w/fit_h 是实际显示区域，off_x/off_y 是黑边偏移。
+     */
     int32_t fit_w = rot_w;
     int32_t fit_h = rot_h;
     app_ui_calc_fit_dims(rot_w, rot_h, &fit_w, &fit_h);
     int32_t off_x = (BSP_LCD_H_RES - fit_w) / 2;
     int32_t off_y = (BSP_LCD_V_RES - fit_h) / 2;
+
+    /*
+     * 将 bbox 四个角点分别旋转、缩放、平移到屏幕坐标，
+     * 再取 min/max 得到最终 HUD 识别框。
+     */
     float min_x = 100000.0f;
     float min_y = 100000.0f;
     float max_x = -100000.0f;
@@ -292,10 +312,19 @@ static void app_ui_map_bbox_to_screen(const app_vision_result_t *vision,
         if (sx > max_x) max_x = sx;
         if (sy > max_y) max_y = sy;
     }
+
+    /*
+     * 输出结果限制在屏幕范围内。
+     * 最小宽高设为 12，避免识别框小到几乎看不见。
+     */
     *x = app_ui_clamp_i32((int32_t)(min_x + 0.5f), 0, BSP_LCD_H_RES - 1);
     *y = app_ui_clamp_i32((int32_t)(min_y + 0.5f), 0, BSP_LCD_V_RES - 1);
     *w = app_ui_clamp_i32((int32_t)(max_x - min_x + 0.5f), 12, BSP_LCD_H_RES);
     *h = app_ui_clamp_i32((int32_t)(max_y - min_y + 0.5f), 12, BSP_LCD_V_RES);
+
+    /*
+     * 如果框右边或下边超出屏幕，收缩宽高而不是移动左上角。
+     */
     if ((*x + *w) > BSP_LCD_H_RES) {
         *w = BSP_LCD_H_RES - *x;
     }
@@ -312,6 +341,10 @@ static void app_ui_update_lock_bar(const app_dock_judge_result_t *dock)
     lv_color_t active = lv_color_hex(0xFFD34D);
     // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
     if (dock != NULL) {
+        /*
+         * 默认用 stable_count 填充锁定条。
+         * READY 状态直接填满，强调已经满足接驳条件。
+         */
         filled = (dock->stable_count > HUD_LOCK_SEG_COUNT) ? HUD_LOCK_SEG_COUNT : (uint8_t)dock->stable_count;
         if (dock->state == APP_DOCK_STATE_READY_TO_DOCK) {
             active = lv_color_hex(0x31E08A);
@@ -322,6 +355,10 @@ static void app_ui_update_lock_bar(const app_dock_judge_result_t *dock)
             active = lv_color_hex(0xFF5D5D);
         }
     }
+
+    /*
+     * 每个小段根据 filled 决定亮起或熄灭。
+     */
     for (int i = 0; i < HUD_LOCK_SEG_COUNT; i++) {
         // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
         if (s_lock_seg[i] == NULL) {
@@ -582,6 +619,11 @@ void app_ui_update_hud(const app_vision_result_t *vision,
     int32_t box_y = 0;
     int32_t box_w = 0;
     int32_t box_h = 0;
+
+    /*
+     * 优先使用当前有效视觉结果。
+     * 如果当前帧有效，就重新计算识别框并保存为 last_box。
+     */
     // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
     if ((vision != NULL) && vision->valid) {
         app_ui_map_bbox_to_screen(vision, &box_x, &box_y, &box_w, &box_h);
@@ -593,6 +635,10 @@ void app_ui_update_hud(const app_vision_result_t *vision,
         show_box = true;
     } else if (s_have_last_box && (dock->invalid_hold_count > 0U) &&
                (dock->state != APP_DOCK_STATE_SEARCHING)) {
+        /*
+         * 当前帧无效但接驳判定仍处于 hold 窗口时，
+         * 继续显示上一帧识别框，并降低透明度，提示这是保持状态而不是新识别。
+         */
         box_x = s_last_box_x;
         box_y = s_last_box_y;
         box_w = s_last_box_w;
@@ -600,17 +646,33 @@ void app_ui_update_hud(const app_vision_result_t *vision,
         show_box = true;
         hold_box = true;
     } else {
+        /*
+         * 已经没有可保持的目标框。
+         */
         s_have_last_box = false;
     }
+
+    /*
+     * 识别框颜色跟随接驳状态变化：
+     * wrong_id 红色，tracking 黄色，aligned 蓝色，ready 绿色，hold 灰色。
+     */
     lv_color_t box_color = app_ui_state_color(dock->state, hold_box);
     lv_opa_t box_opa = hold_box ? LV_OPA_50 : LV_OPA_COVER;
     app_ui_set_track_box(show_box, box_x, box_y, box_w, box_h, box_color, box_opa);
+
     // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
     if ((s_cross_h != NULL) && (s_cross_v != NULL)) {
+        /*
+         * 中心准星颜色也跟随接驳状态，方便用户不用看文字也能判断当前阶段。
+         */
         lv_color_t cross_color = app_ui_state_color(dock->state, false);
         lv_obj_set_style_bg_color(s_cross_h, cross_color, 0);
         lv_obj_set_style_bg_color(s_cross_v, cross_color, 0);
     }
+
+    /*
+     * 更新锁定条和 AUTH PASSED 横幅。
+     */
     app_ui_update_lock_bar(dock);
     app_ui_update_auth_banner(dock->state);
     // 释放 LVGL/BSP 显示锁。

@@ -297,13 +297,36 @@ static esp_err_t app_image_process_scale_crop(uint8_t *in_buf,
                                               size_t out_buf_size,
                                               ppa_srm_rotation_angle_t rotation_angle)
 {
+    /*
+     * PPA 的缩放比例使用“输出尺寸 / 输入尺寸”。
+     * 普通 0/180 度旋转时，宽对应宽、高对应高。
+     */
     float scale_x = (float)out_width / (float)in_width;
     float scale_y = (float)out_height / (float)in_height;
+
+    /*
+     * 90/270 度旋转后，输入宽度会落到输出高度方向，
+     * 输入高度会落到输出宽度方向，所以这里需要交换比例计算方式。
+     */
     if (rotation_angle == PPA_SRM_ROTATION_ANGLE_90 || rotation_angle == PPA_SRM_ROTATION_ANGLE_270) {
         scale_x = (float)out_height / (float)in_width;
         scale_y = (float)out_width / (float)in_height;
     }
+
+    /*
+     * 先清空输出缓冲。
+     *
+     * 等比例适配时会出现黑边，清零可以避免上一帧的边缘残影留在屏幕上。
+     */
     memset(out_buf, 0, out_buf_size);
+
+    /*
+     * PPA SRM 配置：
+     * - in 描述摄像头输入图；
+     * - out 描述屏幕画布输出图；
+     * - block_offset_x/y 用于居中显示；
+     * - BLOCKING 模式保证函数返回时处理已经完成。
+     */
     ppa_srm_oper_config_t srm_cfg = {
         .in.buffer = in_buf,
         .in.pic_w = in_width,
@@ -327,6 +350,10 @@ static esp_err_t app_image_process_scale_crop(uint8_t *in_buf,
         .byte_swap = 0,
         .mode = PPA_TRANS_MODE_BLOCKING,
     };
+
+    /*
+     * 执行硬件缩放/旋转/镜像处理。
+     */
     return ppa_do_scale_rotate_mirror(s_ppa_srm_handle, &srm_cfg);
 }
 #endif
@@ -433,21 +460,41 @@ static void app_camera_release_stage_buffer(int buf_index)
  */
 static void app_camera_display_task(void *arg)
 {
+    /*
+     * 显示任务不需要外部参数。
+     */
     (void)arg;
     while (1) {
+        /*
+         * 等待摄像头回调发布新的 stage buffer。
+         * 没有新帧时任务阻塞，避免空转占用 CPU。
+         */
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         while (1) {
+            /*
+             * 取出最新 READY 缓冲。
+             * 如果没有待显示帧，结束本轮消费，回到通知等待状态。
+             */
             int buf_index = app_camera_take_ready_stage_buffer();
             // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
             if (buf_index < 0 || s_camera_canvas == NULL || s_ui_canvas_buf == NULL) {
                 break;
             }
+
+            /*
+             * stage buffer 可能刚被 PPA/DMA 写过。
+             * CPU 拷贝前先做 M2C 同步，确保读到的是最新图像数据。
+             */
             if (app_camera_msync_m2c(s_stage_buf[buf_index], s_disp_buf_size) != ESP_OK) {
                 app_camera_release_stage_buffer(buf_index);
                 continue;
             }
             // 加 LVGL/BSP 显示锁，防止多个任务同时操作 UI 控件。
             if (bsp_display_lock(0)) {
+                /*
+                 * LVGL canvas 绑定的是 s_ui_canvas_buf。
+                 * stage buffer 是后台缓冲，处理完成后需要复制到 canvas buffer 再刷新控件。
+                 */
                 memcpy(s_ui_canvas_buf, s_stage_buf[buf_index], s_disp_buf_size);
                 app_camera_msync_c2m(s_ui_canvas_buf, s_disp_buf_size);
                 lv_obj_invalidate(s_camera_canvas);
@@ -455,46 +502,83 @@ static void app_camera_display_task(void *arg)
                 // 释放 LVGL/BSP 显示锁。
                 bsp_display_unlock();
             }
+
+            /*
+             * 释放 stage buffer。
+             * 即使本轮没有拿到 LVGL 锁，也不能一直占着缓冲，否则摄像头回调会越来越容易丢帧。
+             */
             app_camera_release_stage_buffer(buf_index);
         }
     }
 }
+/*
+ * 摄像头帧回调。
+ *
+ * app_video.c 每取到一帧 RGB565 图像就会调用这里。
+ * 本函数负责把同一帧分发到两条链路：
+ * - 抽样提交给 app_vision.c 做 AprilTag 识别；
+ * - 缩放/旋转后发布给显示任务刷新 LVGL canvas。
+ */
 static void app_camera_frame_cb(uint8_t *camera_buf,
                                 uint8_t camera_buf_index,
                                 uint32_t camera_buf_hes,
                                 uint32_t camera_buf_ves,
                                 size_t camera_buf_len)
 {
+    /*
+     * 当前没有使用 camera_buf_index。
+     * USERPTR 模式下缓冲地址已经能表示当前帧来源。
+     */
     (void)camera_buf_index;
+
     // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
     if (camera_buf == NULL || s_camera_canvas == NULL || s_ui_canvas_buf == NULL) {
         return;
     }
+
+    /*
+     * 摄像头 DMA/驱动刚写完 camera_buf，CPU 读取前需要同步 cache。
+     */
     if (app_camera_msync_m2c(camera_buf, camera_buf_len) != ESP_OK) {
         return;
     }
+
+    /*
+     * 视觉识别不必每帧都跑。
+     * 抽样可以减少 AprilTag 检测负载，让摄像头预览更流畅。
+     */
     if (++s_vision_sample_skip >= VISION_SAMPLE_INTERVAL) {
         s_vision_sample_skip = 0;
-/*
- * 摄像头模块提交 RGB565 帧，本函数抽样/缩放/转灰度后交给视觉任务处理。
- */
         (void)app_vision_submit_frame(camera_buf,
                                       camera_buf_hes,
                                       camera_buf_ves,
                                       camera_buf_len);
     }
+
+    /*
+     * 如果已经有一帧待显示，就跳过当前帧的显示处理。
+     * 这能避免显示任务慢时不断堆积旧帧。
+     */
     if (app_camera_has_pending_stage()) {
         return;
     }
+
+    /*
+     * 从 stage buffer 池里取一个空闲缓冲。
+     */
     int stage_index = app_camera_pick_writable_stage_buffer();
     if (stage_index < 0) {
         return;
     }
+
     uint32_t out_w = BSP_LCD_H_RES;
     uint32_t out_h = BSP_LCD_V_RES;
     uint8_t *out_buf = s_stage_buf[stage_index];
 #if SOC_PPA_SUPPORTED
     if (s_ppa_srm_handle) {
+        /*
+         * 把 BSP_CAMERA_ROTATION 转成 PPA 使用的旋转枚举。
+         */
         ppa_srm_rotation_angle_t rotation = PPA_SRM_ROTATION_ANGLE_0;
         switch (BSP_CAMERA_ROTATION) {
             case 90:  rotation = PPA_SRM_ROTATION_ANGLE_90; break;
@@ -503,11 +587,20 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
             case 0:
             default:  rotation = PPA_SRM_ROTATION_ANGLE_0; break;
         }
+
+        /*
+         * 根据旋转后的源图宽高，计算适配屏幕的显示尺寸。
+         */
         if (BSP_CAMERA_ROTATION == 90 || BSP_CAMERA_ROTATION == 270) {
             calc_aspect_fit(camera_buf_ves, camera_buf_hes, BSP_LCD_H_RES, BSP_LCD_V_RES, &out_w, &out_h);
         } else {
             calc_aspect_fit(camera_buf_hes, camera_buf_ves, BSP_LCD_H_RES, BSP_LCD_V_RES, &out_w, &out_h);
         }
+
+        /*
+         * 用 PPA 生成最终显示帧。
+         * 失败时必须归还 stage buffer，避免缓冲状态机卡住。
+         */
         if (app_image_process_scale_crop(camera_buf,
                                          camera_buf_hes,
                                          camera_buf_ves,
@@ -522,13 +615,26 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
     } else
 #endif
     {
+        /*
+         * 没有 PPA 的降级路径。
+         * 只做安全长度的直接拷贝，保证工程至少能看到原始画面数据。
+         */
         size_t copy_len = camera_buf_len < s_disp_buf_size ? camera_buf_len : s_disp_buf_size;
         memcpy(out_buf, camera_buf, copy_len);
     }
+
+    /*
+     * out_buf 接下来由显示任务读取。
+     * 发布前同步一次，保证跨任务读取到完整图像。
+     */
     if (app_camera_msync_m2c(out_buf, s_disp_buf_size) != ESP_OK) {
         app_camera_abandon_stage_buffer(stage_index);
         return;
     }
+
+    /*
+     * 标记为 READY，并通知显示任务消费。
+     */
     app_camera_publish_stage_buffer(stage_index);
 }
 /*
