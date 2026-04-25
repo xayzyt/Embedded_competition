@@ -1,84 +1,72 @@
 # SkyAnchor MiniApp
 
-Native WeChat mini program scaffold for:
+SkyAnchor 比赛体验版小程序，当前主链路为：
 
-- sender side: create orders and view sender orders
-- receiver side: view notifications and open order details
+`用户手机 / 配送手机 -> 微信云函数 skyanchorService -> EMQX MQTT -> ESP32`
+
+当前版本不再依赖本地 Python 后端或公网自建服务器，适合用微信小程序体验版做现场演示。
 
 ## Import
 
-1. Open WeChat DevTools.
-2. Import the folder `skyanchor-miniapp`.
-3. Use the generated test AppID or keep `touristappid` for local preview.
+1. 打开微信开发者工具。
+2. 导入目录 `skyanchor-miniapp`。
+3. 确认 AppID 为 `wxe56e63bb28b1339e`。
+4. 确认云环境为 `cloud1-d5g90ikff6eed3f26`。
 
-## Local backend
-
-The app points to:
-
-- `http://127.0.0.1:8000`
-
-This is intended for the WeChat DevTools simulator.
-
-For local development, enable:
-
-- `Do not verify valid domain names, web-view, TLS version, and HTTPS certificates`
-
-For real phone testing, replace the backend URL with a public HTTPS domain and configure it in the mini program admin console.
-
-## Current routes
+## Current Routes
 
 - `pages/role/index`
 - `pages/sender-dispatch/index`
 - `pages/user-orders/index`
 - `pages/order-panel/index`
 
-## Useful flow
+## Demo Profile
 
-1. Open the role page and choose `我是用户` or `我是配送员`.
-2. In the user page, save `receiver_003`.
-3. Click `我要下单`, then confirm the modal to create an order directly.
-4. Switch to the dispatch page, open the pending order, and manually choose drone `0` or `1`.
-5. Start delivery and watch the order detail page update automatically.
+- 默认用户 ID：`receiver`
+- 配送端手动选择 AprilTag：`0` 或 `1`
+- MQTT 设备名：`skyanchor-p4`
+- MQTT topic 前缀：`skyanchor`
 
-## Fixed demo profile
+如果旧手机缓存里还存着 `receiver_003` 或 `receiver__003`，小程序启动时会自动迁移成 `receiver`。其他手动输入过的用户 ID 会保留。
 
-Use the same profile across the miniapp, backend, and board demos:
+## Experience Release Flow
 
-- receiver_id: `receiver_003`
-- target_id: `3`
-- dispatch devices: `0` and `1`
+1. 在微信公众平台把演示用的两个微信号加入体验成员。
+2. 在微信开发者工具中右键 `cloudfunctions/skyanchorService`。
+3. 选择“上传并部署：云端安装依赖”。
+4. 点击右上角“上传”，填写版本号，例如 `demo-20260425`。
+5. 在版本管理里把该版本设为体验版。
+6. 用户手机和配送手机分别扫码体验版二维码。
 
-The miniapp now defaults to the receiver profile above, while the dispatch side manually chooses drone `0` or `1`.
+## Phone And Network Setup
 
-## Recommended bring-up order
+现场可以使用三台手机：
 
-1. Start `skyanchor-server`
-2. Open `http://127.0.0.1:8000/health`
-3. Confirm `ok=true` and `mqtt_started=true`
-4. Bring the board online
-5. Open WeChat DevTools and start the sender/receiver demo flow
+- 手机 A：用户端，使用自己的移动数据。
+- 手机 B：配送端，使用自己的移动数据。
+- 手机 C：给 ESP32 开热点，热点需要能访问公网。
 
-## Current integration notes
+ESP32 固件当前 Wi-Fi 配置为：
 
-- When the backend is offline, the miniapp should say that `skyanchor-server` is not running.
-- When the backend is online but MQTT is not ready, the miniapp should allow order creation but clearly block `开始配送`.
-- `order-panel` polls active orders every 2 seconds.
-- `user-orders` polls order lists every 3 seconds.
+- SSID：`5705`
+- 密码：`12345678`
 
-## Closed-loop checklist
+用户手机和配送手机不需要与 ESP32 在同一个局域网。只要三者都能访问公网，云函数和 EMQX MQTT 就能完成闭环。建议手机 C 开 2.4GHz 热点，并在比赛前确认串口日志出现：
 
-Use the same demo profile across the whole project:
+- `wifi got ip`
+- `EMQX mqtt connected`
+- `system ready`
 
-- `receiver_id = receiver_003`
-- `target_id = 3`
-- `dispatch devices = 0,1`
+## Demo Flow
 
-Recommended order of operations:
+1. 用户端进入 `我是用户`，确认用户 ID 为 `receiver`。
+2. 用户端点击 `我要下单` 并确认。
+3. 配送端进入 `我是配送员`，刷新并打开待调度订单。
+4. 配送端选择 `AprilTag 0` 或 `AprilTag 1`。
+5. 配送端点击 `开始配送`。
+6. ESP32 串口应看到 MQTT 收到 `start_task`。
+7. 小程序订单状态随板端状态更新到配送、识别、执行和送达。
 
-1. Start `skyanchor-server`.
-2. Confirm `GET /health` returns `ok=true` and `mqtt_started=true`.
-3. Bring the board online and wait for `wifi got ip`, `EMQX mqtt connected`, and `system ready`.
-4. Open WeChat DevTools.
-5. In the miniapp, choose `我是用户`, save `receiver_003`, and click `我要下单`.
-6. Switch to `我是配送员`, open the pending order, choose drone `0` or `1`, and click `开始配送`.
-7. Open the order detail page and watch the status move to the delivered state.
+## Historical Local Backend Note
+
+旧版曾经使用 `skyanchor-server` 本地后端和 `http://127.0.0.1:8000` 调试路径。当前体验版演示不要按旧本地后端流程发布；该路径只作为历史调试说明保留。

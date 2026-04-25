@@ -1,5 +1,5 @@
 const DEMO_PROFILE = {
-  receiverId: 'receiver_003'
+  receiverId: 'receiver'
 };
 
 function getDemoProfile() {

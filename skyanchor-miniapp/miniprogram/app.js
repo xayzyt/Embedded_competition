@@ -7,6 +7,25 @@ const {
   buildServiceStatusFromError
 } = require('./utils/service-status.js');
 
+const RECEIVER_ID_STORAGE_KEY = 'skyanchor_receiver_id';
+const LEGACY_DEMO_RECEIVER_IDS = ['receiver_003', 'receiver__003'];
+
+function resolveInitialReceiverId(defaultReceiverId) {
+  const fallbackReceiverId = String(defaultReceiverId || '').trim() || 'receiver';
+  const storedReceiverId = String(wx.getStorageSync(RECEIVER_ID_STORAGE_KEY) || '').trim();
+
+  if (!storedReceiverId) {
+    return fallbackReceiverId;
+  }
+
+  if (LEGACY_DEMO_RECEIVER_IDS.indexOf(storedReceiverId) >= 0) {
+    wx.setStorageSync(RECEIVER_ID_STORAGE_KEY, fallbackReceiverId);
+    return fallbackReceiverId;
+  }
+
+  return storedReceiverId;
+}
+
 App({
   onLaunch() {
     // 统一初始化云开发环境，后续接口全部改走云函数。
@@ -22,7 +41,7 @@ App({
     const demoProfile = getDemoProfile();
 
     this.globalData.demoProfile = demoProfile;
-    this.globalData.receiverId = wx.getStorageSync('skyanchor_receiver_id') || demoProfile.receiverId;
+    this.globalData.receiverId = resolveInitialReceiverId(demoProfile.receiverId);
     this.globalData.serviceStatus = defaultServiceStatus();
 
     this.refreshServiceHealth();

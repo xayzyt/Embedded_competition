@@ -25,15 +25,15 @@ static const char *NVS_KEY_TARGET_ID = "target_id";
  * 结构体类型：把同一类运行时数据或协议字段打包在一起，方便函数之间传递。
  */
 typedef struct {
-    bool inited;
-    bool active;
-    bool target_dirty;
-    uint16_t target_id;
-    uint16_t matched_tag_id;
-    app_task_state_t state;
-    char source[20];
-    char note[64];
-    uint32_t state_since_ms;
+    bool inited;                 // 模块是否已经初始化，避免重复初始化覆盖当前任务状态。
+    bool active;                 // 当前是否有任务正在执行，用于判断能否进入空闲/配置态。
+    bool target_dirty;           // 目标 tag ID 是否被更新过，提醒 UI/云端刷新配置。
+    uint16_t target_id;          // 本次任务期望识别或接驳的目标 tag ID。
+    uint16_t matched_tag_id;     // 实际识别匹配到的 tag ID，任务开始前通常为 0。
+    app_task_state_t state;      // 当前任务状态，例如已配置、鉴权通过、接驳中、完成等。
+    char source[20];             // 当前目标配置来源，例如 local、cloud、ui。
+    char note[64];               // 状态变化的简短说明，便于日志、UI 或云端展示。
+    uint32_t state_since_ms;     // 进入当前状态时的毫秒时间戳，用于计算状态持续时间。
 } app_task_runtime_t;
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;        // 模块级静态变量 s_mux，只在本文件内部使用，避免被其他文件直接修改。
 static app_task_runtime_t s_rt = {0};                            // 模块级静态变量 s_rt，只在本文件内部使用，避免被其他文件直接修改。
@@ -68,10 +68,17 @@ static void app_task_emit_event(app_task_event_t event)
     app_task_event_cb_t cb = NULL;
     void *user_ctx = NULL;
     app_task_snapshot_t snap = {0};
+
+    /*
+     * 先在临界区内把回调指针和运行时状态复制到局部变量。
+     * 这样可以保证快照里的字段来自同一时刻，避免其他任务正在修改 s_rt 时读到一半新一半旧的数据。
+     */
     // 进入临界区：下面代码会访问跨任务共享变量，必须短时间关中断/加锁保护。
     taskENTER_CRITICAL(&s_mux);
     cb = s_event_cb;
     user_ctx = s_event_user_ctx;
+
+    // 将内部运行时状态转换成对外只读快照，回调接收的是 snap 而不是直接访问 s_rt。
     snap.inited = s_rt.inited;
     snap.active = s_rt.active;
     snap.target_dirty = s_rt.target_dirty;
@@ -83,6 +90,11 @@ static void app_task_emit_event(app_task_event_t event)
     strlcpy(snap.note, s_rt.note, sizeof(snap.note));
     // 退出临界区：共享变量访问结束，恢复正常调度/中断。
     taskEXIT_CRITICAL(&s_mux);
+
+    /*
+     * 回调可能做日志、发云端消息，甚至间接调用本模块接口。
+     * 所以必须在退出临界区之后再执行，避免长时间关中断或造成锁重入问题。
+     */
     // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
     if (cb != NULL) {
         cb(event, &snap, user_ctx);
