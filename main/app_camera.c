@@ -286,6 +286,67 @@ static void calc_aspect_fit(uint32_t src_w, uint32_t src_h,
     }
 }
 /*
+ * Clear only the black bars around the scaled frame.
+ */
+static esp_err_t app_camera_clear_letterbox(uint8_t *out_buf,
+                                            uint32_t out_width,
+                                            uint32_t out_height)
+{
+    if (out_buf == NULL || out_width > BSP_LCD_H_RES || out_height > BSP_LCD_V_RES) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    const size_t pixel_size = 2U;
+    const size_t row_stride = (size_t)BSP_LCD_H_RES * pixel_size;
+    const uint32_t x_off = (BSP_LCD_H_RES - out_width) / 2U;
+    const uint32_t y_off = (BSP_LCD_V_RES - out_height) / 2U;
+    const uint32_t bottom_y = y_off + out_height;
+    const uint32_t right_x = x_off + out_width;
+
+    if (y_off > 0) {
+        size_t bytes = (size_t)y_off * row_stride;
+        memset(out_buf, 0, bytes);
+        esp_err_t ret = app_camera_msync_c2m(out_buf, bytes);
+        if (ret != ESP_OK) {
+            return ret;
+        }
+    }
+
+    if (bottom_y < BSP_LCD_V_RES) {
+        uint8_t *bottom = out_buf + (size_t)bottom_y * row_stride;
+        size_t bytes = (size_t)(BSP_LCD_V_RES - bottom_y) * row_stride;
+        memset(bottom, 0, bytes);
+        esp_err_t ret = app_camera_msync_c2m(bottom, bytes);
+        if (ret != ESP_OK) {
+            return ret;
+        }
+    }
+
+    if (x_off > 0 || right_x < BSP_LCD_H_RES) {
+        const size_t left_bytes = (size_t)x_off * pixel_size;
+        const size_t right_bytes = (size_t)(BSP_LCD_H_RES - right_x) * pixel_size;
+        for (uint32_t y = y_off; y < bottom_y; y++) {
+            uint8_t *row = out_buf + (size_t)y * row_stride;
+            if (left_bytes > 0) {
+                memset(row, 0, left_bytes);
+            }
+            if (right_bytes > 0) {
+                memset(row + (size_t)right_x * pixel_size, 0, right_bytes);
+            }
+        }
+
+        uint8_t *rows = out_buf + (size_t)y_off * row_stride;
+        size_t bytes = (size_t)out_height * row_stride;
+        esp_err_t ret = app_camera_msync_c2m(rows, bytes);
+        if (ret != ESP_OK) {
+            return ret;
+        }
+    }
+
+    return ESP_OK;
+}
+
+/*
  * 使用 PPA 把摄像头 RGB565 图像缩放/旋转到屏幕大小，供 LVGL 画布显示。
  */
 static esp_err_t app_image_process_scale_crop(uint8_t *in_buf,
@@ -314,11 +375,12 @@ static esp_err_t app_image_process_scale_crop(uint8_t *in_buf,
     }
 
     /*
-     * 先清空输出缓冲。
-     *
-     * 等比例适配时会出现黑边，清零可以避免上一帧的边缘残影留在屏幕上。
+     * Clear only the letterbox area. The PPA overwrites the active image block.
      */
-    memset(out_buf, 0, out_buf_size);
+    esp_err_t clear_ret = app_camera_clear_letterbox(out_buf, out_width, out_height);
+    if (clear_ret != ESP_OK) {
+        return clear_ret;
+    }
 
     /*
      * PPA SRM 配置：
@@ -574,6 +636,7 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
     uint32_t out_w = BSP_LCD_H_RES;
     uint32_t out_h = BSP_LCD_V_RES;
     uint8_t *out_buf = s_stage_buf[stage_index];
+    bool stage_written_by_cpu = false;
 #if SOC_PPA_SUPPORTED
     if (s_ppa_srm_handle) {
         /*
@@ -621,13 +684,14 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
          */
         size_t copy_len = camera_buf_len < s_disp_buf_size ? camera_buf_len : s_disp_buf_size;
         memcpy(out_buf, camera_buf, copy_len);
+        stage_written_by_cpu = true;
     }
 
     /*
-     * out_buf 接下来由显示任务读取。
-     * 发布前同步一次，保证跨任务读取到完整图像。
+     * PPA output is synchronized by the display task before CPU reads it.
+     * CPU fallback writes need C2M before publishing the stage buffer.
      */
-    if (app_camera_msync_m2c(out_buf, s_disp_buf_size) != ESP_OK) {
+    if (stage_written_by_cpu && app_camera_msync_c2m(out_buf, s_disp_buf_size) != ESP_OK) {
         app_camera_abandon_stage_buffer(stage_index);
         return;
     }

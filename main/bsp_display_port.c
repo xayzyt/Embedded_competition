@@ -31,14 +31,13 @@ bool app_display_init(void)
     /*
      * BSP 显示配置。
      *
-     * buffer_size = 一次刷新 20 行，既能降低内存占用，又能满足 LVGL 刷屏；
-     * double_buffer=false 表示只使用单显示缓冲；
-     * buff_spiram=1 表示缓冲放 PSRAM，减少内部 SRAM 压力。
+     * Avoid-tear mode needs full-screen LVGL buffers so a moving camera frame is
+     * latched as one complete image instead of being scanned out in 20-line chunks.
      */
     bsp_display_cfg_t cfg = {
         .lvgl_port_cfg = ESP_LVGL_PORT_INIT_CONFIG(),
-        .buffer_size = BSP_LCD_H_RES * 20,
-        .double_buffer = false,
+        .buffer_size = BSP_LCD_H_RES * BSP_LCD_V_RES,
+        .double_buffer = true,
         .flags = {
             .buff_dma = 0,
             .buff_spiram = 1,

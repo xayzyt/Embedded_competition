@@ -48,6 +48,11 @@ static app_vision_result_t s_latest_result = {0};                // 模块级静
 static uint32_t s_submit_seq = 0;                                // 模块级静态变量 s_submit_seq，只在本文件内部使用，避免被其他文件直接修改。
 static uint32_t s_submit_overwrite = 0;                          // 模块级静态变量 s_submit_overwrite，只在本文件内部使用，避免被其他文件直接修改。
 static bool s_first_submit_logged = false;                       // 模块级静态变量 s_first_submit_logged，只在本文件内部使用，避免被其他文件直接修改。
+static uint16_t s_sample_x[VISION_GRAY_WIDTH];
+static uint16_t s_sample_y[VISION_GRAY_HEIGHT];
+static uint32_t s_sample_map_width = 0;
+static uint32_t s_sample_map_height = 0;
+
 /*
  * 把 FreeRTOS tick 转成毫秒时间，用于检测耗时统计。
  */
@@ -63,11 +68,40 @@ static inline uint8_t app_rgb565_to_gray(uint16_t pixel)
     uint32_t r = (pixel >> 11) & 0x1F;
     uint32_t g = (pixel >> 5) & 0x3F;
     uint32_t b = pixel & 0x1F;
-    r = (r * 255U) / 31U;
-    g = (g * 255U) / 63U;
-    b = (b * 255U) / 31U;
+    r = (r << 3) | (r >> 2);
+    g = (g << 2) | (g >> 4);
+    b = (b << 3) | (b >> 2);
     return (uint8_t)((r * 77U + g * 150U + b * 29U) >> 8);
 }
+/*
+ * Prepare nearest-neighbor sampling maps once per source resolution.
+ */
+static void app_vision_prepare_sample_map(uint32_t width, uint32_t height)
+{
+    if (s_sample_map_width == width && s_sample_map_height == height) {
+        return;
+    }
+
+    for (uint32_t gx = 0; gx < VISION_GRAY_WIDTH; gx++) {
+        uint32_t sx = (gx * width) / VISION_GRAY_WIDTH;
+        if (sx >= width) {
+            sx = width - 1U;
+        }
+        s_sample_x[gx] = (uint16_t)sx;
+    }
+
+    for (uint32_t gy = 0; gy < VISION_GRAY_HEIGHT; gy++) {
+        uint32_t sy = (gy * height) / VISION_GRAY_HEIGHT;
+        if (sy >= height) {
+            sy = height - 1U;
+        }
+        s_sample_y[gy] = (uint16_t)sy;
+    }
+
+    s_sample_map_width = width;
+    s_sample_map_height = height;
+}
+
 /*
  * 在临界区中复制最新提交帧，避免后台任务读到一半被摄像头任务改写。
  */
@@ -382,8 +416,8 @@ static void app_vision_task(void *arg)
                 last_heartbeat_tick = now;
             }
         }
-        // 任务延时让出 CPU，避免 while 循环空转占满系统。
-        vTaskDelay(pdMS_TO_TICKS(VISION_POLL_PERIOD_MS));
+        // 等待新帧通知；超时醒来只用于刷新等待状态。
+        (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(VISION_POLL_PERIOD_MS));
     }
 }
 /*
@@ -411,6 +445,8 @@ esp_err_t app_vision_init(void)
     s_submit_seq = 0;
     s_submit_overwrite = 0;
     s_first_submit_logged = false;
+    s_sample_map_width = 0;
+    s_sample_map_height = 0;
     // 退出临界区：共享变量访问结束，恢复正常调度/中断。
     taskEXIT_CRITICAL(&s_vision_mux);
     // 信息日志：用于确认程序执行到了哪个阶段。
@@ -474,19 +510,14 @@ esp_err_t app_vision_submit_frame(const uint8_t *rgb565,
     s_submit_slot.info.gray_width = VISION_GRAY_WIDTH;
     s_submit_slot.info.gray_height = VISION_GRAY_HEIGHT;
     s_submit_slot.info.gray_len = VISION_GRAY_BUF_SIZE;
+    app_vision_prepare_sample_map(width, height);
     const uint16_t *src = (const uint16_t *)rgb565;
     for (uint32_t gy = 0; gy < VISION_GRAY_HEIGHT; gy++) {
-        uint32_t sy = (gy * height) / VISION_GRAY_HEIGHT;
-        if (sy >= height) {
-            sy = height - 1;
-        }
+        const uint16_t *src_row = src + (size_t)s_sample_y[gy] * width;
+        uint8_t *dst_row = &s_submit_slot.gray[gy * VISION_GRAY_WIDTH];
         for (uint32_t gx = 0; gx < VISION_GRAY_WIDTH; gx++) {
-            uint32_t sx = (gx * width) / VISION_GRAY_WIDTH;
-            if (sx >= width) {
-                sx = width - 1;
-            }
-            uint16_t pixel = src[sy * width + sx];
-            s_submit_slot.gray[gy * VISION_GRAY_WIDTH + gx] = app_rgb565_to_gray(pixel);
+            uint16_t pixel = src_row[s_sample_x[gx]];
+            dst_row[gx] = app_rgb565_to_gray(pixel);
         }
     }
     // 进入临界区：下面代码会访问跨任务共享变量，必须短时间关中断/加锁保护。
@@ -505,6 +536,10 @@ esp_err_t app_vision_submit_frame(const uint8_t *rgb565,
     memcpy(&s_gray_slot, &s_submit_slot, sizeof(app_vision_gray_slot_t));
     // 退出临界区：共享变量访问结束，恢复正常调度/中断。
     taskEXIT_CRITICAL(&s_vision_mux);
+    if (s_vision_task != NULL) {
+        xTaskNotifyGive(s_vision_task);
+    }
+
     if (!s_first_submit_logged) {
         // 信息日志：用于确认程序执行到了哪个阶段。
         ESP_LOGI(TAG,
