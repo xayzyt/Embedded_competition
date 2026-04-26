@@ -172,11 +172,8 @@ typedef struct {
 typedef void (*app_ch32_line_cb_t)(const app_ch32_line_t *msg, void *user_ctx);
 
 esp_err_t app_ch32_link_init(app_ch32_line_cb_t cb, void *user_ctx);
-esp_err_t app_ch32_link_deinit(void);
 
-esp_err_t app_ch32_link_send_cmd(char cmd);
 esp_err_t app_ch32_link_send_cmd_and_wait_ack(char cmd, uint32_t timeout_ms);
-esp_err_t app_ch32_link_wait_ready(uint32_t timeout_ms);
 esp_err_t app_ch32_link_probe_ready(uint32_t timeout_ms);
 
 esp_err_t app_ch32_link_send_proto(app_ch32_proto_cmd_t cmd,

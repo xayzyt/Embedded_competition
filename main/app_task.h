@@ -44,9 +44,7 @@ typedef void (*app_task_event_cb_t)(app_task_event_t event,
                                     void *user_ctx);
 
 esp_err_t app_task_init(uint16_t default_target_id);
-uint16_t app_task_get_target_id(void);
 esp_err_t app_task_set_target_id(uint16_t target_id, bool persist);
-esp_err_t app_task_start_local(void);
 esp_err_t app_task_start_with_target(uint16_t target_id, const char *source);
 esp_err_t app_task_submit_remote_request(uint16_t target_id, const char *source);
 void app_task_mark_auth_passed(uint16_t matched_tag_id);
@@ -54,7 +52,6 @@ void app_task_mark_docking_started(void);
 void app_task_mark_completed(const char *note);
 void app_task_mark_fault(const char *note);
 void app_task_cancel(const char *note);
-void app_task_reset_idle(void);
 bool app_task_get_snapshot(app_task_snapshot_t *out);
 const char *app_task_state_to_text(app_task_state_t state);
 void app_task_format_brief(const app_task_snapshot_t *snap, char *buf, size_t buf_len);

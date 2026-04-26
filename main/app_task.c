@@ -197,19 +197,6 @@ esp_err_t app_task_init(uint16_t default_target_id)
     return ESP_OK;
 }
 /*
- * 线程安全读取当前目标 tag ID。
- */
-uint16_t app_task_get_target_id(void)
-{
-    uint16_t value = 0;
-    // 进入临界区：下面代码会访问跨任务共享变量，必须短时间关中断/加锁保护。
-    taskENTER_CRITICAL(&s_mux);
-    value = s_rt.target_id;
-    // 退出临界区：共享变量访问结束，恢复正常调度/中断。
-    taskEXIT_CRITICAL(&s_mux);
-    return value;
-}
-/*
  * 设置目标 tag ID，并可选择是否持久化到 NVS。
  */
 esp_err_t app_task_set_target_id(uint16_t target_id, bool persist)
@@ -295,13 +282,6 @@ esp_err_t app_task_start_with_target(uint16_t target_id, const char *source)
     app_task_emit_event(APP_TASK_EVENT_STATE_CHANGED);
     // 正常返回 ESP_OK，表示该步骤执行成功。
     return ESP_OK;
-}
-/*
- * 从本地触摸屏/按钮触发任务开始。
- */
-esp_err_t app_task_start_local(void)
-{
-    return app_task_start_with_target(app_task_get_target_id(), "touch");
 }
 /*
  * 从云端命令触发接驳任务，记录来源和请求信息。
@@ -395,22 +375,6 @@ void app_task_cancel(const char *note)
     s_rt.active = false;
     s_rt.matched_tag_id = 0;
     app_task_change_state_locked(APP_TASK_STATE_CANCELLED, note != NULL ? note : "task cancelled");
-    taskEXIT_CRITICAL(&s_mux);
-    app_task_emit_event(APP_TASK_EVENT_STATE_CHANGED);
-}
-/*
- * 强制回到空闲状态。
- */
-void app_task_reset_idle(void)
-{
-    /*
-     * reset_idle 实际回到 CONFIGURED。
-     * 这样目标 ID 仍然保留，系统可以直接开始下一单任务。
-     */
-    taskENTER_CRITICAL(&s_mux);
-    s_rt.active = false;
-    s_rt.matched_tag_id = 0;
-    app_task_change_state_locked(APP_TASK_STATE_CONFIGURED, "configured");
     taskEXIT_CRITICAL(&s_mux);
     app_task_emit_event(APP_TASK_EVENT_STATE_CHANGED);
 }

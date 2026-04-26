@@ -758,32 +758,3 @@ esp_err_t app_camera_preview_start(void)
     // 正常返回 ESP_OK，表示该步骤执行成功。
     return ESP_OK;
 }
-/*
- * 停止预览任务和视频流，释放运行状态，避免后台继续占用摄像头。
- */
-esp_err_t app_camera_preview_stop(void)
-{
-    if (!s_preview_running) {
-        // 正常返回 ESP_OK，表示该步骤执行成功。
-        return ESP_OK;
-    }
-    esp_err_t ret = app_video_stream_task_stop(s_video_fd);
-    if (ret != ESP_OK) {
-        // 警告日志：系统还能继续运行，但某个功能可能降级或不完整。
-        ESP_LOGW(TAG, "app_video_stream_task_stop failed: %s", esp_err_to_name(ret));
-    }
-    app_video_stream_wait_stop();
-    close(s_video_fd);
-    s_video_fd = -1;
-    s_preview_running = false;
-    app_camera_free_camera_buffers();
-    // 正常返回 ESP_OK，表示该步骤执行成功。
-    return ESP_OK;
-}
-/*
- * 返回摄像头预览是否正在运行，供其他模块判断是否可以重复启动/停止。
- */
-bool app_camera_is_preview_running(void)
-{
-    return s_preview_running;
-}

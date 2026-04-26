@@ -28,8 +28,6 @@
 #include "app_task.h"                              // 项目自定义模块头文件，声明 app_task 对外提供的接口。
 #include "app_ui.h"                                // 项目自定义模块头文件，声明 app_ui 对外提供的接口。
 #include "app_vision.h"                            // 项目自定义模块头文件，声明 app_vision 对外提供的接口。
-#include "bsp/esp-bsp.h"                           // 乐鑫 BSP 通用接口，常用于显示、触摸、音频等板级资源。
-#include "bsp_display_port.h"                      // 项目自定义 BSP 封装头文件，用来屏蔽底层显示板级差异。
 static const char *TAG = "app_ctrl";                             // ESP-IDF 日志标签，串口日志会用它标明当前消息来自哪个模块。
 #define CTRL_TASK_STACK_SIZE            (7 * 1024)       // FreeRTOS 任务栈大小，单位一般是字节。
 #define CTRL_TASK_PRIORITY              5                // FreeRTOS 任务优先级，数值越大优先级越高。
@@ -655,110 +653,6 @@ void app_ctrl_on_ch32_line(const app_ch32_line_t *msg, void *user_ctx)
     taskEXIT_CRITICAL(&s_ctrl_mux);
 }
 /*
- * 处理触摸屏交互，例如本地启动或取消任务，避免 UI 操作直接越级控制电机。
- */
-static void app_ctrl_handle_touch(const app_task_snapshot_t *task,
-                                  bool dock_busy,
-                                  uint32_t now_ms)
-{
-    /*
-     * 当前版本禁用本地触摸控制。
-     *
-     * 项目主控制来源是云端任务和视觉自动接驳；
-     * 触摸逻辑保留在 #if 0 中，方便后续现场调试时重新启用，
-     * 但默认不让屏幕触摸直接改变任务或发送机械命令。
-     */
-    (void)task;
-    (void)dock_busy;
-    (void)now_ms;
-    return;
-#if 0
-    int32_t x = 0;
-    int32_t y = 0;
-    if (!app_display_touch_read(&x, &y)) {
-        return;
-    }
-    app_ui_set_coord(x, y);
-    // 进入临界区：下面代码会访问跨任务共享变量，必须短时间关中断/加锁保护。
-    taskENTER_CRITICAL(&s_ctrl_mux);
-    const uint32_t last_touch_ms = s_rt.last_touch_ms;
-    // 退出临界区：共享变量访问结束，恢复正常调度/中断。
-    taskEXIT_CRITICAL(&s_ctrl_mux);
-    if (now_ms - last_touch_ms < CTRL_TOUCH_DEBOUNCE_MS) {
-        return;
-    }
-    // 进入临界区：下面代码会访问跨任务共享变量，必须短时间关中断/加锁保护。
-    taskENTER_CRITICAL(&s_ctrl_mux);
-    s_rt.last_touch_ms = now_ms;
-    // 退出临界区：共享变量访问结束，恢复正常调度/中断。
-    taskEXIT_CRITICAL(&s_ctrl_mux);
-    const int32_t w = BSP_LCD_H_RES;
-    const int32_t h = BSP_LCD_V_RES;
-
-    /*
-     * 触摸区域划分：
-     * - 上半屏：调整目标 tag ID；
-     * - 左下：启动本地任务；
-     * - 右下：busy 时手动 abort，否则 reset idle。
-     */
-    const bool top_half = (y < (h / 2));
-    const bool left_half = (x < (w / 2));
-    if (top_half) {
-        /*
-         * 接驳过程中禁止修改目标 ID，避免任务执行到一半切换目标。
-         */
-        if (dock_busy || (task->state == APP_TASK_STATE_DOCKING)) {
-            app_ctrl_set_notice("cfg locked while docking", CTRL_NOTICE_SHOW_MS);
-            return;
-        }
-
-        /*
-         * 上半屏左侧减小 tag ID，右侧增大 tag ID。
-         */
-        uint16_t target = task->target_id;
-        if (left_half) {
-            target = (target > CTRL_TASK_ID_MIN) ? (uint16_t)(target - 1U) : CTRL_TASK_ID_MIN;
-        } else {
-            target = (target < CTRL_TASK_ID_MAX) ? (uint16_t)(target + 1U) : CTRL_TASK_ID_MAX;
-        }
-        if (app_task_set_target_id(target, true) == ESP_OK) {
-            char msg[64];
-            snprintf(msg, sizeof(msg), "target id => %u", (unsigned)target);
-            app_ctrl_set_notice(msg, CTRL_NOTICE_SHOW_MS);
-        }
-        return;
-    }
-
-    /*
-     * 左下区域：启动本地接驳任务。
-     */
-    if (left_half) {
-        if (dock_busy) {
-            app_ctrl_set_notice("dock busy, cannot start", CTRL_NOTICE_SHOW_MS);
-            return;
-        }
-        if (app_task_start_local() == ESP_OK) {
-            char msg[64];
-            snprintf(msg, sizeof(msg), "task armed / target=%u", (unsigned)task->target_id);
-            app_ctrl_set_notice(msg, CTRL_NOTICE_SHOW_MS);
-        }
-        return;
-    }
-
-    /*
-     * 右下区域：busy 时发送 abort；空闲时重置任务。
-     */
-    if (dock_busy) {
-        (void)app_ch32_link_send_cmd('S');
-        app_task_cancel("manual abort");
-        app_ctrl_set_notice("manual abort sent", CTRL_NOTICE_SHOW_MS);
-    } else {
-        app_task_reset_idle();
-        app_ctrl_set_notice("task reset", CTRL_NOTICE_SHOW_MS);
-    }
-#endif
-}
-/*
  * 控制后台任务，周期性读取视觉/接驳判定结果，并决定是否触发 CH32 接驳流程。
  */
 static void app_ctrl_task(void *arg)
@@ -827,7 +721,6 @@ static void app_ctrl_task(void *arg)
                 ESP_LOGI(TAG, "applied target id => %u", (unsigned)task.target_id);
             }
         }
-        app_ctrl_handle_touch(&task, dock_busy, now_ms);
         if (!ch32_ready && (now_ms - last_probe_ms >= CTRL_READY_PROBE_INTERVAL_MS)) {
             // 进入临界区：下面代码会访问跨任务共享变量，必须短时间关中断/加锁保护。
             taskENTER_CRITICAL(&s_ctrl_mux);

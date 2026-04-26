@@ -6,10 +6,12 @@
 #ifndef APP_VIDEO_H
 #define APP_VIDEO_H
 
+#include <stddef.h>
+#include <stdint.h>
+
 #include "esp_err.h"
 #include "linux/videodev2.h"
 #include "esp_video_device.h"
-#include "driver/i2c_master.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -31,15 +33,11 @@ typedef void (*app_video_frame_operation_cb_t)(uint8_t *camera_buf,
                                                uint32_t camera_buf_ves,
                                                size_t camera_buf_len);
 
-esp_err_t app_video_main(i2c_master_bus_handle_t i2c_bus_handle);
 int app_video_open(char *dev, video_fmt_t init_fmt);
 esp_err_t app_video_set_bufs(int video_fd, uint32_t fb_num, const void **fb);
-esp_err_t app_video_get_bufs(int fb_num, void **fb);
 uint32_t app_video_get_buf_size(void);
 esp_err_t app_video_stream_task_start(int video_fd, int core_id);
-esp_err_t app_video_stream_task_stop(int video_fd);
 esp_err_t app_video_register_frame_operation_cb(app_video_frame_operation_cb_t operation_cb);
-esp_err_t app_video_stream_wait_stop(void);
 
 #ifdef __cplusplus
 }

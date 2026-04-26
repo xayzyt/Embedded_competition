@@ -18,7 +18,6 @@
 #include <math.h>                                  // 数学函数，例如 sqrtf、fabsf、atan2f，用于图像几何计算。
 #include <stdbool.h>                               // C99 布尔类型支持，提供 bool、true、false。
 #include <stdint.h>                                // 固定宽度整数类型，例如 uint8_t、uint16_t、uint32_t，嵌入式代码常用。
-#include <stdio.h>                                 // C 标准输入输出库，主要用于 snprintf/printf 这类格式化字符串操作。
 #include <string.h>                                // 字符串和内存处理函数，例如 memset、memcpy、strlen、strstr。
 #include "esp_log.h"                               // ESP-IDF 日志系统，提供 ESP_LOGI/ESP_LOGE 等调试输出。
 #include "esp_heap_caps.h"                         // 带内存能力属性的堆分配接口，例如申请 PSRAM/DMA 可访问内存。
@@ -668,41 +667,6 @@ typedef struct {
  * 枚举类型：用一组有名字的常量表示状态/类型，比直接写数字更清晰，也方便调试。
  */
 typedef enum {
-    AT_DBG_NONE = 0,
-    AT_DBG_FAIL_VALIDATE_QUAD,
-    AT_DBG_FAIL_HOMOGRAPHY,
-    AT_DBG_FAIL_CONTRAST,
-    AT_DBG_FAIL_BORDER,
-    AT_DBG_FAIL_HAMMING,
-} at_dbg_fail_stage_t;
-/*
- * 结构体类型：把同一类运行时数据或协议字段打包在一起，方便函数之间传递。
- */
-typedef struct {
-    bool used;
-    at_dbg_fail_stage_t fail_stage;
-    at_candidate_t cand;
-    uint8_t otsu_threshold;
-    uint8_t decode_threshold;
-    uint32_t black_mean;
-    uint32_t dark_mean;
-    uint32_t white_mean;
-    uint8_t border_pct;
-    uint32_t best_hamming;
-    uint16_t best_id;
-    uint8_t best_rot;
-    char best_desc[32];
-    uint64_t rot_code[4];
-    uint16_t rot_id[4];
-    uint32_t rot_hamming[4];
-    char rot_desc[4][32];
-    uint8_t cells[AT_GRID_SIZE][AT_GRID_SIZE];
-    uint8_t bits0[AT_DATA_GRID][AT_DATA_GRID];
-} at_debug_info_t;
-/*
- * 枚举类型：用一组有名字的常量表示状态/类型，比直接写数字更清晰，也方便调试。
- */
-typedef enum {
     AT_BITS_IDENTITY = 0,
     AT_BITS_MIRROR_X,
     AT_BITS_MIRROR_Y,
@@ -723,107 +687,6 @@ typedef enum {
     AT_PACK_COL_LSB,
     AT_PACK_MODE_COUNT,
 } at_pack_mode_t;
-/*
- * 把调试失败阶段枚举转换成可读字符串，方便串口日志直接看出 AprilTag 解码失败卡在哪一步。
- */
-static const char *at_dbg_fail_stage_str(at_dbg_fail_stage_t s)
-{
-    switch (s) {
-    case AT_DBG_NONE: return "none";
-    case AT_DBG_FAIL_VALIDATE_QUAD: return "validate_quad";
-    case AT_DBG_FAIL_HOMOGRAPHY: return "homography";
-    case AT_DBG_FAIL_CONTRAST: return "contrast";
-    case AT_DBG_FAIL_BORDER: return "border";
-    case AT_DBG_FAIL_HAMMING: return "hamming";
-    default: return "unknown";
-    }
-}
-/*
- * 打印 8x8 采样网格的明暗结果，用于调试标签边框/单元格采样是否正确。
- */
-static void at_dbg_log_cells(const uint8_t cells[AT_GRID_SIZE][AT_GRID_SIZE])
-{
-    for (uint32_t r = 0; r < AT_GRID_SIZE; r++) {
-        char row[64];
-        int off = 0;
-        for (uint32_t c = 0; c < AT_GRID_SIZE; c++) {
-            off += snprintf(row + off, sizeof(row) - (size_t)off, "%3u%s",
-                            (unsigned)cells[r][c], (c + 1U < AT_GRID_SIZE) ? " " : "");
-            if (off >= (int)sizeof(row)) break;
-        }
-        // 警告日志：系统还能继续运行，但某个功能可能降级或不完整。
-        ESP_LOGW(TAG, "cells[%u]: %s", (unsigned)r, row);
-    }
-}
-/*
- * 打印 6x6 数据区 bit 矩阵，用于核对最终参与 Tag36h11 编码匹配的数据位。
- */
-static void at_dbg_log_bits(const uint8_t bits[AT_DATA_GRID][AT_DATA_GRID])
-{
-    for (uint32_t r = 0; r < AT_DATA_GRID; r++) {
-        char row[AT_DATA_GRID + 1];
-        for (uint32_t c = 0; c < AT_DATA_GRID; c++) {
-            row[c] = bits[r][c] ? '1' : '0';
-        }
-        row[AT_DATA_GRID] = '\0';
-        // 警告日志：系统还能继续运行，但某个功能可能降级或不完整。
-        ESP_LOGW(TAG, "bits[%u]: %s", (unsigned)r, row);
-    }
-}
-/*
- * 集中输出某个候选框的调试信息，包括候选序号、图像尺寸、失败阶段等。
- */
-static void at_dbg_log_info(const at_debug_info_t *dbg, int cand_index, uint32_t width, uint32_t height)
-{
-    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
-    if (dbg == NULL || !dbg->used) return;
-    // 警告日志：系统还能继续运行，但某个功能可能降级或不完整。
-    ESP_LOGW(TAG,
-             "dbg cand=%d fail=%s frame=%ux%u area=%u bbox=[%u,%u %ux%u] center=(%.1f,%.1f)",
-             cand_index,
-             at_dbg_fail_stage_str(dbg->fail_stage),
-             (unsigned)width,
-             (unsigned)height,
-             (unsigned)dbg->cand.area,
-             (unsigned)dbg->cand.min_x,
-             (unsigned)dbg->cand.min_y,
-             (unsigned)(dbg->cand.max_x - dbg->cand.min_x + 1U),
-             (unsigned)(dbg->cand.max_y - dbg->cand.min_y + 1U),
-             dbg->cand.cx,
-             dbg->cand.cy);
-    // 警告日志：系统还能继续运行，但某个功能可能降级或不完整。
-    ESP_LOGW(TAG,
-             "dbg quad tl=(%.1f,%.1f) tr=(%.1f,%.1f) br=(%.1f,%.1f) bl=(%.1f,%.1f)",
-             dbg->cand.tl.x, dbg->cand.tl.y,
-             dbg->cand.tr.x, dbg->cand.tr.y,
-             dbg->cand.br.x, dbg->cand.br.y,
-             dbg->cand.bl.x, dbg->cand.bl.y);
-    // 警告日志：系统还能继续运行，但某个功能可能降级或不完整。
-    ESP_LOGW(TAG,
-             "dbg thr otsu=%u decode=%u black=%u dark=%u white=%u border=%u%% best(id=%u rot=%u ham=%u mode=%s)",
-             (unsigned)dbg->otsu_threshold,
-             (unsigned)dbg->decode_threshold,
-             (unsigned)dbg->black_mean,
-             (unsigned)dbg->dark_mean,
-             (unsigned)dbg->white_mean,
-             (unsigned)dbg->border_pct,
-             (unsigned)dbg->best_id,
-             (unsigned)dbg->best_rot,
-             (unsigned)dbg->best_hamming,
-             dbg->best_desc);
-    for (int rot = 0; rot < 4; rot++) {
-        // 警告日志：系统还能继续运行，但某个功能可能降级或不完整。
-        ESP_LOGW(TAG,
-                 "dbg rot=%d mode=%s code=0x%09llx best_id=%u ham=%u",
-                 rot,
-                 dbg->rot_desc[rot],
-                 (unsigned long long)dbg->rot_code[rot],
-                 (unsigned)dbg->rot_id[rot],
-                 (unsigned)dbg->rot_hamming[rot]);
-    }
-    at_dbg_log_cells(dbg->cells);
-    at_dbg_log_bits(dbg->bits0);
-}
 /*
  * 把二维图像坐标 (x,y) 转成一维数组下标，灰度图/二值图都按行优先连续存储。
  */
@@ -1291,36 +1154,6 @@ static void at_rotate_bits_cw(const uint8_t src[AT_DATA_GRID][AT_DATA_GRID], uin
     }
 }
 /*
- * 把 bit 旋转/翻转方式转换为文本，便于调试不同方向的解码结果。
- */
-static const char *at_transform_name(at_bits_transform_t tf)
-{
-    switch (tf) {
-    case AT_BITS_IDENTITY: return "id";
-    case AT_BITS_MIRROR_X: return "mx";
-    case AT_BITS_MIRROR_Y: return "my";
-    case AT_BITS_TRANSPOSE: return "tr";
-    case AT_BITS_TRANSPOSE_MIRROR_X: return "tr_mx";
-    case AT_BITS_TRANSPOSE_MIRROR_Y: return "tr_my";
-    default: return "?";
-    }
-}
-/*
- * 把 bit 打包模式转换为文本，便于调试不同编码顺序。
- */
-static const char *at_pack_mode_name(at_pack_mode_t mode)
-{
-    switch (mode) {
-    case AT_PACK_FAMILY_MSB: return "fam_msb";
-    case AT_PACK_FAMILY_LSB: return "fam_lsb";
-    case AT_PACK_ROW_MSB: return "row_msb";
-    case AT_PACK_ROW_LSB: return "row_lsb";
-    case AT_PACK_COL_MSB: return "col_msb";
-    case AT_PACK_COL_LSB: return "col_lsb";
-    default: return "?";
-    }
-}
-/*
  * 按旋转/翻转方式变换 6x6 bit 矩阵，用于尝试不同方向或镜像情况下的编码匹配。
  */
 static void at_transform_bits(const uint8_t src[AT_DATA_GRID][AT_DATA_GRID],
@@ -1465,23 +1298,8 @@ static bool at_decode_with_quad(const uint8_t *gray,
                                 uint32_t width,
                                 uint32_t height,
                                 const at_candidate_t *cand,
-                                uint8_t otsu_threshold,
-                                app_apriltag_result_t *out,
-                                at_debug_info_t *dbg)
+                                app_apriltag_result_t *out)
 {
-    /*
-     * 初始化调试信息。
-     * dbg 可以为空；不为空时记录每个失败阶段和中间采样结果，方便现场调参。
-     */
-    if (dbg) {
-        memset(dbg, 0, sizeof(*dbg));
-        dbg->used = true;
-        dbg->cand = *cand;
-        dbg->otsu_threshold = otsu_threshold;
-        dbg->best_hamming = UINT32_MAX;
-        for (int i = 0; i < 4; i++) dbg->rot_hamming[i] = UINT32_MAX;
-    }
-
     /*
      * 候选四角按标准顺序：左上、右上、右下、左下。
      */
@@ -1492,11 +1310,9 @@ static bool at_decode_with_quad(const uint8_t *gray,
      * 先做四边形基本几何校验，再求透视单应矩阵。
      */
     if (!at_validate_quad(cand)) {
-        if (dbg) dbg->fail_stage = AT_DBG_FAIL_VALIDATE_QUAD;
         return false;
     }
     if (!at_solve_homography(quad, H)) {
-        if (dbg) dbg->fail_stage = AT_DBG_FAIL_HOMOGRAPHY;
         return false;
     }
 
@@ -1514,7 +1330,6 @@ static bool at_decode_with_quad(const uint8_t *gray,
         for (uint32_t gx = 0; gx < AT_GRID_SIZE; gx++) {
             uint8_t v = at_sample_cell(gray, width, height, H, (float)gx, (float)gy);
             cells[gy][gx] = v;
-            if (dbg) dbg->cells[gy][gx] = v;
             if (gx == 0U || gy == 0U || gx == (AT_GRID_SIZE - 1U) || gy == (AT_GRID_SIZE - 1U)) {
                 border_sum += v;
             } else {
@@ -1550,18 +1365,11 @@ static bool at_decode_with_quad(const uint8_t *gray,
     uint32_t dark_mean = dark_sum / 12U;
     uint32_t white_mean = bright_sum / 12U;
     if (black_mean > dark_mean) black_mean = dark_mean;
-    if (dbg) {
-        dbg->black_mean = black_mean;
-        dbg->dark_mean = dark_mean;
-        dbg->white_mean = white_mean;
-    }
     if (white_mean <= black_mean + 18U) {
-        if (dbg) dbg->fail_stage = AT_DBG_FAIL_CONTRAST;
         return false;
     }
 
     uint8_t threshold = (uint8_t)((black_mean + white_mean) / 2U);
-    if (dbg) dbg->decode_threshold = threshold;
 
     /*
      * 校验外圈黑框。
@@ -1577,9 +1385,7 @@ static bool at_decode_with_quad(const uint8_t *gray,
         }
     }
     uint8_t border_pct = (uint8_t)((border_dark * 100U) / AT_RING_CELLS);
-    if (dbg) dbg->border_pct = border_pct;
     if (border_pct < 85U) {
-        if (dbg) dbg->fail_stage = AT_DBG_FAIL_BORDER;
         return false;
     }
 
@@ -1590,7 +1396,6 @@ static bool at_decode_with_quad(const uint8_t *gray,
     for (uint32_t gy = 0; gy < AT_DATA_GRID; gy++) {
         for (uint32_t gx = 0; gx < AT_DATA_GRID; gx++) {
             bits0[gy][gx] = (cells[gy + 1U][gx + 1U] > threshold) ? 1U : 0U;
-            if (dbg) dbg->bits0[gy][gx] = bits0[gy][gx];
         }
     }
 
@@ -1602,18 +1407,11 @@ static bool at_decode_with_quad(const uint8_t *gray,
     uint32_t best_hamming = 64U;
     uint16_t best_id = 0;
     uint8_t best_rot = 0;
-    at_bits_transform_t best_tf = AT_BITS_IDENTITY;
-    at_pack_mode_t best_pack = AT_PACK_FAMILY_MSB;
     uint8_t bits_rot[AT_DATA_GRID][AT_DATA_GRID];
     uint8_t bits_tmp[AT_DATA_GRID][AT_DATA_GRID];
     uint8_t bits_tf[AT_DATA_GRID][AT_DATA_GRID];
     memcpy(bits_rot, bits0, sizeof(bits_rot));
     for (uint8_t rot = 0; rot < 4U; rot++) {
-        uint32_t rot_best_h = UINT32_MAX;
-        uint16_t rot_best_id = 0;
-        uint64_t rot_best_code = 0;
-        at_bits_transform_t rot_best_tf = AT_BITS_IDENTITY;
-        at_pack_mode_t rot_best_pack = AT_PACK_FAMILY_MSB;
         for (int tf = 0; tf < (int)AT_BITS_TRANSFORM_COUNT; tf++) {
             at_transform_bits(bits_rot, (at_bits_transform_t)tf, bits_tf);
             for (int pack = 0; pack < (int)AT_PACK_MODE_COUNT; pack++) {
@@ -1623,25 +1421,12 @@ static bool at_decode_with_quad(const uint8_t *gray,
                 at_match_code(code, &local_id, &local_h);
 
                 /*
-                 * 记录当前旋转角下的最佳匹配。
-                 */
-                if (local_h < rot_best_h) {
-                    rot_best_h = local_h;
-                    rot_best_id = local_id;
-                    rot_best_code = code;
-                    rot_best_tf = (at_bits_transform_t)tf;
-                    rot_best_pack = (at_pack_mode_t)pack;
-                }
-
-                /*
                  * 记录所有尝试中的全局最佳匹配。
                  */
                 if (local_h < best_hamming) {
                     best_hamming = local_h;
                     best_id = local_id;
                     best_rot = rot;
-                    best_tf = (at_bits_transform_t)tf;
-                    best_pack = (at_pack_mode_t)pack;
                     if (best_hamming == 0U) {
                         break;
                     }
@@ -1651,16 +1436,6 @@ static bool at_decode_with_quad(const uint8_t *gray,
                 break;
             }
         }
-        if (dbg) {
-            /*
-             * 保存当前旋转角的调试信息。
-             */
-            dbg->rot_code[rot] = rot_best_code;
-            dbg->rot_id[rot] = rot_best_id;
-            dbg->rot_hamming[rot] = rot_best_h;
-            snprintf(dbg->rot_desc[rot], sizeof(dbg->rot_desc[rot]), "%s/%s",
-                     at_transform_name(rot_best_tf), at_pack_mode_name(rot_best_pack));
-        }
         if (best_hamming == 0U) break;
 
         /*
@@ -1669,15 +1444,7 @@ static bool at_decode_with_quad(const uint8_t *gray,
         at_rotate_bits_cw(bits_rot, bits_tmp);
         memcpy(bits_rot, bits_tmp, sizeof(bits_rot));
     }
-    if (dbg) {
-        dbg->best_hamming = best_hamming;
-        dbg->best_id = best_id;
-        dbg->best_rot = best_rot;
-        snprintf(dbg->best_desc, sizeof(dbg->best_desc), "%s/%s",
-                 at_transform_name(best_tf), at_pack_mode_name(best_pack));
-    }
     if (best_hamming > AT_MAX_HAMMING) {
-        if (dbg) dbg->fail_stage = AT_DBG_FAIL_HAMMING;
         return false;
     }
 
@@ -1721,7 +1488,6 @@ static bool at_decode_with_quad(const uint8_t *gray,
      */
     out->top_edge_angle_deg = atan2f(cand->tr.y - cand->tl.y,
                                      cand->tr.x - cand->tl.x) * (180.0f / (float)M_PI);
-    if (dbg) dbg->fail_stage = AT_DBG_NONE;
     return true;
 }
 /*
@@ -1808,8 +1574,7 @@ bool app_apriltag_detect_tag36h11(const uint8_t *gray,
             continue;
         }
         app_apriltag_result_t cur;
-        at_debug_info_t dbg;
-        bool ok = at_decode_with_quad(gray, width, height, &cands[i], threshold, &cur, &dbg);
+        bool ok = at_decode_with_quad(gray, width, height, &cands[i], &cur);
         if (!ok) continue;
 
         /*

@@ -88,7 +88,6 @@ typedef struct {
 
 void app_dock_judge_get_default_config(app_dock_judge_config_t *out);
 esp_err_t app_dock_judge_init(const app_dock_judge_config_t *cfg);
-esp_err_t app_dock_judge_get_config(app_dock_judge_config_t *out);
 esp_err_t app_dock_judge_set_target_id(uint16_t target_tag_id, bool enable_filter);
 void app_dock_judge_reset(void);
 bool app_dock_judge_process(const app_vision_result_t *vision,

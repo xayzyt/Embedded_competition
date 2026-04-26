@@ -541,14 +541,6 @@ void app_ui_set_status(const char *text)
     bsp_display_unlock();
 }
 /*
- * 线程安全更新坐标文本。
- */
-void app_ui_set_coord(int32_t x, int32_t y)
-{
-    (void)x;
-    (void)y;
-}
-/*
  * 线程安全更新视觉识别文本。
  */
 void app_ui_set_vision_text(const char *text)
@@ -579,23 +571,6 @@ void app_ui_set_dock_text(const char *text)
         return;
     }
     lv_label_set_text(s_dock, text);
-    // 释放 LVGL/BSP 显示锁。
-    bsp_display_unlock();
-}
-/*
- * 线程安全更新提示文本。
- */
-void app_ui_set_hint_text(const char *text)
-{
-    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
-    if ((text == NULL) || (s_hint == NULL)) {
-        return;
-    }
-    // 加 LVGL/BSP 显示锁，防止多个任务同时操作 UI 控件。
-    if (!bsp_display_lock(0)) {
-        return;
-    }
-    lv_label_set_text(s_hint, text);
     // 释放 LVGL/BSP 显示锁。
     bsp_display_unlock();
 }

@@ -292,19 +292,6 @@ esp_err_t app_dock_judge_init(const app_dock_judge_config_t *cfg)
     return ESP_OK;
 }
 /*
- * 读取当前接驳判定配置。
- */
-esp_err_t app_dock_judge_get_config(app_dock_judge_config_t *out)
-{
-    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
-    if (!s_inited || out == NULL) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    *out = s_cfg;
-    // 正常返回 ESP_OK，表示该步骤执行成功。
-    return ESP_OK;
-}
-/*
  * 运行时修改目标 tag ID，可用于云端/小程序切换订单目标。
  */
 esp_err_t app_dock_judge_set_target_id(uint16_t target_tag_id, bool enable_filter)
