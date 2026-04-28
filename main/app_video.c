@@ -63,6 +63,99 @@ static const char *fourcc_to_str(uint32_t fourcc, char out[5])
     out[4] = '\0';
     return out;
 }
+
+static int32_t app_video_clamp_ctrl_value(const struct v4l2_query_ext_ctrl *qctrl, int64_t value)
+{
+    int64_t min_value = qctrl->minimum;
+    int64_t max_value = qctrl->maximum;
+
+    if (value < min_value) {
+        value = min_value;
+    } else if (value > max_value) {
+        value = max_value;
+    }
+
+    if (qctrl->step > 1 && value > min_value) {
+        uint64_t offset = (uint64_t)(value - min_value);
+        value = min_value + (int64_t)((offset / qctrl->step) * qctrl->step);
+    }
+
+    return (int32_t)value;
+}
+
+static esp_err_t app_video_set_ext_ctrl_value(int video_fd,
+                                              uint32_t ctrl_class,
+                                              uint32_t ctrl_id,
+                                              int64_t target_value,
+                                              int32_t *applied_value)
+{
+    struct v4l2_query_ext_ctrl qctrl = {
+        .id = ctrl_id,
+    };
+    if (ioctl(video_fd, VIDIOC_QUERY_EXT_CTRL, &qctrl) != 0) {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
+    struct v4l2_ext_control control[1] = {0};
+    struct v4l2_ext_controls controls = {
+        .ctrl_class = ctrl_class,
+        .count = 1,
+        .controls = control,
+    };
+    int32_t value = app_video_clamp_ctrl_value(&qctrl, target_value);
+    control[0].id = ctrl_id;
+    control[0].value = value;
+
+    if (ioctl(video_fd, VIDIOC_S_EXT_CTRLS, &controls) != 0) {
+        return ESP_FAIL;
+    }
+
+    if (applied_value) {
+        *applied_value = value;
+    }
+    return ESP_OK;
+}
+
+esp_err_t app_video_apply_recognition_profile(int video_fd, uint32_t exposure_us, uint8_t gain_percent)
+{
+    if (video_fd < 0 || exposure_us == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    int32_t applied_exposure = 0;
+    uint32_t exposure_units_100us = (exposure_us + 99U) / 100U;
+    esp_err_t first_error = app_video_set_ext_ctrl_value(video_fd,
+                                                         V4L2_CID_CAMERA_CLASS,
+                                                         V4L2_CID_EXPOSURE_ABSOLUTE,
+                                                         exposure_units_100us,
+                                                         &applied_exposure);
+
+    struct v4l2_query_ext_ctrl gain_qctrl = {
+        .id = V4L2_CID_GAIN,
+    };
+    int32_t applied_gain = 0;
+    if (ioctl(video_fd, VIDIOC_QUERY_EXT_CTRL, &gain_qctrl) == 0) {
+        uint8_t clipped_percent = gain_percent > 100U ? 100U : gain_percent;
+        int64_t gain_range = gain_qctrl.maximum - gain_qctrl.minimum;
+        int64_t target_gain = gain_qctrl.minimum + (gain_range * clipped_percent) / 100;
+        esp_err_t gain_ret = app_video_set_ext_ctrl_value(video_fd,
+                                                          V4L2_CID_USER_CLASS,
+                                                          V4L2_CID_GAIN,
+                                                          target_gain,
+                                                          &applied_gain);
+        if (first_error == ESP_OK && gain_ret != ESP_OK) {
+            first_error = gain_ret;
+        }
+    } else if (first_error == ESP_OK) {
+        first_error = ESP_ERR_NOT_SUPPORTED;
+    }
+
+    ESP_LOGD(TAG,
+             "recognition profile exposure=%" PRIi32 "00us gain_index=%" PRIi32,
+             applied_exposure,
+             applied_gain);
+    return first_error;
+}
 /*
  * 打开 video 设备并设置分辨率、像素格式等 V4L2 参数。
  */
@@ -80,7 +173,7 @@ int app_video_open(char *dev, video_fmt_t init_fmt)
      * 打开摄像头设备节点。
      * ESP-IDF 的 esp-video 组件提供了类 Linux 的 /dev/video 接口。
      */
-    int fd = open(dev, O_RDONLY);
+    int fd = open(dev, O_RDWR);
     if (fd < 0) {
         // 错误日志：这类信息通常需要你优先查看，因为它意味着某个关键步骤失败。
         ESP_LOGE(TAG, "open video failed");

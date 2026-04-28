@@ -38,7 +38,9 @@
 #define ALIGN_UP(num, align)     (((num) + ((align) - 1)) & ~((align) - 1))
 #define DISPLAY_TASK_STACK_SIZE  (6 * 1024)              // FreeRTOS 任务栈大小，单位一般是字节。
 #define DISPLAY_TASK_PRIORITY    7                       // FreeRTOS 任务优先级，数值越大优先级越高。
-#define VISION_SAMPLE_INTERVAL   6                       // 周期/间隔参数，用于控制采样或刷新频率。
+#define VISION_SAMPLE_INTERVAL   4                       // 周期/间隔参数，用于控制采样或刷新频率。
+#define RECOGNITION_CAMERA_EXPOSURE_US      4000U
+#define RECOGNITION_CAMERA_GAIN_PERCENT     35U
 static const char *TAG = "app_camera";                           // ESP-IDF 日志标签，串口日志会用它标明当前消息来自哪个模块。
 static bool s_camera_inited = false;                             // 模块级静态变量 s_camera_inited，只在本文件内部使用，避免被其他文件直接修改。
 static bool s_preview_running = false;                           // 模块级静态变量 s_preview_running，只在本文件内部使用，避免被其他文件直接修改。
@@ -59,7 +61,9 @@ typedef enum {
     DISP_BUF_FREE = 0,
     DISP_BUF_WRITING,
     DISP_BUF_READY,
+    DISP_BUF_DISPLAYED,
 } disp_buf_state_t;
+static volatile int s_displayed_stage_index = -1;
 static volatile int s_pending_stage_index = -1;                  // 模块级静态变量 s_pending_stage_index，只在本文件内部使用，避免被其他文件直接修改。
 static uint32_t s_vision_sample_skip = 0;                        // 模块级静态变量 s_vision_sample_skip，只在本文件内部使用，避免被其他文件直接修改。
 static disp_buf_state_t s_stage_state[STAGE_NUM_BUFS] = {0};     // 模块级静态变量 s_stage_state，只在本文件内部使用，避免被其他文件直接修改。
@@ -144,6 +148,7 @@ static void app_camera_free_display_buffers(void)
         s_ui_canvas_buf = NULL;
     }
     s_pending_stage_index = -1;
+    s_displayed_stage_index = -1;
     s_disp_buf_size = 0;
 }
 /*
@@ -504,7 +509,7 @@ static int app_camera_take_ready_stage_buffer(void)
     return idx;
 }
 /*
- * 显示任务把缓冲拷贝到 LVGL canvas 后释放 stage buffer。
+ * 释放不再被显示链路引用的 stage buffer。
  */
 static void app_camera_release_stage_buffer(int buf_index)
 {
@@ -514,11 +519,37 @@ static void app_camera_release_stage_buffer(int buf_index)
     // 进入临界区：下面代码会访问跨任务共享变量，必须短时间关中断/加锁保护。
     taskENTER_CRITICAL(&s_display_mux);
     s_stage_state[buf_index] = DISP_BUF_FREE;
+    if (s_displayed_stage_index == buf_index) {
+        s_displayed_stage_index = -1;
+    }
+    if (s_pending_stage_index == buf_index) {
+        s_pending_stage_index = -1;
+    }
     // 退出临界区：共享变量访问结束，恢复正常调度/中断。
     taskEXIT_CRITICAL(&s_display_mux);
 }
 /*
- * 独立显示任务，负责取摄像头帧、图像缩放、更新 LVGL canvas，并按间隔提交视觉识别。
+ * 标记当前 stage buffer 已绑定到 canvas，并释放上一帧显示缓冲。
+ */
+static void app_camera_mark_displayed_stage_buffer(int buf_index)
+{
+    if (buf_index < 0 || buf_index >= STAGE_NUM_BUFS) {
+        return;
+    }
+
+    taskENTER_CRITICAL(&s_display_mux);
+    int old_index = s_displayed_stage_index;
+    if (old_index >= 0 && old_index < STAGE_NUM_BUFS && old_index != buf_index &&
+        s_stage_state[old_index] == DISP_BUF_DISPLAYED) {
+        s_stage_state[old_index] = DISP_BUF_FREE;
+    }
+    s_stage_state[buf_index] = DISP_BUF_DISPLAYED;
+    s_displayed_stage_index = buf_index;
+    taskEXIT_CRITICAL(&s_display_mux);
+}
+
+/*
+ * 独立显示任务，负责取最新 stage buffer 并刷新 LVGL canvas。
  */
 static void app_camera_display_task(void *arg)
 {
@@ -545,31 +576,48 @@ static void app_camera_display_task(void *arg)
 
             /*
              * stage buffer 可能刚被 PPA/DMA 写过。
-             * CPU 拷贝前先做 M2C 同步，确保读到的是最新图像数据。
+             * LVGL 刷新会读取 canvas 像素，先做 M2C 同步确保读到最新图像数据。
              */
             if (app_camera_msync_m2c(s_stage_buf[buf_index], s_disp_buf_size) != ESP_OK) {
                 app_camera_release_stage_buffer(buf_index);
                 continue;
             }
             // 加 LVGL/BSP 显示锁，防止多个任务同时操作 UI 控件。
+            bool displayed = false;
             if (bsp_display_lock(0)) {
                 /*
-                 * LVGL canvas 绑定的是 s_ui_canvas_buf。
-                 * stage buffer 是后台缓冲，处理完成后需要复制到 canvas buffer 再刷新控件。
+                 * 直接把 LVGL canvas 指向已完成的 stage buffer。
+                 * 这样避免每帧再复制一整屏到 s_ui_canvas_buf，降低显示链路带宽压力。
                  */
-                memcpy(s_ui_canvas_buf, s_stage_buf[buf_index], s_disp_buf_size);
-                app_camera_msync_c2m(s_ui_canvas_buf, s_disp_buf_size);
+#if LVGL_VERSION_MAJOR >= 9
+                lv_canvas_set_buffer(s_camera_canvas,
+                                     s_stage_buf[buf_index],
+                                     BSP_LCD_H_RES,
+                                     BSP_LCD_V_RES,
+                                     LV_COLOR_FORMAT_RGB565);
+#else
+                lv_canvas_set_buffer(s_camera_canvas,
+                                     s_stage_buf[buf_index],
+                                     BSP_LCD_H_RES,
+                                     BSP_LCD_V_RES,
+                                     LV_IMG_CF_TRUE_COLOR);
+#endif
                 lv_obj_invalidate(s_camera_canvas);
                 lv_refr_now(NULL);
+                displayed = true;
                 // 释放 LVGL/BSP 显示锁。
                 bsp_display_unlock();
             }
 
             /*
-             * 释放 stage buffer。
-             * 即使本轮没有拿到 LVGL 锁，也不能一直占着缓冲，否则摄像头回调会越来越容易丢帧。
+             * canvas 会继续引用已经显示的 stage buffer。
+             * 显示成功时只释放上一帧；显示失败时释放本帧，继续保留旧画面。
              */
-            app_camera_release_stage_buffer(buf_index);
+            if (displayed) {
+                app_camera_mark_displayed_stage_buffer(buf_index);
+            } else {
+                app_camera_release_stage_buffer(buf_index);
+            }
         }
     }
 }
@@ -599,22 +647,23 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
     }
 
     /*
-     * 摄像头 DMA/驱动刚写完 camera_buf，CPU 读取前需要同步 cache。
-     */
-    if (app_camera_msync_m2c(camera_buf, camera_buf_len) != ESP_OK) {
-        return;
-    }
-
-    /*
      * 视觉识别不必每帧都跑。
      * 抽样可以减少 AprilTag 检测负载，让摄像头预览更流畅。
      */
+    bool camera_synced_for_cpu = false;
     if (++s_vision_sample_skip >= VISION_SAMPLE_INTERVAL) {
         s_vision_sample_skip = 0;
-        (void)app_vision_submit_frame(camera_buf,
-                                      camera_buf_hes,
-                                      camera_buf_ves,
-                                      camera_buf_len);
+        /*
+         * 只有 CPU 视觉抽样会读取 camera_buf。
+         * PPA 可以直接消费 DMA 写好的帧，避免每帧都 invalidate 整张 camera buffer。
+         */
+        if (app_camera_msync_m2c(camera_buf, camera_buf_len) == ESP_OK) {
+            camera_synced_for_cpu = true;
+            (void)app_vision_submit_frame(camera_buf,
+                                          camera_buf_hes,
+                                          camera_buf_ves,
+                                          camera_buf_len);
+        }
     }
 
     /*
@@ -682,6 +731,10 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
          * 没有 PPA 的降级路径。
          * 只做安全长度的直接拷贝，保证工程至少能看到原始画面数据。
          */
+        if (!camera_synced_for_cpu && app_camera_msync_m2c(camera_buf, camera_buf_len) != ESP_OK) {
+            app_camera_abandon_stage_buffer(stage_index);
+            return;
+        }
         size_t copy_len = camera_buf_len < s_disp_buf_size ? camera_buf_len : s_disp_buf_size;
         memcpy(out_buf, camera_buf, copy_len);
         stage_written_by_cpu = true;
@@ -789,6 +842,13 @@ esp_err_t app_camera_preview_start(void)
         ESP_LOGW(TAG, "please check camera sensor selection in menuconfig");
         return ESP_FAIL;
     }
+    esp_err_t profile_ret = app_video_apply_recognition_profile(s_video_fd,
+                                                                RECOGNITION_CAMERA_EXPOSURE_US,
+                                                                RECOGNITION_CAMERA_GAIN_PERCENT);
+    if (profile_ret != ESP_OK) {
+        ESP_LOGW(TAG, "recognition camera profile init skipped: %s", esp_err_to_name(profile_ret));
+    }
+
     esp_err_t ret = app_camera_alloc_userptr_buffers(app_video_get_buf_size());
     if (ret != ESP_OK) {
         close(s_video_fd);

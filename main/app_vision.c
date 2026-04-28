@@ -24,8 +24,8 @@
 #define VISION_TASK_CORE_ID            1
 #define VISION_POLL_PERIOD_MS          25
 #define VISION_HEARTBEAT_MS            1000
-#define VISION_GRAY_WIDTH              240               // 宽度相关参数，通常对应图像或显示尺寸。
-#define VISION_GRAY_HEIGHT             180               // 高度相关参数，通常对应图像或显示尺寸。
+#define VISION_GRAY_WIDTH              320               // 宽度相关参数，通常对应图像或显示尺寸。
+#define VISION_GRAY_HEIGHT             240               // 高度相关参数，通常对应图像或显示尺寸。
 #define VISION_GRAY_BUF_SIZE           (VISION_GRAY_WIDTH * VISION_GRAY_HEIGHT)
 #define VISION_LOST_RESET_FRAMES       2U
 #define VISION_STABLE_DECAY_ON_LOST    1U

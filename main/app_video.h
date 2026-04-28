@@ -34,6 +34,7 @@ typedef void (*app_video_frame_operation_cb_t)(uint8_t *camera_buf,
                                                size_t camera_buf_len);
 
 int app_video_open(char *dev, video_fmt_t init_fmt);
+esp_err_t app_video_apply_recognition_profile(int video_fd, uint32_t exposure_us, uint8_t gain_percent);
 esp_err_t app_video_set_bufs(int video_fd, uint32_t fb_num, const void **fb);
 uint32_t app_video_get_buf_size(void);
 esp_err_t app_video_stream_task_start(int video_fd, int core_id);

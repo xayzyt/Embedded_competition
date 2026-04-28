@@ -31,17 +31,24 @@ bool app_display_init(void)
     /*
      * BSP 显示配置。
      *
-     * Avoid-tear mode needs full-screen LVGL buffers so a moving camera frame is
-     * latched as one complete image instead of being scanned out in 20-line chunks.
+     * 当前工程开启了 avoid-tear + full-refresh，需要全屏大小的 LVGL buffer。
+     * 1024x600 RGB565 下，一个全屏 buffer 约 1.17 MB，双缓冲约 2.34 MB；
+     * 所以优先放 PSRAM，避免占用紧张的内部 DMA 内存。
+     *
+     * buff_dma 只是“给 LVGL draw buffer 追加 MALLOC_CAP_DMA”的申请条件。
+     * 在当前 MIPI-DSI avoid-tear 路径里，真正给 LCD 扫描的 framebuffer
+     * 由 esp_lcd DPI 驱动创建，LVGL port 会直接取这些 framebuffer 使用。
+     * 因此这里不强制 LVGL buffer 也带 DMA 属性，打开它通常没有收益，
+     * 还可能增加大块 DMA-capable 内存分配失败的概率。
      */
     bsp_display_cfg_t cfg = {
         .lvgl_port_cfg = ESP_LVGL_PORT_INIT_CONFIG(),
         .buffer_size = BSP_LCD_H_RES * BSP_LCD_V_RES,
         .double_buffer = true,
         .flags = {
-            .buff_dma = 0,
-            .buff_spiram = 1,
-            .sw_rotate = 0,
+            .buff_dma = false,
+            .buff_spiram = true,
+            .sw_rotate = false,
         },
     };
 
