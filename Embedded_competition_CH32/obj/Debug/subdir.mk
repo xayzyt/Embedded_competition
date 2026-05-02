@@ -25,5 +25,5 @@ DIR_EXPANDS += \
 
 # Each subdirectory must supply rules for building sources it contributes
 Debug/%.o: ../Debug/%.c
-	@	riscv-none-embed-gcc -march=rv32imacxw -mabi=ilp32 -msmall-data-limit=8 -msave-restore -fmax-errors=20 -Os -fmessage-length=0 -fsigned-char -ffunction-sections -fdata-sections -fno-common -Wunused -Wuninitialized -g -I"c:/CH32/Embedded_competition/Debug" -I"c:/CH32/Embedded_competition/Core" -I"c:/CH32/Embedded_competition/User" -I"c:/CH32/Embedded_competition/Peripheral/inc" -std=gnu99 -MMD -MP -MF"$(@:%.o=%.d)" -MT"$(@)" -c -o "$@" "$<"
+	@	riscv-none-embed-gcc -march=rv32imacxw -mabi=ilp32 -msmall-data-limit=8 -msave-restore -fmax-errors=20 -Os -fmessage-length=0 -fsigned-char -ffunction-sections -fdata-sections -fno-common -Wunused -Wuninitialized -g -I"c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Debug" -I"c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Core" -I"c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/User" -I"c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Peripheral/inc" -std=gnu99 -MMD -MP -MF"$(@:%.o=%.d)" -MT"$(@)" -c -o "$@" "$<"
 

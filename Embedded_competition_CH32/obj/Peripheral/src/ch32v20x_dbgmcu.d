@@ -1,79 +1,79 @@
 Peripheral/src/ch32v20x_dbgmcu.o: ../Peripheral/src/ch32v20x_dbgmcu.c \
- c:/CH32/Embedded_competition/Peripheral/inc/ch32v20x_dbgmcu.h \
- c:/CH32/Embedded_competition/Peripheral/inc/ch32v20x.h \
- c:/CH32/Embedded_competition/Core/core_riscv.h \
- c:/CH32/Embedded_competition/User/system_ch32v20x.h \
- c:/CH32/Embedded_competition/User/ch32v20x_conf.h \
- c:/CH32/Embedded_competition/Peripheral/inc/ch32v20x_adc.h \
- c:/CH32/Embedded_competition/Peripheral/inc/ch32v20x_bkp.h \
- c:/CH32/Embedded_competition/Peripheral/inc/ch32v20x_can.h \
- c:/CH32/Embedded_competition/Peripheral/inc/ch32v20x_crc.h \
- c:/CH32/Embedded_competition/Peripheral/inc/ch32v20x_dma.h \
- c:/CH32/Embedded_competition/Peripheral/inc/ch32v20x_exti.h \
- c:/CH32/Embedded_competition/Peripheral/inc/ch32v20x_flash.h \
- c:/CH32/Embedded_competition/Peripheral/inc/ch32v20x_gpio.h \
- c:/CH32/Embedded_competition/Peripheral/inc/ch32v20x_i2c.h \
- c:/CH32/Embedded_competition/Peripheral/inc/ch32v20x_iwdg.h \
- c:/CH32/Embedded_competition/Peripheral/inc/ch32v20x_pwr.h \
- c:/CH32/Embedded_competition/Peripheral/inc/ch32v20x_rcc.h \
- c:/CH32/Embedded_competition/Peripheral/inc/ch32v20x_rtc.h \
- c:/CH32/Embedded_competition/Peripheral/inc/ch32v20x_spi.h \
- c:/CH32/Embedded_competition/Peripheral/inc/ch32v20x_tim.h \
- c:/CH32/Embedded_competition/Peripheral/inc/ch32v20x_usart.h \
- c:/CH32/Embedded_competition/Peripheral/inc/ch32v20x_wwdg.h \
- c:/CH32/Embedded_competition/User/ch32v20x_it.h \
- c:/CH32/Embedded_competition/Debug/debug.h \
- c:/CH32/Embedded_competition/Peripheral/inc/ch32v20x.h \
- c:/CH32/Embedded_competition/Peripheral/inc/ch32v20x_misc.h
+ c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Peripheral/inc/ch32v20x_dbgmcu.h \
+ c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Peripheral/inc/ch32v20x.h \
+ c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Core/core_riscv.h \
+ c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/User/system_ch32v20x.h \
+ c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/User/ch32v20x_conf.h \
+ c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Peripheral/inc/ch32v20x_adc.h \
+ c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Peripheral/inc/ch32v20x_bkp.h \
+ c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Peripheral/inc/ch32v20x_can.h \
+ c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Peripheral/inc/ch32v20x_crc.h \
+ c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Peripheral/inc/ch32v20x_dma.h \
+ c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Peripheral/inc/ch32v20x_exti.h \
+ c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Peripheral/inc/ch32v20x_flash.h \
+ c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Peripheral/inc/ch32v20x_gpio.h \
+ c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Peripheral/inc/ch32v20x_i2c.h \
+ c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Peripheral/inc/ch32v20x_iwdg.h \
+ c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Peripheral/inc/ch32v20x_pwr.h \
+ c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Peripheral/inc/ch32v20x_rcc.h \
+ c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Peripheral/inc/ch32v20x_rtc.h \
+ c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Peripheral/inc/ch32v20x_spi.h \
+ c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Peripheral/inc/ch32v20x_tim.h \
+ c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Peripheral/inc/ch32v20x_usart.h \
+ c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Peripheral/inc/ch32v20x_wwdg.h \
+ c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/User/ch32v20x_it.h \
+ c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Debug/debug.h \
+ c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Peripheral/inc/ch32v20x.h \
+ c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Peripheral/inc/ch32v20x_misc.h
 
-c:/CH32/Embedded_competition/Peripheral/inc/ch32v20x_dbgmcu.h:
+c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Peripheral/inc/ch32v20x_dbgmcu.h:
 
-c:/CH32/Embedded_competition/Peripheral/inc/ch32v20x.h:
+c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Peripheral/inc/ch32v20x.h:
 
-c:/CH32/Embedded_competition/Core/core_riscv.h:
+c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Core/core_riscv.h:
 
-c:/CH32/Embedded_competition/User/system_ch32v20x.h:
+c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/User/system_ch32v20x.h:
 
-c:/CH32/Embedded_competition/User/ch32v20x_conf.h:
+c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/User/ch32v20x_conf.h:
 
-c:/CH32/Embedded_competition/Peripheral/inc/ch32v20x_adc.h:
+c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Peripheral/inc/ch32v20x_adc.h:
 
-c:/CH32/Embedded_competition/Peripheral/inc/ch32v20x_bkp.h:
+c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Peripheral/inc/ch32v20x_bkp.h:
 
-c:/CH32/Embedded_competition/Peripheral/inc/ch32v20x_can.h:
+c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Peripheral/inc/ch32v20x_can.h:
 
-c:/CH32/Embedded_competition/Peripheral/inc/ch32v20x_crc.h:
+c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Peripheral/inc/ch32v20x_crc.h:
 
-c:/CH32/Embedded_competition/Peripheral/inc/ch32v20x_dma.h:
+c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Peripheral/inc/ch32v20x_dma.h:
 
-c:/CH32/Embedded_competition/Peripheral/inc/ch32v20x_exti.h:
+c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Peripheral/inc/ch32v20x_exti.h:
 
-c:/CH32/Embedded_competition/Peripheral/inc/ch32v20x_flash.h:
+c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Peripheral/inc/ch32v20x_flash.h:
 
-c:/CH32/Embedded_competition/Peripheral/inc/ch32v20x_gpio.h:
+c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Peripheral/inc/ch32v20x_gpio.h:
 
-c:/CH32/Embedded_competition/Peripheral/inc/ch32v20x_i2c.h:
+c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Peripheral/inc/ch32v20x_i2c.h:
 
-c:/CH32/Embedded_competition/Peripheral/inc/ch32v20x_iwdg.h:
+c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Peripheral/inc/ch32v20x_iwdg.h:
 
-c:/CH32/Embedded_competition/Peripheral/inc/ch32v20x_pwr.h:
+c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Peripheral/inc/ch32v20x_pwr.h:
 
-c:/CH32/Embedded_competition/Peripheral/inc/ch32v20x_rcc.h:
+c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Peripheral/inc/ch32v20x_rcc.h:
 
-c:/CH32/Embedded_competition/Peripheral/inc/ch32v20x_rtc.h:
+c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Peripheral/inc/ch32v20x_rtc.h:
 
-c:/CH32/Embedded_competition/Peripheral/inc/ch32v20x_spi.h:
+c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Peripheral/inc/ch32v20x_spi.h:
 
-c:/CH32/Embedded_competition/Peripheral/inc/ch32v20x_tim.h:
+c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Peripheral/inc/ch32v20x_tim.h:
 
-c:/CH32/Embedded_competition/Peripheral/inc/ch32v20x_usart.h:
+c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Peripheral/inc/ch32v20x_usart.h:
 
-c:/CH32/Embedded_competition/Peripheral/inc/ch32v20x_wwdg.h:
+c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Peripheral/inc/ch32v20x_wwdg.h:
 
-c:/CH32/Embedded_competition/User/ch32v20x_it.h:
+c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/User/ch32v20x_it.h:
 
-c:/CH32/Embedded_competition/Debug/debug.h:
+c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Debug/debug.h:
 
-c:/CH32/Embedded_competition/Peripheral/inc/ch32v20x.h:
+c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Peripheral/inc/ch32v20x.h:
 
-c:/CH32/Embedded_competition/Peripheral/inc/ch32v20x_misc.h:
+c:/beifen/ESP32_P4_EV/Embedded_competition/Embedded_competition_CH32/Peripheral/inc/ch32v20x_misc.h:

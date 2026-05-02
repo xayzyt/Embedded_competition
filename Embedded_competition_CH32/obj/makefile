@@ -55,7 +55,7 @@ main-build: control_motor.elf secondary-outputs
 
 # Tool invocations
 control_motor.elf: $(OBJS) $(USER_OBJS_ESCAPE)
-	@	riscv-none-embed-gcc -march=rv32imacxw -mabi=ilp32 -msmall-data-limit=8 -msave-restore -fmax-errors=20 -Os -fmessage-length=0 -fsigned-char -ffunction-sections -fdata-sections -fno-common -Wunused -Wuninitialized -g -T "c:\CH32\Embedded_competition\Ld\Link.ld" -nostartfiles -Xlinker --gc-sections -Wl,-Map,"control_motor.map" --specs=nano.specs --specs=nosys.specs -o "control_motor.elf" $(OBJS) $(LIBS)
+	@	riscv-none-embed-gcc -march=rv32imacxw -mabi=ilp32 -msmall-data-limit=8 -msave-restore -fmax-errors=20 -Os -fmessage-length=0 -fsigned-char -ffunction-sections -fdata-sections -fno-common -Wunused -Wuninitialized -g -T "c:\beifen\ESP32_P4_EV\Embedded_competition\Embedded_competition_CH32\Ld\Link.ld" -nostartfiles -Xlinker --gc-sections -Wl,-Map,"control_motor.map" --specs=nano.specs --specs=nosys.specs -o "control_motor.elf" $(OBJS) $(LIBS)
 control_motor.hex: control_motor.elf
 	@	riscv-none-embed-objcopy -O ihex "control_motor.elf" "control_motor.hex"
 control_motor.lst: control_motor.elf
