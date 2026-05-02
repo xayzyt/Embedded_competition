@@ -58,15 +58,15 @@ static lv_obj_t *app_get_active_screen(void)
  */
 static void app_ui_style_label(lv_obj_t *obj)
 {
-    // 设置 LVGL 控件样式，例如颜色、边框、透明度、圆角等。
+    // 设置标签背景为 50% 透明，避免遮死底层摄像头画面。
     lv_obj_set_style_bg_opa(obj, LV_OPA_50, 0);
-    // 设置 LVGL 控件样式，例如颜色、边框、透明度、圆角等。
+    // 设置标签背景颜色为深灰色。
     lv_obj_set_style_bg_color(obj, lv_color_hex(0x202020), 0);
-    // 设置 LVGL 控件样式，例如颜色、边框、透明度、圆角等。
+    // 设置标签文字颜色为白色。
     lv_obj_set_style_text_color(obj, lv_color_white(), 0);
-    // 设置 LVGL 控件样式，例如颜色、边框、透明度、圆角等。
+    // 设置标签四周内边距为 6 像素。
     lv_obj_set_style_pad_all(obj, 6, 0);
-    // 设置 LVGL 控件样式，例如颜色、边框、透明度、圆角等。
+    // 设置标签圆角半径为 4 像素。
     lv_obj_set_style_radius(obj, 4, 0);
 }
 /*
@@ -74,16 +74,17 @@ static void app_ui_style_label(lv_obj_t *obj)
  */
 static void app_ui_style_hud_layer(lv_obj_t *obj)
 {
-    // 设置 LVGL 控件样式，例如颜色、边框、透明度、圆角等。
+    // 让 HUD 容器背景完全透明。
     lv_obj_set_style_bg_opa(obj, LV_OPA_TRANSP, 0);
-    // 设置 LVGL 控件样式，例如颜色、边框、透明度、圆角等。
+    // 让 HUD 容器边框完全透明。
     lv_obj_set_style_border_opa(obj, LV_OPA_TRANSP, 0);
-    // 清除 LVGL 对象标志，例如取消隐藏。
+    // 取消可滚动标志，HUD 固定覆盖在屏幕上。
     lv_obj_clear_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
 #if LVGL_VERSION_MAJOR >= 9
+    // LVGL v9 去掉可点击标志，避免 HUD 层拦截触摸。
     lv_obj_remove_flag(obj, LV_OBJ_FLAG_CLICKABLE);
 #else
-    // 清除 LVGL 对象标志，例如取消隐藏。
+    // LVGL v8 清除可点击标志，避免 HUD 层拦截触摸。
     lv_obj_clear_flag(obj, LV_OBJ_FLAG_CLICKABLE);
 #endif
 }
@@ -92,10 +93,13 @@ static void app_ui_style_hud_layer(lv_obj_t *obj)
  */
 static void app_ui_style_cross_line(lv_obj_t *obj)
 {
-    // 设置 LVGL 控件样式，例如颜色、边框、透明度、圆角等。
+    // 设置准星线条颜色为绿色。
     lv_obj_set_style_bg_color(obj, lv_color_hex(0x24D1A0), 0);
+    // 设置准星线条为 80% 不透明。
     lv_obj_set_style_bg_opa(obj, LV_OPA_80, 0);
+    // 去掉线条边框。
     lv_obj_set_style_border_width(obj, 0, 0);
+    // 去掉圆角，保持线条端部为直角。
     lv_obj_set_style_radius(obj, 0, 0);
 }
 /*
@@ -103,12 +107,17 @@ static void app_ui_style_cross_line(lv_obj_t *obj)
  */
 static void app_ui_style_track_box(lv_obj_t *obj)
 {
+    // 识别框内部透明，只显示边框。
     lv_obj_set_style_bg_opa(obj, LV_OPA_TRANSP, 0);
+    // 设置识别框边框宽度为 3 像素。
     lv_obj_set_style_border_width(obj, 3, 0);
+    // 设置识别框默认边框颜色为黄色。
     lv_obj_set_style_border_color(obj, lv_color_hex(0xFFD34D), 0);
+    // 设置识别框边框完全不透明。
     lv_obj_set_style_border_opa(obj, LV_OPA_COVER, 0);
+    // 去掉圆角，保持 bbox 为直角矩形。
     lv_obj_set_style_radius(obj, 0, 0);
-    // 给 LVGL 对象添加标志，例如隐藏、不可点击等。
+    // 创建后先隐藏，识别到目标时再显示。
     lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
 }
 /*
@@ -116,10 +125,15 @@ static void app_ui_style_track_box(lv_obj_t *obj)
  */
 static void app_ui_style_lock_seg(lv_obj_t *obj)
 {
+    // 设置锁定条小段圆角半径为 3 像素。
     lv_obj_set_style_radius(obj, 3, 0);
+    // 设置小段边框宽度为 1 像素。
     lv_obj_set_style_border_width(obj, 1, 0);
+    // 设置小段默认边框颜色为灰色。
     lv_obj_set_style_border_color(obj, lv_color_hex(0x808080), 0);
+    // 设置小段未点亮时的背景颜色。
     lv_obj_set_style_bg_color(obj, lv_color_hex(0x3A3A3A), 0);
+    // 设置小段未点亮时的背景透明度。
     lv_obj_set_style_bg_opa(obj, LV_OPA_70, 0);
 }
 /*
@@ -127,13 +141,21 @@ static void app_ui_style_lock_seg(lv_obj_t *obj)
  */
 static void app_ui_style_hint_label(lv_obj_t *obj)
 {
+    // 设置提示标签背景为 50% 透明。
     lv_obj_set_style_bg_opa(obj, LV_OPA_50, 0);
+    // 设置提示标签背景颜色为深蓝黑色。
     lv_obj_set_style_bg_color(obj, lv_color_hex(0x101820), 0);
+    // 设置提示标签文字颜色为浅蓝白色。
     lv_obj_set_style_text_color(obj, lv_color_hex(0xD8F3FF), 0);
+    // 设置提示标签边框宽度为 1 像素。
     lv_obj_set_style_border_width(obj, 1, 0);
+    // 设置提示标签边框颜色。
     lv_obj_set_style_border_color(obj, lv_color_hex(0x2A4A58), 0);
+    // 设置提示标签左右内边距。
     lv_obj_set_style_pad_hor(obj, 8, 0);
+    // 设置提示标签上下内边距。
     lv_obj_set_style_pad_ver(obj, 5, 0);
+    // 设置提示标签圆角半径为 4 像素。
     lv_obj_set_style_radius(obj, 4, 0);
 }
 /*
@@ -141,13 +163,21 @@ static void app_ui_style_hint_label(lv_obj_t *obj)
  */
 static void app_ui_style_auth_label(lv_obj_t *obj)
 {
+    // 设置鉴权横幅背景颜色为深绿色。
     lv_obj_set_style_bg_color(obj, lv_color_hex(0x163E31), 0);
+    // 设置鉴权横幅背景不透明度。
     lv_obj_set_style_bg_opa(obj, (lv_opa_t)192, 0);
+    // 设置鉴权横幅边框宽度为 2 像素。
     lv_obj_set_style_border_width(obj, 2, 0);
+    // 设置鉴权横幅边框颜色为亮绿色。
     lv_obj_set_style_border_color(obj, lv_color_hex(0x2FE0A5), 0);
+    // 设置鉴权横幅文字颜色。
     lv_obj_set_style_text_color(obj, lv_color_hex(0xE9FFF7), 0);
+    // 设置鉴权横幅左右内边距。
     lv_obj_set_style_pad_hor(obj, 14, 0);
+    // 设置鉴权横幅上下内边距。
     lv_obj_set_style_pad_ver(obj, 10, 0);
+    // 设置鉴权横幅圆角半径为 6 像素。
     lv_obj_set_style_radius(obj, 6, 0);
 }
 /*
@@ -177,7 +207,7 @@ static lv_color_t app_ui_state_color(app_dock_state_t state, bool hold_box)
  */
 static void app_ui_calc_fit_dims(int32_t src_w, int32_t src_h, int32_t *fit_w, int32_t *fit_h)
 {
-    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
+    // 参数无效时无法计算或写回适配尺寸，直接返回。
     if ((fit_w == NULL) || (fit_h == NULL) || (src_w <= 0) || (src_h <= 0)) {
         return;
     }
@@ -196,7 +226,7 @@ static void app_ui_calc_fit_dims(int32_t src_w, int32_t src_h, int32_t *fit_w, i
  */
 static void app_ui_get_rotated_dims(int32_t *rot_w, int32_t *rot_h)
 {
-    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
+    // 输出指针无效时无法写回旋转后的宽高。
     if ((rot_w == NULL) || (rot_h == NULL)) {
         return;
     }
@@ -213,7 +243,7 @@ static void app_ui_get_rotated_dims(int32_t *rot_w, int32_t *rot_h)
  */
 static void app_ui_transform_src_point(float x, float y, float *out_x, float *out_y)
 {
-    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
+    // 输出指针无效时无法写回旋转后的坐标。
     if ((out_x == NULL) || (out_y == NULL)) {
         return;
     }
@@ -255,7 +285,7 @@ static void app_ui_map_bbox_to_screen(const app_vision_result_t *vision,
                                       int32_t *w,
                                       int32_t *h)
 {
-    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
+    // 缺少视觉结果或输出地址时，无法完成 bbox 到屏幕坐标的映射。
     if ((vision == NULL) || (x == NULL) || (y == NULL) || (w == NULL) || (h == NULL)) {
         return;
     }
@@ -339,7 +369,7 @@ static void app_ui_update_lock_bar(const app_dock_judge_result_t *dock)
 {
     uint8_t filled = 0;
     lv_color_t active = lv_color_hex(0xFFD34D);
-    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
+    // 有接驳结果时，根据稳定帧数和状态计算亮起数量与颜色。
     if (dock != NULL) {
         /*
          * 默认用 stable_count 填充锁定条。
@@ -360,7 +390,7 @@ static void app_ui_update_lock_bar(const app_dock_judge_result_t *dock)
      * 每个小段根据 filled 决定亮起或熄灭。
      */
     for (int i = 0; i < HUD_LOCK_SEG_COUNT; i++) {
-        // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
+        // 跳过尚未创建的锁定条小段。
         if (s_lock_seg[i] == NULL) {
             continue;
         }
@@ -385,13 +415,13 @@ static void app_ui_update_auth_banner(app_dock_state_t state)
         (s_last_hud_state != APP_DOCK_STATE_READY_TO_DOCK)) {
         s_auth_deadline_ms = now_ms + HUD_AUTH_SHOW_MS;
     }
-    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
+    // 横幅已创建且还没到截止时间时显示它。
     if ((s_auth != NULL) && (s_auth_deadline_ms != 0U) && (now_ms <= s_auth_deadline_ms)) {
-        // 清除 LVGL 对象标志，例如取消隐藏。
+        // 清除隐藏标志，让 AUTH PASSED 横幅显示出来。
         lv_obj_clear_flag(s_auth, LV_OBJ_FLAG_HIDDEN);
-    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
+    // 横幅已创建但显示时间结束时，把它重新隐藏。
     } else if (s_auth != NULL) {
-        // 给 LVGL 对象添加标志，例如隐藏、不可点击等。
+        // 添加隐藏标志，让横幅从屏幕上消失。
         lv_obj_add_flag(s_auth, LV_OBJ_FLAG_HIDDEN);
     }
     s_last_hud_state = state;
@@ -407,12 +437,12 @@ static void app_ui_set_track_box(bool show,
                                  lv_color_t color,
                                  lv_opa_t opa)
 {
-    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
+    // 识别框还没创建时无法更新。
     if (s_track_box == NULL) {
         return;
     }
     if (!show) {
-        // 给 LVGL 对象添加标志，例如隐藏、不可点击等。
+        // 本帧不需要显示目标框时，添加隐藏标志。
         lv_obj_add_flag(s_track_box, LV_OBJ_FLAG_HIDDEN);
         return;
     }
@@ -420,7 +450,7 @@ static void app_ui_set_track_box(bool show,
     lv_obj_set_size(s_track_box, w, h);
     lv_obj_set_style_border_color(s_track_box, color, 0);
     lv_obj_set_style_border_opa(s_track_box, opa, 0);
-    // 清除 LVGL 对象标志，例如取消隐藏。
+    // 清除隐藏标志，显示更新后的识别框。
     lv_obj_clear_flag(s_track_box, LV_OBJ_FLAG_HIDDEN);
 }
 /*
@@ -433,26 +463,26 @@ bool app_ui_create(void)
         return false;
     }
     lv_obj_t *scr = app_get_active_screen();
-    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
+    // HUD 覆盖层只创建一次，尺寸铺满整块屏幕。
     if (s_hud_layer == NULL) {
         s_hud_layer = lv_obj_create(scr);
         app_ui_style_hud_layer(s_hud_layer);
         lv_obj_set_size(s_hud_layer, BSP_LCD_H_RES, BSP_LCD_V_RES);
-        lv_obj_align(s_hud_layer, LV_ALIGN_CENTER, 0, 0);
+        lv_obj_align(s_hud_layer, LV_ALIGN_CENTER, 0, 0);// 将 HUD 层对齐到屏幕中心。
     }
-    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
+    // 识别框创建在 HUD 层上，后续只更新位置、大小和颜色。
     if (s_track_box == NULL) {
         s_track_box = lv_obj_create(s_hud_layer);
         app_ui_style_track_box(s_track_box);
     }
-    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
+    // 创建水平中心准星。
     if (s_cross_h == NULL) {
         s_cross_h = lv_obj_create(s_hud_layer);
         app_ui_style_cross_line(s_cross_h);
         lv_obj_set_size(s_cross_h, 48, 2);
         lv_obj_align(s_cross_h, LV_ALIGN_CENTER, 0, 0);
     }
-    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
+    // 创建垂直中心准星。
     if (s_cross_v == NULL) {
         s_cross_v = lv_obj_create(s_hud_layer);
         app_ui_style_cross_line(s_cross_v);
@@ -466,7 +496,7 @@ bool app_ui_create(void)
     const int32_t start_x = (BSP_LCD_H_RES - total_w) / 2;
     const int32_t y = 22;
     for (int i = 0; i < HUD_LOCK_SEG_COUNT; i++) {
-        // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
+        // 逐个创建顶部锁定条小段。
         if (s_lock_seg[i] == NULL) {
             s_lock_seg[i] = lv_obj_create(scr);
             app_ui_style_lock_seg(s_lock_seg[i]);
@@ -474,30 +504,30 @@ bool app_ui_create(void)
             lv_obj_set_pos(s_lock_seg[i], start_x + i * (seg_w + seg_gap), y);
         }
     }
-    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
+    // 创建鉴权通过横幅，默认隐藏。
     if (s_auth == NULL) {
         s_auth = lv_label_create(scr);
         app_ui_style_auth_label(s_auth);
         lv_label_set_text(s_auth, "AUTH PASSED");
         lv_obj_align(s_auth, LV_ALIGN_CENTER, 0, -32);
-        // 给 LVGL 对象添加标志，例如隐藏、不可点击等。
+        // 添加隐藏标志，等 READY_TO_DOCK 时再显示。
         lv_obj_add_flag(s_auth, LV_OBJ_FLAG_HIDDEN);
     }
-    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
+    // 创建左上角主状态标签。
     if (s_status == NULL) {
         s_status = lv_label_create(scr);
         app_ui_style_label(s_status);
         lv_label_set_text(s_status, "dock: init");
         lv_obj_align(s_status, LV_ALIGN_TOP_LEFT, 8, 8);
     }
-    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
+    // 创建右上角视觉识别状态标签。
     if (s_vision == NULL) {
         s_vision = lv_label_create(scr);
         app_ui_style_label(s_vision);
         lv_label_set_text(s_vision, "vision: init");
         lv_obj_align(s_vision, LV_ALIGN_TOP_RIGHT, -8, 8);
     }
-    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
+    // 创建底部接驳调试信息标签。
     if (s_dock == NULL) {
         s_dock = lv_label_create(scr);
         app_ui_style_label(s_dock);
@@ -506,7 +536,7 @@ bool app_ui_create(void)
         lv_obj_set_style_text_align(s_dock, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_align(s_dock, LV_ALIGN_BOTTOM_MID, 0, -8);
     }
-    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
+    // 创建顶部提示标签。
     if (s_hint == NULL) {
         s_hint = lv_label_create(scr);
         app_ui_style_hint_label(s_hint);
@@ -528,7 +558,7 @@ bool app_ui_create(void)
  */
 void app_ui_set_status(const char *text)
 {
-    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
+    // 没有文本或状态标签尚未创建时不更新。
     if ((text == NULL) || (s_status == NULL)) {
         return;
     }
@@ -545,7 +575,7 @@ void app_ui_set_status(const char *text)
  */
 void app_ui_set_vision_text(const char *text)
 {
-    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
+    // 没有文本或视觉标签尚未创建时不更新。
     if ((text == NULL) || (s_vision == NULL)) {
         return;
     }
@@ -562,7 +592,7 @@ void app_ui_set_vision_text(const char *text)
  */
 void app_ui_set_dock_text(const char *text)
 {
-    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
+    // 没有文本或接驳调试标签尚未创建时不更新。
     if ((text == NULL) || (s_dock == NULL)) {
         return;
     }
@@ -580,7 +610,7 @@ void app_ui_set_dock_text(const char *text)
 void app_ui_update_hud(const app_vision_result_t *vision,
                        const app_dock_judge_result_t *dock)
 {
-    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
+    // 缺少接驳结果或核心 HUD 控件尚未创建时无法刷新。
     if ((dock == NULL) || (s_hud_layer == NULL) || (s_track_box == NULL)) {
         return;
     }
@@ -599,7 +629,7 @@ void app_ui_update_hud(const app_vision_result_t *vision,
      * 优先使用当前有效视觉结果。
      * 如果当前帧有效，就重新计算识别框并保存为 last_box。
      */
-    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
+    // 当前视觉结果有效时，用它计算并缓存目标框。
     if ((vision != NULL) && vision->valid) {
         app_ui_map_bbox_to_screen(vision, &box_x, &box_y, &box_w, &box_h);
         s_have_last_box = true;
@@ -635,7 +665,7 @@ void app_ui_update_hud(const app_vision_result_t *vision,
     lv_opa_t box_opa = hold_box ? LV_OPA_50 : LV_OPA_COVER;
     app_ui_set_track_box(show_box, box_x, box_y, box_w, box_h, box_color, box_opa);
 
-    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
+    // 准星两个控件都创建后，再跟随接驳状态更新颜色。
     if ((s_cross_h != NULL) && (s_cross_v != NULL)) {
         /*
          * 中心准星颜色也跟随接驳状态，方便用户不用看文字也能判断当前阶段。

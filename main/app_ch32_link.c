@@ -2,19 +2,15 @@
  * app_ch32_link.c - ESP32-P4 与 CH32V203 副控通信模块（详细注释版）
  *
  * 这个文件负责主控 ESP32-P4 和副控 CH32V203 之间的串口通信。
- * 它同时兼容两种通信形式：
- * 1. 旧版文本协议，例如 [ACK]、[STS]、[ERR] 这种可读字符串；
- * 2. 新版二进制协议帧，包含帧头、版本、序号、命令、载荷长度、payload 和 CRC16。
+ * 链路使用二进制协议帧，包含帧头、版本、序号、命令、载荷长度、payload 和 CRC16。
  *
  * 在 SkyAnchor 项目里，ESP32-P4 负责 UI、视觉、状态机和云端，CH32V203 负责电机、推杆、限位、称重等实时执行。
  * 本文件就是两颗芯片之间的“可靠通信通道”，向上给 app_ctrl.c 提供回调，向下封装 UART 收发和 ACK/READY 等同步机制。
  */
 
 #include "app_ch32_link.h"                         // 项目自定义模块头文件，声明 app_ch32_link 对外提供的接口。
-#include <ctype.h>                                 // 字符判断函数，例如 isprint，用来过滤串口文本字符。
 #include <stdio.h>                                 // C 标准输入输出库，主要用于 snprintf/printf 这类格式化字符串操作。
-#include <stdlib.h>                                // 标准库函数，例如 strtol、atoi、内存/数值转换等。
-#include <string.h>                                // 字符串和内存处理函数，例如 memset、memcpy、strlen、strstr。
+#include <string.h>                                // 字符串和内存处理函数，例如 memset、memcpy。
 #include "freertos/FreeRTOS.h"                     // FreeRTOS 基础定义，任务、队列、事件组等都依赖它。
 #include "freertos/event_groups.h"                 // FreeRTOS 事件组，用 bit 标志表示 READY、ACK、MQTT 连接等状态。
 #include "freertos/task.h"                         // FreeRTOS 任务 API，例如 xTaskCreate、vTaskDelay、任务句柄。
@@ -25,9 +21,13 @@
 static const char *TAG = "app_ch32_link";                        // ESP-IDF 日志标签，串口日志会用它标明当前消息来自哪个模块。
 #define CH32_EVT_READY           BIT0
 #define CH32_EVT_ACK             BIT1
+#define CH32_EVT_NACK            BIT2
 #define APP_CH32_PROTO_OVERHEAD  (9U)                    // 项目级编译期配置宏，用于集中管理参数，避免 magic number 散落在代码里。
 #define APP_CH32_PROTO_MIN_FRAME (APP_CH32_PROTO_OVERHEAD) // 最小门限，用于过滤异常数据。
 #define APP_CH32_PROTO_MAX_FRAME (APP_CH32_PROTO_OVERHEAD + APP_CH32_LINK_PROTO_MAX_PAYLOAD) // 最大门限，用于限制资源或过滤异常数据。
+#ifndef APP_CH32_LINK_READY_STALE_MS
+#define APP_CH32_LINK_READY_STALE_MS (3000U)
+#endif
 /*
  * 结构体类型：把同一类运行时数据或协议字段打包在一起，方便函数之间传递。
  */
@@ -39,11 +39,15 @@ typedef struct {
     void *user_ctx;
     bool inited;
     bool ready;
-    bool proto_online;
     int32_t last_weight_g;
     bool has_weight;
-    char last_ack_cmd;
+    app_ch32_proto_cmd_t last_ack_cmd;
+    uint8_t last_ack_seq;
+    app_ch32_proto_cmd_t last_nack_cmd;
+    uint8_t last_nack_seq;
+    uint8_t last_nack_error;
     uint8_t next_seq;
+    TickType_t last_rx_tick;
 } app_ch32_link_ctx_t;
 static app_ch32_link_ctx_t s_ctx = {0};                          // 模块级静态变量 s_ctx，只在本文件内部使用，避免被其他文件直接修改。
 /*
@@ -82,9 +86,9 @@ static uint16_t app_ch32_read_u16_le(const uint8_t *p)
     return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
 }
 /*
- * 把旧版单字符命令映射成新版协议命令码，便于新旧协议兼容。
+ * 把上层保留的单字符命令映射成 CH32 二进制协议命令码。
  */
-static app_ch32_proto_cmd_t app_ch32_legacy_cmd_to_proto(char cmd)
+static app_ch32_proto_cmd_t app_ch32_char_cmd_to_proto(char cmd)
 {
     switch (cmd) {
         case 'P': return APP_CH32_PROTO_CMD_PROBE_READY;
@@ -98,25 +102,6 @@ static app_ch32_proto_cmd_t app_ch32_legacy_cmd_to_proto(char cmd)
         case 'W': return APP_CH32_PROTO_CMD_READ_WEIGHT;
         case 'S': return APP_CH32_PROTO_CMD_ABORT;
         default:  return APP_CH32_PROTO_CMD_NONE;
-    }
-}
-/*
- * 把新版协议命令码映射回旧版字符命令，兼容还未升级的 CH32 固件。
- */
-static char app_ch32_proto_cmd_to_legacy(app_ch32_proto_cmd_t cmd)
-{
-    switch (cmd) {
-        case APP_CH32_PROTO_CMD_PROBE_READY:  return 'P';
-        case APP_CH32_PROTO_CMD_START_DOCK:   return 'A';
-        case APP_CH32_PROTO_CMD_OPEN_DOOR:    return 'O';
-        case APP_CH32_PROTO_CMD_CLOSE_DOOR:   return 'C';
-        case APP_CH32_PROTO_CMD_EXTEND_TRAY:  return 'E';
-        case APP_CH32_PROTO_CMD_RETRACT_TRAY: return 'R';
-        case APP_CH32_PROTO_CMD_QUERY_STATUS: return 'I';
-        case APP_CH32_PROTO_CMD_RESET_FAULT:  return 'K';
-        case APP_CH32_PROTO_CMD_READ_WEIGHT:  return 'W';
-        case APP_CH32_PROTO_CMD_ABORT:        return 'S';
-        default:                              return 0;
     }
 }
 /*
@@ -164,25 +149,6 @@ const char *app_ch32_link_proto_error_name(uint8_t err)
     }
 }
 /*
- * 判断旧版文本行属于 ACK、状态、错误还是调试信息。
- */
-static app_ch32_line_type_t app_ch32_classify_legacy_line(const char *line)
-{
-    if (strncmp(line, "[ACK]", 5) == 0) {
-        return APP_CH32_LINE_ACK;
-    }
-    if (strncmp(line, "[STS]", 5) == 0) {
-        return APP_CH32_LINE_STATUS;
-    }
-    if (strncmp(line, "[ERR]", 5) == 0) {
-        return APP_CH32_LINE_ERROR;
-    }
-    if (strncmp(line, "[DBG]", 5) == 0) {
-        return APP_CH32_LINE_DEBUG;
-    }
-    return APP_CH32_LINE_UNKNOWN;
-}
-/*
  * 根据 CH32 阶段和 flags 判断副控是否处于可接收新命令的 ready 状态。
  */
 static bool app_ch32_proto_stage_indicates_ready(app_ch32_proto_stage_t stage, uint16_t flags)
@@ -201,6 +167,26 @@ static bool app_ch32_proto_stage_indicates_ready(app_ch32_proto_stage_t stage, u
     }
 }
 /*
+ * ready 不能只看最后一次状态位：如果 CH32 掉线，最后一次 READY 会一直留在内存里。
+ * 这里用最近一次有效协议帧时间做保鲜，超过阈值就主动失效。
+ */
+static bool app_ch32_ready_is_fresh(void)
+{
+    if (!s_ctx.ready) {
+        return false;
+    }
+
+    const TickType_t age_ticks = xTaskGetTickCount() - s_ctx.last_rx_tick;
+    if (age_ticks > pdMS_TO_TICKS(APP_CH32_LINK_READY_STALE_MS)) {
+        s_ctx.ready = false;
+        if (s_ctx.event_group != NULL) {
+            xEventGroupClearBits(s_ctx.event_group, CH32_EVT_READY);
+        }
+        return false;
+    }
+    return true;
+}
+/*
  * 处理所有消息都会影响的公共状态，例如 ready 标志、最后重量、ACK 事件等。
  */
 static void app_ch32_apply_common_side_effects(const app_ch32_line_t *msg)
@@ -209,50 +195,34 @@ static void app_ch32_apply_common_side_effects(const app_ch32_line_t *msg)
     if (msg == NULL) {
         return;
     }
-    if (msg->is_proto) {
-        s_ctx.proto_online = true;
-        if ((msg->type == APP_CH32_LINE_PROTO_STATUS) ||
-            (msg->type == APP_CH32_LINE_PROTO_EVENT) ||
-            (msg->type == APP_CH32_LINE_PROTO_ERROR) ||
-            (msg->type == APP_CH32_LINE_PROTO_HEARTBEAT)) {
-            if (msg->payload_len >= 8U) {
-                s_ctx.last_weight_g = msg->proto_weight_g;
-                s_ctx.has_weight = true;
-            }
-            if (app_ch32_proto_stage_indicates_ready(msg->proto_stage, msg->proto_flags)) {
-                s_ctx.ready = true;
+    s_ctx.last_rx_tick = xTaskGetTickCount();
+    if ((msg->type == APP_CH32_LINE_PROTO_STATUS) ||
+        (msg->type == APP_CH32_LINE_PROTO_EVENT) ||
+        (msg->type == APP_CH32_LINE_PROTO_ERROR) ||
+        (msg->type == APP_CH32_LINE_PROTO_HEARTBEAT)) {
+        if (msg->payload_len >= 8U) {
+            s_ctx.last_weight_g = msg->proto_weight_g;
+            s_ctx.has_weight = true;
+            s_ctx.ready = app_ch32_proto_stage_indicates_ready(msg->proto_stage, msg->proto_flags);
+            if (s_ctx.ready) {
                 // 置位事件组 bit，用来通知其他任务某个事件已经发生。
                 xEventGroupSetBits(s_ctx.event_group, CH32_EVT_READY);
+            } else {
+                xEventGroupClearBits(s_ctx.event_group, CH32_EVT_READY);
             }
         }
-        if (msg->type == APP_CH32_LINE_PROTO_ACK) {
-            s_ctx.last_ack_cmd = app_ch32_proto_cmd_to_legacy((app_ch32_proto_cmd_t)msg->proto_cmd);
-            // 置位事件组 bit，用来通知其他任务某个事件已经发生。
-            xEventGroupSetBits(s_ctx.event_group, CH32_EVT_ACK);
-        }
-        return;
     }
-    if (msg->type == APP_CH32_LINE_STATUS) {
-        // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
-        if (strstr(msg->line, "CH32_READY") != NULL) {
-            s_ctx.ready = true;
-            // 置位事件组 bit，用来通知其他任务某个事件已经发生。
-            xEventGroupSetBits(s_ctx.event_group, CH32_EVT_READY);
-        }
-        const char *w = strstr(msg->line, "WEIGHT=");
-        // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
-        if (w != NULL) {
-            s_ctx.last_weight_g = (int32_t)strtol(w + 7, NULL, 10);
-            s_ctx.has_weight = true;
-        }
-    } else if (msg->type == APP_CH32_LINE_ACK) {
-        const char *p = msg->line + 5;
-        while (*p == ' ') {
-            p++;
-        }
-        s_ctx.last_ack_cmd = *p;
+    if (msg->type == APP_CH32_LINE_PROTO_ACK) {
+        s_ctx.last_ack_cmd = (app_ch32_proto_cmd_t)msg->proto_cmd;
+        s_ctx.last_ack_seq = msg->proto_seq;
         // 置位事件组 bit，用来通知其他任务某个事件已经发生。
         xEventGroupSetBits(s_ctx.event_group, CH32_EVT_ACK);
+    }
+    if (msg->type == APP_CH32_LINE_PROTO_NACK) {
+        s_ctx.last_nack_cmd = (app_ch32_proto_cmd_t)msg->proto_cmd;
+        s_ctx.last_nack_seq = msg->proto_seq;
+        s_ctx.last_nack_error = msg->proto_detail;
+        xEventGroupSetBits(s_ctx.event_group, CH32_EVT_NACK);
     }
 }
 /*
@@ -269,23 +239,8 @@ static void app_ch32_dispatch_msg(const app_ch32_line_t *msg)
     if (s_ctx.cb != NULL) {
         s_ctx.cb(msg, s_ctx.user_ctx);
     }
-    if (msg->is_proto) {
-        // 信息日志：用于确认程序执行到了哪个阶段。
-        ESP_LOGI(TAG, "CH32 <=proto=> %s", msg->line);
-    } else {
-        ESP_LOGI(TAG, "CH32 => %s", msg->line);
-    }
-}
-/*
- * 把旧版文本协议行包装成统一消息结构后派发给上层。
- */
-static void app_ch32_dispatch_legacy_line(const char *line)
-{
-    app_ch32_line_t msg = {0};
-    msg.type = app_ch32_classify_legacy_line(line);
-    msg.is_proto = false;
-    strlcpy(msg.line, line, sizeof(msg.line));
-    app_ch32_dispatch_msg(&msg);
+    // 信息日志：用于确认程序执行到了哪个阶段。
+    ESP_LOGI(TAG, "CH32 <=proto=> %s", msg->line);
 }
 /*
  * 解析新版二进制协议帧，检查帧头、长度、CRC，并提取 stage/weight/flags 等字段。
@@ -311,7 +266,7 @@ static bool app_ch32_parse_proto_frame(const uint8_t *frame, size_t frame_len, a
      *
      * 0x55 0xAA 是新版二进制协议的同步头。
      * RX 任务会用第一个字节进入 proto_active 状态，这里再做一次完整校验，
-     * 避免噪声或旧文本内容被误解析成协议帧。
+     * 避免噪声被误解析成协议帧。
      */
     if ((frame[0] != APP_CH32_PROTO_SOF1) || (frame[1] != APP_CH32_PROTO_SOF2)) {
         return false;
@@ -337,13 +292,11 @@ static bool app_ch32_parse_proto_frame(const uint8_t *frame, size_t frame_len, a
     }
 
     /*
-     * CRC16 覆盖范围从 VER 开始，到 payload 结束。
-     *
-     * 帧头 SOF1/SOF2 不参与 CRC，这样接收端可以先用帧头做同步，
-     * 再用版本、类型、命令、序号、长度和 payload 做完整性校验。
+     * CRC16 覆盖范围从 SOF1 开始，到 payload 结束。
+     * 这和 CH32 端 esp32_comm_crc16_ibm(frame, frame_len - 2) 的算法保持一致。
      */
     const uint16_t crc_expect = app_ch32_read_u16_le(&frame[7 + payload_len]);
-    const uint16_t crc_actual = app_ch32_crc16_ibm(&frame[2], (size_t)(5U + payload_len));
+    const uint16_t crc_actual = app_ch32_crc16_ibm(frame, (size_t)(7U + payload_len));
     if (crc_expect != crc_actual) {
         // 警告日志：系统还能继续运行，但某个功能可能降级或不完整。
         ESP_LOGW(TAG, "proto crc mismatch, expect=0x%04x actual=0x%04x", crc_expect, crc_actual);
@@ -357,7 +310,6 @@ static bool app_ch32_parse_proto_frame(const uint8_t *frame, size_t frame_len, a
      * 不会因为半帧或坏帧污染上层状态机。
      */
     memset(out, 0, sizeof(*out));
-    out->is_proto = true;          // 标记这条消息来自新版二进制协议，而不是旧文本行。
     out->proto_type = frame[3];    // TYPE：ACK/NACK/STATUS/EVENT/ERROR/HEARTBEAT 等消息类型。
     out->proto_cmd = frame[4];     // CMD：这条 ACK/NACK 对应的命令，或事件关联的命令。
     out->proto_seq = frame[5];     // SEQ：帧序号，便于后续扩展更严格的请求/响应匹配。
@@ -389,10 +341,12 @@ static bool app_ch32_parse_proto_frame(const uint8_t *frame, size_t frame_len, a
             break;
         case APP_CH32_PROTO_TYPE_NACK:
             out->type = APP_CH32_LINE_PROTO_NACK;
+            out->proto_detail = (payload_len >= 1U) ? out->payload[0] : APP_CH32_ERR_INTERNAL;
             snprintf(out->line, sizeof(out->line),
-                     "PROTO NACK cmd=0x%02X seq=%u",
+                     "PROTO NACK cmd=0x%02X seq=%u err=%s",
                      out->proto_cmd,
-                     (unsigned)out->proto_seq);
+                     (unsigned)out->proto_seq,
+                     app_ch32_link_proto_error_name(out->proto_detail));
             break;
         case APP_CH32_PROTO_TYPE_STATUS:
             out->type = APP_CH32_LINE_PROTO_STATUS;
@@ -430,10 +384,10 @@ static bool app_ch32_parse_proto_frame(const uint8_t *frame, size_t frame_len, a
         }
 
         /*
-         * 生成一行可读文本。
+         * 生成一行可读调试文本。
          *
-         * 这样串口日志、UI 调试文本和旧版文本协议可以共用同一个 line 字段，
-         * 上层调试时不用再手工解码二进制 payload。
+         * 这样串口日志和 UI 调试文本可以共用同一个 line 字段，
+         * 上层调试时不用手工解码二进制 payload。
          */
         if (out->type == APP_CH32_LINE_PROTO_ERROR) {
             snprintf(out->line, sizeof(out->line),
@@ -456,37 +410,14 @@ static bool app_ch32_parse_proto_frame(const uint8_t *frame, size_t frame_len, a
     return true;
 }
 /*
- * UART 接收任务，持续读取 CH32 数据，同时识别二进制帧和旧版文本行。
+ * UART 接收任务，持续读取并解析 CH32 二进制协议帧。
  */
 static void app_ch32_link_rx_task(void *arg)
 {
-    /*
-     * ch 是每次从 UART 读取的单字节。
-     * 本任务按字节解析，是因为需要同时兼容：
-     * - 新版二进制帧：0x55 0xAA 开头，后面按长度收满；
-     * - 旧版文本行：[ACK] / [STS] / [ERR] / [DBG]，以换行结束。
-     */
     uint8_t ch = 0;
-
-    /*
-     * 旧文本协议行缓冲。
-     *
-     * CH32 旧固件会发送可读字符串，每收到 '\n' 就把一整行派发给上层。
-     */
-    char line_buf[APP_CH32_LINK_LINE_MAX] = {0};
-    size_t line_len = 0;
-
-    /*
-     * 新版二进制协议缓冲。
-     *
-     * proto_len 表示已经收到多少字节；
-     * proto_expect 表示根据 LEN 字段算出来的完整帧长度；
-     * proto_active 表示当前正在收一帧二进制协议。
-     */
     uint8_t proto_buf[APP_CH32_PROTO_MAX_FRAME] = {0};
     size_t proto_len = 0;
     size_t proto_expect = 0;
-    bool proto_active = false;
 
     /*
      * xTaskCreate() 要求任务函数必须接收 void *arg。
@@ -502,153 +433,72 @@ static void app_ch32_link_rx_task(void *arg)
         }
 
         /*
-         * 如果当前还没有进入二进制帧解析状态，
-         * 遇到 SOF1 就先假设新版协议帧开始。
-         *
-         * 这里先不立刻认定成功，因为 0x55 也可能只是旧文本或噪声中的一个普通字节。
+         * 空闲状态只等待 SOF1。
+         * 其他噪声字节直接丢弃，直到重新同步到协议帧头。
          */
-        if (!proto_active) {
-            if (ch == APP_CH32_PROTO_SOF1) {
-                proto_active = true;
-                proto_len = 1;
-                proto_expect = 0;
-                proto_buf[0] = ch;
+        if (proto_len == 0U) {
+            if (ch != APP_CH32_PROTO_SOF1) {
                 continue;
             }
+            proto_buf[proto_len++] = ch;
+            proto_expect = 0;
+            continue;
         }
 
         /*
-         * 二进制协议解析分支。
-         *
-         * 一旦 proto_active=true，后续字节优先按协议帧处理。
-         * 如果发现第二个字节不是 SOF2，再回退到旧文本行解析。
+         * 第二字节必须是 SOF2。
+         * 如果又收到 SOF1，就把它当作新帧头继续等待 SOF2。
          */
-        if (proto_active) {
-            if ((proto_len == 1U) && (ch != APP_CH32_PROTO_SOF2)) {
-                /*
-                 * 回退场景：
-                 * 已经收到了 SOF1，但第二个字节不是 SOF2，
-                 * 说明这不是新版协议帧。
-                 *
-                 * 为了不丢数据，先把 SOF1 尝试放回文本行缓冲，
-                 * 再把当前 ch 按旧文本协议继续处理。
-                 */
-                proto_active = false;
-                proto_len = 0;
-                proto_expect = 0;
-                if (line_len < sizeof(line_buf) - 1U && isprint((int)APP_CH32_PROTO_SOF1)) {
-                    line_buf[line_len++] = (char)APP_CH32_PROTO_SOF1;
-                }
-                if (ch == '\n') {
-                    if (line_len > 0U) {
-                        line_buf[line_len] = '\0';
-                        app_ch32_dispatch_legacy_line(line_buf);
-                        line_len = 0;
-                        line_buf[0] = '\0';
-                    }
-                } else if ((ch != '\r') && (isprint((int)ch) != 0)) {
-                    if (line_len < sizeof(line_buf) - 1U) {
-                        line_buf[line_len++] = (char)ch;
-                    }
-                }
-                continue;
-            }
-
-            /*
-             * 把当前字节追加到协议缓冲。
-             *
-             * 如果超过缓冲上限，说明这帧异常，直接丢弃并重新等待下一帧。
-             */
-            if (proto_len < sizeof(proto_buf)) {
+        if (proto_len == 1U) {
+            if (ch == APP_CH32_PROTO_SOF2) {
                 proto_buf[proto_len++] = ch;
-            } else {
-                proto_active = false;
-                proto_len = 0;
-                proto_expect = 0;
                 continue;
             }
+            proto_len = (ch == APP_CH32_PROTO_SOF1) ? 1U : 0U;
+            proto_buf[0] = (proto_len == 1U) ? ch : 0U;
+            proto_expect = 0;
+            continue;
+        }
 
-            /*
-             * 收到前 7 个字节后，LEN 字段已经到位。
-             * 此时就能算出完整帧长度，后面只需要继续等到 proto_len == proto_expect。
-             */
-            if (proto_len == 7U) {
-                const uint8_t payload_len = proto_buf[6];
-                if (payload_len > APP_CH32_LINK_PROTO_MAX_PAYLOAD) {
-                    proto_active = false;
-                    proto_len = 0;
-                    proto_expect = 0;
-                    // 警告日志：系统还能继续运行，但某个功能可能降级或不完整。
-                    ESP_LOGW(TAG, "proto payload too large: %u", (unsigned)payload_len);
-                    continue;
-                }
-                proto_expect = APP_CH32_PROTO_OVERHEAD + payload_len;
-            }
+        /*
+         * 把当前字节追加到协议缓冲。
+         * 如果超过缓冲上限，说明这帧异常，直接丢弃并重新等待下一帧。
+         */
+        if (proto_len < sizeof(proto_buf)) {
+            proto_buf[proto_len++] = ch;
+        } else {
+            proto_len = 0;
+            proto_expect = 0;
+            continue;
+        }
 
-            /*
-             * 完整帧已经收齐。
-             *
-             * 先调用 app_ch32_parse_proto_frame() 做版本、长度、CRC 和字段解析；
-             * 解析成功才派发给上层，否则静默丢弃坏帧。
-             */
-            if ((proto_expect >= APP_CH32_PROTO_MIN_FRAME) && (proto_len == proto_expect)) {
-                app_ch32_line_t msg = {0};
-                if (app_ch32_parse_proto_frame(proto_buf, proto_len, &msg)) {
-                    app_ch32_dispatch_msg(&msg);
-                }
-                proto_active = false;
+        /*
+         * 收到前 7 个字节后，LEN 字段已经到位。
+         * 此时就能算出完整帧长度，后面只需要继续等到 proto_len == proto_expect。
+         */
+        if (proto_len == 7U) {
+            const uint8_t payload_len = proto_buf[6];
+            if (payload_len > APP_CH32_LINK_PROTO_MAX_PAYLOAD) {
                 proto_len = 0;
                 proto_expect = 0;
+                // 警告日志：系统还能继续运行，但某个功能可能降级或不完整。
+                ESP_LOGW(TAG, "proto payload too large: %u", (unsigned)payload_len);
+                continue;
             }
-            continue;
+            proto_expect = APP_CH32_PROTO_OVERHEAD + payload_len;
         }
 
         /*
-         * 旧文本协议解析分支。
-         *
-         * 旧固件使用 '\r' / '\n' 作为行结束，常见输出类似：
-         * [ACK] A
-         * [STS] CH32_READY WEIGHT=123
-         * [ERR] LIMIT_TIMEOUT
+         * 完整帧已经收齐。
+         * 解析成功才派发给上层，否则丢弃坏帧并等待下一帧。
          */
-        if (ch == '\r') {
-            continue;
-        }
-
-        /*
-         * 换行表示一条旧文本消息结束。
-         * line_len > 0 时才派发，避免空行干扰状态机。
-         */
-        if (ch == '\n') {
-            if (line_len > 0U) {
-                line_buf[line_len] = '\0';
-                app_ch32_dispatch_legacy_line(line_buf);
-                line_len = 0;
-                line_buf[0] = '\0';
+        if ((proto_expect >= APP_CH32_PROTO_MIN_FRAME) && (proto_len == proto_expect)) {
+            app_ch32_line_t msg = {0};
+            if (app_ch32_parse_proto_frame(proto_buf, proto_len, &msg)) {
+                app_ch32_dispatch_msg(&msg);
             }
-            continue;
-        }
-
-        /*
-         * 过滤不可打印字符。
-         *
-         * 旧文本协议只保留可读字符，避免二进制噪声进入 UI 或日志。
-         */
-        if (isprint((int)ch) == 0) {
-            continue;
-        }
-
-        /*
-         * 普通字符追加到旧文本行缓冲。
-         * 如果行太长，就先把当前缓冲作为一行派发，避免数组越界。
-         */
-        if (line_len < sizeof(line_buf) - 1U) {
-            line_buf[line_len++] = (char)ch;
-        } else {
-            line_buf[line_len] = '\0';
-            app_ch32_dispatch_legacy_line(line_buf);
-            line_len = 0;
-            line_buf[0] = '\0';
+            proto_len = 0;
+            proto_expect = 0;
         }
     }
 }
@@ -670,36 +520,10 @@ static esp_err_t app_ch32_link_prepare_tx_idle(void)
     return ESP_OK;
 }
 /*
- * 按旧版协议发送单字符命令，适配简单 CH32 固件。
- */
-static esp_err_t app_ch32_link_send_legacy_cmd(char cmd)
-{
-    /*
-     * 旧版文本命令格式固定为：
-     * @ + 单字符命令 + '\n'
-     *
-     * 例如：
-     * @P\n 表示探测 ready；
-     * @A\n 表示开始接驳；
-     * @O\n 表示开门。
-     */
-    char frame[4] = {'@', cmd, '\n', '\0'};
-
-    // 通过 UART 向 CH32 发送旧文本命令帧，只发送前三个有效字符，不发送结尾 '\0'。
-    int written = uart_write_bytes(s_ctx.uart_num, frame, 3);
-    ESP_RETURN_ON_FALSE(written == 3, ESP_FAIL, TAG, "uart_write_bytes legacy failed");
-
-    // 信息日志：用于确认程序执行到了哪个阶段。
-    ESP_LOGI(TAG, "ESP32 => CH32 legacy : %s", frame);
-
-    // 正常返回 ESP_OK，表示该步骤执行成功。
-    return ESP_OK;
-}
-/*
- * 按新版二进制协议发送命令帧。
+ * 按二进制协议发送命令帧。
  *
- * 新协议比旧文本协议多了版本号、命令码、序号、payload 长度和 CRC16，
- * 更适合承载结构化状态和后续扩展字段。
+ * 协议帧包含版本号、命令码、序号、payload 长度和 CRC16，
+ * 用来承载结构化状态和后续扩展字段。
  */
 esp_err_t app_ch32_link_send_proto(app_ch32_proto_cmd_t cmd,
                                    const void *payload,
@@ -719,6 +543,10 @@ esp_err_t app_ch32_link_send_proto(app_ch32_proto_cmd_t cmd,
                         ESP_ERR_INVALID_ARG,
                         TAG,
                         "payload too large");
+    ESP_RETURN_ON_FALSE((payload_len == 0U) || (payload != NULL),
+                        ESP_ERR_INVALID_ARG,
+                        TAG,
+                        "payload is null");
 
     /*
      * frame[] 是即将写入 UART 的完整二进制帧。
@@ -728,7 +556,7 @@ esp_err_t app_ch32_link_send_proto(app_ch32_proto_cmd_t cmd,
 
     /*
      * 每发送一帧命令，序号自增。
-     * 当前实现主要用它做日志和后续扩展，ACK 匹配仍然以命令码为主。
+     * 当前实现会用它做 ACK/NACK 请求-响应匹配，避免旧 ACK 误确认新命令。
      */
     const uint8_t seq = ++s_ctx.next_seq;
     size_t idx = 0;
@@ -755,9 +583,10 @@ esp_err_t app_ch32_link_send_proto(app_ch32_proto_cmd_t cmd,
     /*
      * 计算并追加 CRC16。
      *
-     * CRC 使用小端写入，和解析端 app_ch32_read_u16_le() 对应。
+     * CRC 覆盖 SOF1 到 payload 末尾，并使用小端写入。
+     * CH32 端发送/接收新协议帧也是这个范围。
      */
-    const uint16_t crc = app_ch32_crc16_ibm(&frame[2], (size_t)(5U + payload_len));
+    const uint16_t crc = app_ch32_crc16_ibm(frame, (size_t)(7U + payload_len));
     frame[idx++] = (uint8_t)(crc & 0xFFU);          // CRC 低字节。
     frame[idx++] = (uint8_t)((crc >> 8) & 0xFFU);   // CRC 高字节。
 
@@ -782,9 +611,9 @@ esp_err_t app_ch32_link_send_proto(app_ch32_proto_cmd_t cmd,
     return ESP_OK;
 }
 /*
- * 等待指定命令的 ACK，用事件组实现同步等待和超时保护。
+ * 等待指定协议命令的 ACK，用事件组实现同步等待和超时保护。
  */
-static esp_err_t app_ch32_link_wait_ack_for_cmd(char cmd, uint32_t timeout_ms)
+static esp_err_t app_ch32_link_wait_ack_for_cmd(app_ch32_proto_cmd_t cmd, uint8_t seq, uint32_t timeout_ms)
 {
     /*
      * elapsed_ms 记录已经等待了多久。
@@ -803,9 +632,10 @@ static esp_err_t app_ch32_link_wait_ack_for_cmd(char cmd, uint32_t timeout_ms)
 
     /*
      * 循环等待 ACK，直到：
-     * - 收到目标命令对应的 ACK，返回 ESP_OK；
-     * - 超过 timeout_ms，返回 ESP_ERR_TIMEOUT。
-     */
+         * - 收到目标协议命令和 seq 对应的 ACK，返回 ESP_OK；
+         * - 收到目标协议命令和 seq 对应的 NACK，立即返回失败；
+         * - 超过 timeout_ms，返回 ESP_ERR_TIMEOUT。
+         */
     while (elapsed_ms < timeout_ms) {
         /*
          * 最后一轮等待不能超过总超时。
@@ -823,7 +653,7 @@ static esp_err_t app_ch32_link_wait_ack_for_cmd(char cmd, uint32_t timeout_ms)
          * 防止同一个 ACK 被下一轮等待重复消费。
          */
         EventBits_t bits = xEventGroupWaitBits(s_ctx.event_group,
-                                               CH32_EVT_ACK,
+                                               CH32_EVT_ACK | CH32_EVT_NACK,
                                                pdTRUE,
                                                pdFALSE,
                                                pdMS_TO_TICKS(this_wait));
@@ -832,22 +662,49 @@ static esp_err_t app_ch32_link_wait_ack_for_cmd(char cmd, uint32_t timeout_ms)
         /*
          * 这一片时间里没有 ACK，就继续等下一片。
          */
-        if ((bits & CH32_EVT_ACK) == 0U) {
+        if ((bits & (CH32_EVT_ACK | CH32_EVT_NACK)) == 0U) {
             continue;
         }
 
         /*
-         * 收到了 ACK，还要确认 ACK 对应的是当前等待的命令。
-         * 例如正在等 'A'，但串口里残留的是 'P' 的 ACK，就不能当成成功。
+         * 收到了 ACK，还要确认 ACK 对应的是当前等待的协议命令和序号。
          */
-        if (s_ctx.last_ack_cmd == cmd) {
+        if (((bits & CH32_EVT_ACK) != 0U) &&
+            (s_ctx.last_ack_cmd == cmd) &&
+            (s_ctx.last_ack_seq == seq)) {
             // 正常返回 ESP_OK，表示该步骤执行成功。
             return ESP_OK;
         }
 
-        // 警告日志：系统还能继续运行，但某个功能可能降级或不完整。
-        ESP_LOGW(TAG, "ack mismatch, expect=%c actual=%c", cmd, s_ctx.last_ack_cmd);
-        s_ctx.last_ack_cmd = 0; // 清掉不匹配 ACK，继续等待目标命令的 ACK。
+        if (((bits & CH32_EVT_NACK) != 0U) &&
+            (s_ctx.last_nack_cmd == cmd) &&
+            (s_ctx.last_nack_seq == seq)) {
+            ESP_LOGW(TAG,
+                     "CH32 rejected cmd=0x%02X seq=%u err=%s",
+                     (unsigned)cmd,
+                     (unsigned)seq,
+                     app_ch32_link_proto_error_name(s_ctx.last_nack_error));
+            s_ctx.last_nack_cmd = APP_CH32_PROTO_CMD_NONE;
+            return ESP_ERR_INVALID_RESPONSE;
+        }
+
+        if ((bits & CH32_EVT_ACK) != 0U) {
+            ESP_LOGW(TAG, "ack mismatch, expect=0x%02X/%u actual=0x%02X/%u",
+                     (unsigned)cmd,
+                     (unsigned)seq,
+                     (unsigned)s_ctx.last_ack_cmd,
+                     (unsigned)s_ctx.last_ack_seq);
+            s_ctx.last_ack_cmd = APP_CH32_PROTO_CMD_NONE; // 清掉不匹配 ACK，继续等待目标命令的 ACK。
+        }
+        if ((bits & CH32_EVT_NACK) != 0U) {
+            ESP_LOGW(TAG, "nack mismatch, expect=0x%02X/%u actual=0x%02X/%u err=%s",
+                     (unsigned)cmd,
+                     (unsigned)seq,
+                     (unsigned)s_ctx.last_nack_cmd,
+                     (unsigned)s_ctx.last_nack_seq,
+                     app_ch32_link_proto_error_name(s_ctx.last_nack_error));
+            s_ctx.last_nack_cmd = APP_CH32_PROTO_CMD_NONE;
+        }
     }
 
     /*
@@ -886,14 +743,18 @@ esp_err_t app_ch32_link_init(app_ch32_line_cb_t cb, void *user_ctx)
     /*
      * 清空运行期状态。
      *
-     * ready / proto_online / has_weight 都必须从 false 开始，
+     * ready / has_weight 都必须从 false 开始，
      * 避免复位或重新初始化时沿用上一轮通信留下的旧状态。
      */
     s_ctx.ready = false;       // 还没有收到 CH32_READY 或协议状态帧，所以暂时认为副控未就绪。
-    s_ctx.proto_online = false; // 尚未收到新版二进制协议帧，发送时仍需要准备好回退旧文本协议。
     s_ctx.has_weight = false;  // 尚未收到称重数据，app_ch32_link_last_weight() 不应返回旧重量。
-    s_ctx.last_ack_cmd = 0;    // 清空最近 ACK 对应的命令字符，避免旧 ACK 影响下一次等待。
+    s_ctx.last_ack_cmd = APP_CH32_PROTO_CMD_NONE; // 清空最近 ACK 对应的协议命令，避免旧 ACK 影响下一次等待。
+    s_ctx.last_ack_seq = 0;
+    s_ctx.last_nack_cmd = APP_CH32_PROTO_CMD_NONE;
+    s_ctx.last_nack_seq = 0;
+    s_ctx.last_nack_error = APP_CH32_ERR_NONE;
     s_ctx.next_seq = 0;        // 新版协议帧序号从 0 开始，发送时先自增再写入帧头。
+    s_ctx.last_rx_tick = 0;
 
     /*
      * UART 参数配置。
@@ -977,7 +838,7 @@ esp_err_t app_ch32_link_init(app_ch32_line_cb_t cb, void *user_ctx)
      * 创建串口接收任务。
      *
      * app_ch32_link_rx_task() 会常驻后台读取 UART 字节流，
-     * 同时兼容新版二进制协议帧和旧版文本行。
+     * 并按二进制协议帧格式完成同步、校验和派发。
      *
      * 栈大小 4096 字节足够容纳行缓冲、协议帧缓冲和解析临时变量；
      * 优先级 8 略高于普通业务任务，避免串口数据积压。
@@ -1012,58 +873,24 @@ esp_err_t app_ch32_link_send_cmd_and_wait_ack(char cmd, uint32_t timeout_ms)
      */
     ESP_RETURN_ON_FALSE(s_ctx.inited, ESP_ERR_INVALID_STATE, TAG, "not initialized");
 
+    const app_ch32_proto_cmd_t proto_cmd = app_ch32_char_cmd_to_proto(cmd);
+    ESP_RETURN_ON_FALSE(proto_cmd != APP_CH32_PROTO_CMD_NONE,
+                        ESP_ERR_INVALID_ARG,
+                        TAG,
+                        "unknown ch32 cmd: %c",
+                        cmd);
+
     // 清除事件组 bit，避免旧事件影响下一次等待。
-    xEventGroupClearBits(s_ctx.event_group, CH32_EVT_ACK);
-    s_ctx.last_ack_cmd = 0; // 同步清掉最近 ACK 命令字符，确保这次等待只认新 ACK。
+    xEventGroupClearBits(s_ctx.event_group, CH32_EVT_ACK | CH32_EVT_NACK);
+    s_ctx.last_ack_cmd = APP_CH32_PROTO_CMD_NONE; // 同步清掉最近 ACK 命令，确保这次等待只认新 ACK。
+    s_ctx.last_ack_seq = 0;
+    s_ctx.last_nack_cmd = APP_CH32_PROTO_CMD_NONE;
+    s_ctx.last_nack_seq = 0;
+    s_ctx.last_nack_error = APP_CH32_ERR_NONE;
 
-    /*
-     * 仍然优先尝试新版二进制协议。
-     * 如果 CH32 新固件在线，正常会很快返回协议 ACK。
-     */
-    const app_ch32_proto_cmd_t proto_cmd = app_ch32_legacy_cmd_to_proto(cmd);
-    if (proto_cmd != APP_CH32_PROTO_CMD_NONE) {
-        esp_err_t ret = app_ch32_link_send_proto(proto_cmd, NULL, 0, NULL);
-        if (ret == ESP_OK) {
-            /*
-             * 新协议 ACK 先用一个较短等待窗口。
-             *
-             * 这样如果对端还是旧固件，不会把全部 timeout 都耗在新版协议上，
-             * 可以尽快回退旧文本命令。
-             */
-            uint32_t first_wait = APP_CH32_LINK_PROTO_ACK_FIRST_WAIT_MS;
-            if (first_wait > timeout_ms) {
-                first_wait = timeout_ms;
-            }
-
-            ret = app_ch32_link_wait_ack_for_cmd(cmd, first_wait);
-            if (ret == ESP_OK) {
-                // 正常返回 ESP_OK，表示该步骤执行成功。
-                return ESP_OK;
-            }
-
-            // 警告日志：系统还能继续运行，但某个功能可能降级或不完整。
-            ESP_LOGW(TAG, "proto ack timeout for %c, fallback legacy", cmd);
-        } else {
-            // 警告日志：系统还能继续运行，但某个功能可能降级或不完整。
-            ESP_LOGW(TAG, "proto send failed for %c: %s, fallback legacy", cmd, esp_err_to_name(ret));
-        }
-
-        // 清除事件组 bit，避免旧事件影响下一次等待。
-        xEventGroupClearBits(s_ctx.event_group, CH32_EVT_ACK);
-        s_ctx.last_ack_cmd = 0; // 回退旧协议前再次清空 ACK 状态，避免新旧两次发送互相串扰。
-    }
-
-    /*
-     * 旧文本协议发送。
-     * 如果这里发送失败，说明 UART 写入本身有问题，直接返回错误。
-     */
-    ESP_RETURN_ON_ERROR(app_ch32_link_send_legacy_cmd(cmd), TAG, "legacy send failed");
-
-    /*
-     * 等待旧文本协议 ACK。
-     * CH32 旧固件通常会回 [ACK] A / [ACK] P 这种行文本，RX 任务会解析后置位 CH32_EVT_ACK。
-     */
-    return app_ch32_link_wait_ack_for_cmd(cmd, timeout_ms);
+    uint8_t seq = 0;
+    ESP_RETURN_ON_ERROR(app_ch32_link_send_proto(proto_cmd, NULL, 0, &seq), TAG, "proto send failed");
+    return app_ch32_link_wait_ack_for_cmd(proto_cmd, seq, timeout_ms);
 }
 /*
  * 主动探测 CH32 是否在线且 ready，常用于系统启动阶段。
@@ -1078,50 +905,18 @@ esp_err_t app_ch32_link_probe_ready(uint32_t timeout_ms)
     /*
      * 如果之前已经收到过 ready 状态，就不用再发探测命令。
      */
-    if (s_ctx.ready) {
+    if (app_ch32_ready_is_fresh()) {
         // 正常返回 ESP_OK，表示该步骤执行成功。
         return ESP_OK;
     }
+    s_ctx.ready = false;
 
     // 清除事件组 bit，避免旧事件影响下一次等待。
     xEventGroupClearBits(s_ctx.event_group, CH32_EVT_READY);
 
-    /*
-     * 新协议探测窗口。
-     *
-     * 这里不会直接使用完整 timeout_ms，而是先给新版协议一个较短机会；
-     * 如果没有等到 ready，再回退旧版 @P 文本探测。
-     */
-    uint32_t proto_wait = APP_CH32_LINK_PROTO_PROBE_MS;
-    if (proto_wait > timeout_ms) {
-        proto_wait = timeout_ms;
-    }
-
-    esp_err_t ret = app_ch32_link_send_proto(APP_CH32_PROTO_CMD_PROBE_READY, NULL, 0, NULL);
-    if (ret == ESP_OK) {
-        /*
-         * 等待 RX 任务解析到 ready 状态。
-         * 新协议中 STATUS / HEARTBEAT / EVENT 只要带 READY flag 或 ready 阶段，
-         * app_ch32_apply_common_side_effects() 就会置位 CH32_EVT_READY。
-         */
-        EventBits_t bits = xEventGroupWaitBits(s_ctx.event_group,
-                                               CH32_EVT_READY,
-                                               pdFALSE,
-                                               pdFALSE,
-                                               pdMS_TO_TICKS(proto_wait));
-        if ((bits & CH32_EVT_READY) != 0U) {
-            // 正常返回 ESP_OK，表示该步骤执行成功。
-            return ESP_OK;
-        }
-        // 警告日志：系统还能继续运行，但某个功能可能降级或不完整。
-        ESP_LOGW(TAG, "proto probe timeout, fallback legacy probe");
-    }
-
-    /*
-     * 回退旧文本探测命令 @P。
-     * 旧版 CH32 固件收到后应回 [STS] CH32_READY 或类似状态行。
-     */
-    ESP_RETURN_ON_ERROR(app_ch32_link_send_legacy_cmd('P'), TAG, "legacy probe send failed");
+    ESP_RETURN_ON_ERROR(app_ch32_link_send_proto(APP_CH32_PROTO_CMD_PROBE_READY, NULL, 0, NULL),
+                        TAG,
+                        "proto probe send failed");
 
     // 等待 CH32_EVT_READY，超时后返回 ESP_ERR_TIMEOUT。
     EventBits_t bits = xEventGroupWaitBits(s_ctx.event_group,
@@ -1136,7 +931,7 @@ esp_err_t app_ch32_link_probe_ready(uint32_t timeout_ms)
  */
 bool app_ch32_link_is_ready(void)
 {
-    return s_ctx.ready;
+    return app_ch32_ready_is_fresh();
 }
 /*
  * 读取最近一次 CH32 回传的重量值，给任务状态或 UI 使用。

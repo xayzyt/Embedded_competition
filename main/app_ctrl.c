@@ -17,8 +17,7 @@
 #include <inttypes.h>                              // 跨平台整数格式化宏，方便日志打印固定宽度整数。
 #include <stdbool.h>                               // C99 布尔类型支持，提供 bool、true、false。
 #include <stdio.h>                                 // C 标准输入输出库，主要用于 snprintf/printf 这类格式化字符串操作。
-#include <stdlib.h>                                // 标准库函数，例如 strtol、atoi、内存/数值转换等。
-#include <string.h>                                // 字符串和内存处理函数，例如 memset、memcpy、strlen、strstr。
+#include <string.h>                                // 字符串和内存处理函数，例如 memset、strlcpy。
 #include "freertos/FreeRTOS.h"                     // FreeRTOS 基础定义，任务、队列、事件组等都依赖它。
 #include "freertos/task.h"                         // FreeRTOS 任务 API，例如 xTaskCreate、vTaskDelay、任务句柄。
 #include "esp_err.h"                               // ESP-IDF 错误码类型 esp_err_t 和 ESP_OK 等定义。
@@ -110,40 +109,6 @@ static void app_ctrl_start_retrigger_cooldown_locked(uint32_t hold_ms)
     s_rt.retrigger_deadline_ms = app_ctrl_now_ms() + hold_ms;
 }
 /*
- * 从旧版 CH32 文本反馈中判断动作是否完成。
- */
-static bool app_ctrl_line_has_done_keyword(const char *line)
-{
-    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
-    if (line == NULL) {
-        return false;
-    }
-    return (strstr(line, "FLOW_DONE") != NULL) ||
-           (strstr(line, "FULLFLOW_DONE") != NULL) ||
-           (strstr(line, "ALL_DONE") != NULL) ||
-           (strstr(line, "CYCLE_DONE") != NULL) ||
-           (strstr(line, "COMPLETE") != NULL) ||
-           (strstr(line, "SAFE_LOCKED") != NULL) ||
-           (strstr(line, "FLOW_OK") != NULL) ||
-           (strstr(line, "IDLE") != NULL);
-}
-/*
- * 从旧版文本行判断托盘是否已经伸出并进入等待货物阶段。
- */
-static bool app_ctrl_line_indicates_cargo_wait_window(const char *line)
-{
-    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
-    if (line == NULL) {
-        return false;
-    }
-    return (strstr(line, "TRAY_EXTENDED") != NULL) ||
-           (strstr(line, "WAITING_CARGO") != NULL) ||
-           (strstr(line, "tray extended") != NULL) ||
-           (strstr(line, "waiting cargo") != NULL) ||
-           (strstr(line, "drawer has been fully extended") != NULL) ||
-           (strstr(line, "tray has been fully extended") != NULL);
-}
-/*
  * 判断新版协议阶段是否代表 CH32 正在执行动作。
  */
 static bool app_ctrl_proto_stage_is_busy(app_ch32_proto_stage_t stage)
@@ -232,15 +197,20 @@ static bool app_ctrl_is_soft_waiting_cargo_error(app_ch32_proto_stage_t prev_sta
     if (!app_ctrl_proto_error_is_cargo_wait_soft(proto_error)) {
         return false;
     }
+    if ((stage == APP_CH32_STAGE_FAULT) ||
+        (stage == APP_CH32_STAGE_SAFE_LOCKED) ||
+        (stage == APP_CH32_STAGE_COMPLETE) ||
+        ((flags & APP_CH32_FLAG_LOCKED) != 0U)) {
+        return false;
+    }
     if (cargo_wait_window_seen) {
-        return true;
+        return app_ctrl_proto_stage_is_cargo_wait_window(stage) ||
+               tray_out_now ||
+               app_ctrl_proto_stage_is_cargo_wait_window(prev_stage) ||
+               tray_out_before;
     }
     if (app_ctrl_proto_stage_is_cargo_wait_window(stage) ||
         app_ctrl_proto_stage_is_cargo_wait_window(prev_stage)) {
-        return true;
-    }
-    if ((stage == APP_CH32_STAGE_FAULT) &&
-        (app_ctrl_proto_stage_is_cargo_wait_window(prev_stage) || tray_out_now || tray_out_before)) {
         return true;
     }
     return tray_out_now &&
@@ -521,6 +491,7 @@ static void app_ctrl_apply_proto_msg_locked(const app_ch32_line_t *msg)
             }
             s_rt.last_proto_error = msg->proto_detail;
             s_rt.dock_busy = false;
+            s_rt.cargo_wait_window_seen = false;
             s_rt.busy_deadline_ms = 0;
             app_ctrl_start_retrigger_cooldown_locked(CTRL_RETRIGGER_COOLDOWN_MS);
             snprintf(s_rt.notice,
@@ -558,6 +529,7 @@ static void app_ctrl_apply_proto_msg_locked(const app_ch32_line_t *msg)
             (msg->proto_stage == APP_CH32_STAGE_IDLE) ||
             (msg->proto_stage == APP_CH32_STAGE_READY)) {
             s_rt.dock_busy = false;
+            s_rt.cargo_wait_window_seen = false;
             s_rt.busy_deadline_ms = 0;
             s_rt.last_proto_error = APP_CH32_ERR_NONE;
             app_ctrl_start_retrigger_cooldown_locked(CTRL_RETRIGGER_COOLDOWN_MS);
@@ -587,68 +559,7 @@ void app_ctrl_on_ch32_line(const app_ch32_line_t *msg, void *user_ctx)
     // 进入临界区：下面代码会访问跨任务共享变量，必须短时间关中断/加锁保护。
     taskENTER_CRITICAL(&s_ctrl_mux);
 
-    /*
-     * 新版二进制协议消息走结构化处理路径。
-     */
-    if (msg->is_proto) {
-        app_ctrl_apply_proto_msg_locked(msg);
-        // 退出临界区：共享变量访问结束，恢复正常调度/中断。
-        taskEXIT_CRITICAL(&s_ctrl_mux);
-        return;
-    }
-
-    /*
-     * 旧版文本协议状态行。
-     * 这里继续兼容 [STS] CH32_READY / WEIGHT=xxx / DONE 等文本关键字。
-     */
-    if (msg->type == APP_CH32_LINE_STATUS) {
-        // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
-        if (strstr(msg->line, "CH32_READY") != NULL) {
-            s_rt.ch32_ready = true;
-            app_ctrl_set_notice_locked("dock: CH32 ready", CTRL_NOTICE_SHOW_MS);
-        }
-
-        /*
-         * 旧文本协议中的重量字段形如 WEIGHT=123。
-         */
-        const char *w = strstr(msg->line, "WEIGHT=");
-        // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
-        if (w != NULL) {
-            s_rt.last_weight_g = (int32_t)strtol(w + 7, NULL, 10);
-            s_rt.has_weight = true;
-        }
-
-        /*
-         * 旧文本协议没有 stage 枚举，只能通过关键字判断是否进入等待货物窗口。
-         */
-        if (app_ctrl_line_indicates_cargo_wait_window(msg->line)) {
-            s_rt.cargo_wait_window_seen = true;
-            s_rt.dock_busy = true;
-            s_rt.busy_deadline_ms = 0;
-            s_rt.last_proto_stage = APP_CH32_STAGE_WAITING_CARGO;
-            app_ctrl_set_notice_locked("dock: waiting cargo", CTRL_NOTICE_SHOW_MS);
-        }
-
-        /*
-         * 检测到 DONE/COMPLETE/LOCKED 等完成关键字后，认为本轮机械流程结束。
-         */
-        if (app_ctrl_line_has_done_keyword(msg->line)) {
-            s_rt.dock_busy = false;
-            s_rt.cargo_wait_window_seen = false;
-            s_rt.busy_deadline_ms = 0;
-            s_rt.last_proto_error = APP_CH32_ERR_NONE;
-            app_ctrl_start_retrigger_cooldown_locked(CTRL_RETRIGGER_COOLDOWN_MS);
-            app_ctrl_set_notice_locked("dock: CH32 cycle done", CTRL_NOTICE_SHOW_MS);
-        }
-    } else if (msg->type == APP_CH32_LINE_ERROR) {
-        /*
-         * 旧版错误行没有细分错误码，统一按 CH32 error 处理。
-         */
-        s_rt.dock_busy = false;
-        s_rt.busy_deadline_ms = 0;
-        app_ctrl_start_retrigger_cooldown_locked(CTRL_RETRIGGER_COOLDOWN_MS);
-        app_ctrl_set_notice_locked("dock: CH32 error", CTRL_NOTICE_SHOW_MS);
-    }
+    app_ctrl_apply_proto_msg_locked(msg);
     // 退出临界区：共享变量访问结束，恢复正常调度/中断。
     taskEXIT_CRITICAL(&s_ctrl_mux);
 }
@@ -795,7 +706,7 @@ static void app_ctrl_task(void *arg)
             } else {
                 // 信息日志：用于确认程序执行到了哪个阶段。
                 ESP_LOGI(TAG,
-                         "READY rising edge -> send @%c (id=%u dx=%ld dy=%ld z=%ld score=%u)",
+                         "READY rising edge -> send CH32 cmd %c (id=%u dx=%ld dy=%ld z=%ld score=%u)",
                          CTRL_DOCK_CMD,
                          (unsigned)dock.tag_id,
                          (long)dock.dx,
@@ -823,13 +734,15 @@ static void app_ctrl_task(void *arg)
                     (void)app_task_get_snapshot(&task);
                 } else {
                     // 警告日志：系统还能继续运行，但某个功能可能降级或不完整。
-                    ESP_LOGW(TAG, "send @%c failed: %s", CTRL_DOCK_CMD, esp_err_to_name(ret));
+                    ESP_LOGW(TAG, "send CH32 cmd %c failed: %s", CTRL_DOCK_CMD, esp_err_to_name(ret));
+                    const bool ch32_rejected = (ret == ESP_ERR_INVALID_RESPONSE);
                     taskENTER_CRITICAL(&s_ctrl_mux);
                     s_rt.last_proto_error = APP_CH32_ERR_INTERNAL;
                     app_ctrl_start_retrigger_cooldown_locked(CTRL_RETRIGGER_COOLDOWN_MS);
                     taskEXIT_CRITICAL(&s_ctrl_mux);
-                    app_ctrl_set_notice("dock: CH32 ack timeout", CTRL_NOTICE_SHOW_MS);
-                    app_task_mark_fault("CH32 ack timeout");
+                    app_ctrl_set_notice(ch32_rejected ? "dock: CH32 rejected cmd" : "dock: CH32 ack timeout",
+                                        CTRL_NOTICE_SHOW_MS);
+                    app_task_mark_fault(ch32_rejected ? "CH32 rejected cmd" : "CH32 ack timeout");
 /*
  * 读取当前任务快照，给 UI 或 MQTT 状态上报使用。
  */

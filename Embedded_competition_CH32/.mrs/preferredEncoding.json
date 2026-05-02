@@ -1,0 +1,12 @@
+{
+	"details": [
+		{
+			"file": "User/main.c",
+			"encoding": "gbk"
+		},
+		{
+			"file": "User/esp32_com.h",
+			"encoding": "gbk"
+		}
+	]
+}

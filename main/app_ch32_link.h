@@ -15,15 +15,7 @@ extern "C" {
  * 新协议帧：
  *   SOF1 SOF2 VER TYPE CMD SEQ LEN PAYLOAD... CRC16_LO CRC16_HI
  *   0x55 0xAA 0x01 ...
- *
- * 兼容旧文本协议：
- *   ESP32 -> CH32 : @P\n @A\n ...
- *   CH32  -> ESP32: [ACK] ... [STS] ... [ERR] ... [DBG] ...
- *
- * 当前实现策略：
- *   1) 优先发送新二进制协议；
- *   2) 若超时未收到 ACK，则自动回退旧文本命令；
- *   3) RX 同时支持新协议帧和旧文本行。
+ * CRC16-IBM 覆盖 SOF1 到 payload 末尾，不包含最后两个 CRC 字节。
  * ========================= */
 
 #ifndef APP_CH32_LINK_UART_PORT
@@ -54,20 +46,8 @@ extern "C" {
 #define APP_CH32_LINK_PROTO_MAX_PAYLOAD   (48)
 #endif
 
-#ifndef APP_CH32_LINK_READY_RETRY_MS
-#define APP_CH32_LINK_READY_RETRY_MS      (300U)
-#endif
-
 #ifndef APP_CH32_LINK_ACK_POLL_MS
 #define APP_CH32_LINK_ACK_POLL_MS         (50U)
-#endif
-
-#ifndef APP_CH32_LINK_PROTO_PROBE_MS
-#define APP_CH32_LINK_PROTO_PROBE_MS      (250U)
-#endif
-
-#ifndef APP_CH32_LINK_PROTO_ACK_FIRST_WAIT_MS
-#define APP_CH32_LINK_PROTO_ACK_FIRST_WAIT_MS   (350U)
 #endif
 
 #define APP_CH32_PROTO_SOF1               (0x55U)
@@ -76,10 +56,6 @@ extern "C" {
 
 typedef enum {
     APP_CH32_LINE_UNKNOWN = 0,
-    APP_CH32_LINE_ACK,
-    APP_CH32_LINE_STATUS,
-    APP_CH32_LINE_ERROR,
-    APP_CH32_LINE_DEBUG,
     APP_CH32_LINE_PROTO_ACK,
     APP_CH32_LINE_PROTO_NACK,
     APP_CH32_LINE_PROTO_STATUS,
@@ -157,7 +133,6 @@ typedef struct {
     app_ch32_line_type_t type;
     char line[APP_CH32_LINK_LINE_MAX];
 
-    bool is_proto;
     uint8_t proto_type;
     uint8_t proto_cmd;
     uint8_t proto_seq;
