@@ -15,8 +15,10 @@
 #include <stdio.h>                                 // C 标准输入输出库，主要用于 snprintf/printf 这类格式化字符串操作。
 #include <inttypes.h>                              // 跨平台整数格式化宏，方便日志打印固定宽度整数。
 #include "lvgl.h"                                  // LVGL 图形库主头文件，提供控件、样式、画布、颜色等 API。
+#include "esp_log.h"
 #include "bsp/esp-bsp.h"                           // 乐鑫 BSP 通用接口，常用于显示、触摸、音频等板级资源。
 #include "bsp/display.h"                           // BSP 显示接口和分辨率宏，例如 BSP_LCD_H_RES/BSP_LCD_V_RES。
+#include "app_ai_capture.h"
 #ifndef BSP_CAMERA_ROTATION
 #define BSP_CAMERA_ROTATION 0
 #endif
@@ -24,6 +26,7 @@
 #define HUD_SRC_H               180                      // 屏幕 HUD 覆盖显示相关参数。
 #define HUD_LOCK_SEG_COUNT      5                        // 屏幕 HUD 覆盖显示相关参数。
 #define HUD_AUTH_SHOW_MS        1200                     // 屏幕 HUD 覆盖显示相关参数。
+static const char *TAG = "app_ui";
 static lv_obj_t *s_status = NULL;                                // 模块级静态变量 s_status，只在本文件内部使用，避免被其他文件直接修改。
 static lv_obj_t *s_coord = NULL;                                 // 模块级静态变量 s_coord，只在本文件内部使用，避免被其他文件直接修改。
 static lv_obj_t *s_vision = NULL;                                // 模块级静态变量 s_vision，只在本文件内部使用，避免被其他文件直接修改。
@@ -35,6 +38,9 @@ static lv_obj_t *s_cross_h = NULL;                               // 模块级静
 static lv_obj_t *s_cross_v = NULL;                               // 模块级静态变量 s_cross_v，只在本文件内部使用，避免被其他文件直接修改。
 static lv_obj_t *s_lock_seg[HUD_LOCK_SEG_COUNT] = {0};           // 模块级静态变量 s_lock_seg，只在本文件内部使用，避免被其他文件直接修改。
 static lv_obj_t *s_auth = NULL;                                  // 模块级静态变量 s_auth，只在本文件内部使用，避免被其他文件直接修改。
+static lv_obj_t *s_cap_btn = NULL;
+static lv_obj_t *s_stop_btn = NULL;
+static lv_obj_t *s_capture = NULL;
 static bool s_have_last_box = false;                             // 模块级静态变量 s_have_last_box，只在本文件内部使用，避免被其他文件直接修改。
 static int32_t s_last_box_x = 0;                                 // 模块级静态变量 s_last_box_x，只在本文件内部使用，避免被其他文件直接修改。
 static int32_t s_last_box_y = 0;                                 // 模块级静态变量 s_last_box_y，只在本文件内部使用，避免被其他文件直接修改。
@@ -179,6 +185,80 @@ static void app_ui_style_auth_label(lv_obj_t *obj)
     lv_obj_set_style_pad_ver(obj, 10, 0);
     // 设置鉴权横幅圆角半径为 6 像素。
     lv_obj_set_style_radius(obj, 6, 0);
+}
+
+static lv_obj_t *app_ui_button_create(lv_obj_t *parent)
+{
+#if LVGL_VERSION_MAJOR >= 9
+    return lv_button_create(parent);
+#else
+    return lv_btn_create(parent);
+#endif
+}
+
+static void app_ui_style_capture_button(lv_obj_t *obj, lv_color_t color)
+{
+    lv_obj_set_size(obj, 82, 42);
+    lv_obj_set_style_bg_color(obj, color, 0);
+    lv_obj_set_style_bg_opa(obj, LV_OPA_80, 0);
+    lv_obj_set_style_border_width(obj, 1, 0);
+    lv_obj_set_style_border_color(obj, lv_color_hex(0xE8F7FF), 0);
+    lv_obj_set_style_radius(obj, 6, 0);
+    lv_obj_clear_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(obj, LV_OBJ_FLAG_CLICKABLE);
+}
+
+static void app_ui_add_button_label(lv_obj_t *btn, const char *text)
+{
+    lv_obj_t *label = lv_label_create(btn);
+    lv_label_set_text(label, text);
+    lv_obj_set_style_text_color(label, lv_color_white(), 0);
+    lv_obj_clear_flag(label, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_center(label);
+}
+
+static void app_ui_set_vision_text_unlocked(const char *text)
+{
+    if ((text != NULL) && (s_vision != NULL)) {
+        lv_label_set_text(s_vision, text);
+    }
+}
+
+static void app_ui_set_capture_text_unlocked(const char *text)
+{
+    if ((text != NULL) && (s_capture != NULL)) {
+        lv_label_set_text(s_capture, text);
+    }
+}
+
+static void app_ui_capture_start_event_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_PRESSED) {
+        return;
+    }
+    ESP_LOGI(TAG, "CAP pressed");
+    app_ui_set_capture_text_unlocked("cap: starting");
+    app_ui_set_vision_text_unlocked("cap: starting");
+    esp_err_t ret = app_ai_capture_start();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "CAP start failed: %s", esp_err_to_name(ret));
+        app_ui_set_capture_text_unlocked("cap: start fail");
+        app_ui_set_vision_text_unlocked("cap: start fail");
+    } else {
+        app_ui_set_capture_text_unlocked("cap: on");
+        app_ui_set_vision_text_unlocked("cap: on");
+    }
+}
+
+static void app_ui_capture_stop_event_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_PRESSED) {
+        return;
+    }
+    ESP_LOGI(TAG, "STOP pressed");
+    app_ai_capture_stop();
+    app_ui_set_capture_text_unlocked("cap: stopped");
+    app_ui_set_vision_text_unlocked("cap: stopped");
 }
 /*
  * 根据接驳状态返回 HUD 主颜色，例如错误红、跟踪黄、对准蓝、就绪绿。
@@ -543,12 +623,37 @@ bool app_ui_create(void)
         lv_label_set_text(s_hint, "cloud dispatch enabled / no touch control");
         lv_obj_align(s_hint, LV_ALIGN_TOP_MID, 0, 46);
     }
+    if (s_cap_btn == NULL) {
+        s_cap_btn = app_ui_button_create(scr);
+        app_ui_style_capture_button(s_cap_btn, lv_color_hex(0x177A58));
+        app_ui_add_button_label(s_cap_btn, "CAP");
+        lv_obj_align(s_cap_btn, LV_ALIGN_RIGHT_MID, -14, 68);
+        lv_obj_add_event_cb(s_cap_btn, app_ui_capture_start_event_cb, LV_EVENT_PRESSED, NULL);
+    }
+    if (s_stop_btn == NULL) {
+        s_stop_btn = app_ui_button_create(scr);
+        app_ui_style_capture_button(s_stop_btn, lv_color_hex(0x8A3030));
+        app_ui_add_button_label(s_stop_btn, "STOP");
+        lv_obj_align(s_stop_btn, LV_ALIGN_RIGHT_MID, -14, 118);
+        lv_obj_add_event_cb(s_stop_btn, app_ui_capture_stop_event_cb, LV_EVENT_PRESSED, NULL);
+    }
+    if (s_capture == NULL) {
+        s_capture = lv_label_create(scr);
+        app_ui_style_hint_label(s_capture);
+        lv_label_set_text(s_capture, "cap: off");
+        lv_obj_set_width(s_capture, 132);
+        lv_obj_set_style_text_align(s_capture, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_align(s_capture, LV_ALIGN_RIGHT_MID, -14, 166);
+    }
     if (s_status) lv_obj_move_foreground(s_status);
     if (s_vision) lv_obj_move_foreground(s_vision);
     if (s_coord) lv_obj_move_foreground(s_coord);
     if (s_dock) lv_obj_move_foreground(s_dock);
     if (s_hint) lv_obj_move_foreground(s_hint);
     if (s_auth) lv_obj_move_foreground(s_auth);
+    if (s_cap_btn) lv_obj_move_foreground(s_cap_btn);
+    if (s_stop_btn) lv_obj_move_foreground(s_stop_btn);
+    if (s_capture) lv_obj_move_foreground(s_capture);
     // 释放 LVGL/BSP 显示锁。
     bsp_display_unlock();
     return true;
@@ -585,6 +690,18 @@ void app_ui_set_vision_text(const char *text)
     }
     lv_label_set_text(s_vision, text);
     // 释放 LVGL/BSP 显示锁。
+    bsp_display_unlock();
+}
+
+void app_ui_set_capture_text(const char *text)
+{
+    if ((text == NULL) || (s_capture == NULL)) {
+        return;
+    }
+    if (!bsp_display_lock(0)) {
+        return;
+    }
+    app_ui_set_capture_text_unlocked(text);
     bsp_display_unlock();
 }
 /*

@@ -5,6 +5,7 @@ idf_component_register(
         "app_task.c"
         "app_cloud.c"
         "app_ui.c"
+        "app_ai_capture.c"
         "app_vision.c"
         "app_apriltag.c"
         "bsp_display_port.c"

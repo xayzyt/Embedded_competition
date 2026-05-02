@@ -29,6 +29,7 @@
 #include "bsp/esp-bsp.h"                           // 乐鑫 BSP 通用接口，常用于显示、触摸、音频等板级资源。
 #include "bsp/display.h"                           // BSP 显示接口和分辨率宏，例如 BSP_LCD_H_RES/BSP_LCD_V_RES。
 #include "app_video.h"                             // 项目自定义模块头文件，声明 app_video 对外提供的接口。
+#include "app_ai_capture.h"
 #include "app_vision.h"                            // 项目自定义模块头文件，声明 app_vision 对外提供的接口。
 #if SOC_PPA_SUPPORTED
 #include "driver/ppa.h"                            // ESP32-P4 PPA 图像处理外设接口，用于缩放/旋转/镜像等图像处理。
@@ -646,23 +647,31 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
         return;
     }
 
-    /*
-     * 视觉识别不必每帧都跑。
-     * 抽样可以减少 AprilTag 检测负载，让摄像头预览更流畅。
-     */
     bool camera_synced_for_cpu = false;
-    if (++s_vision_sample_skip >= VISION_SAMPLE_INTERVAL) {
+    bool capture_active = app_ai_capture_is_active();
+    bool vision_due = false;
+    if (capture_active) {
         s_vision_sample_skip = 0;
-        /*
-         * 只有 CPU 视觉抽样会读取 camera_buf。
-         * PPA 可以直接消费 DMA 写好的帧，避免每帧都 invalidate 整张 camera buffer。
-         */
+    } else if (++s_vision_sample_skip >= VISION_SAMPLE_INTERVAL) {
+        s_vision_sample_skip = 0;
+        vision_due = true;
+    }
+    bool capture_due = app_ai_capture_should_capture_frame();
+    if (vision_due || capture_due) {
         if (app_camera_msync_m2c(camera_buf, camera_buf_len) == ESP_OK) {
             camera_synced_for_cpu = true;
-            (void)app_vision_submit_frame(camera_buf,
-                                          camera_buf_hes,
-                                          camera_buf_ves,
-                                          camera_buf_len);
+            if (vision_due) {
+                (void)app_vision_submit_frame(camera_buf,
+                                              camera_buf_hes,
+                                              camera_buf_ves,
+                                              camera_buf_len);
+            }
+            if (capture_due) {
+                (void)app_ai_capture_submit_frame(camera_buf,
+                                                  camera_buf_hes,
+                                                  camera_buf_ves,
+                                                  camera_buf_len);
+            }
         }
     }
 

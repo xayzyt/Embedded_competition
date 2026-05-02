@@ -18,6 +18,7 @@
 #include "esp_log.h"                               // ESP-IDF 日志系统，提供 ESP_LOGI/ESP_LOGE 等调试输出。
 #include "esp_timer.h"
 #include "app_apriltag.h"                          // 项目自定义模块头文件，声明 app_apriltag 对外提供的接口。
+#include "app_ai_capture.h"
 #include "app_ui.h"                                // 项目自定义模块头文件，声明 app_ui 对外提供的接口。
 #define VISION_TASK_STACK_SIZE         (16 * 1024)       // FreeRTOS 任务栈大小，单位一般是字节。
 #define VISION_TASK_PRIORITY           4                 // FreeRTOS 任务优先级，数值越大优先级越高。
@@ -149,6 +150,9 @@ bool app_vision_get_latest_result(app_vision_result_t *out)
  */
 static void app_vision_set_wait_text(uint32_t heartbeat)
 {
+    if (app_ai_capture_is_active()) {
+        return;
+    }
     char buf[64];
     snprintf(buf, sizeof(buf), "tag: wait #%lu", (unsigned long)heartbeat);
     app_ui_set_vision_text(buf);
@@ -233,7 +237,9 @@ static void app_vision_update_result(const app_vision_gray_slot_t *slot,
                  (unsigned)result.stable_count,
                  (double)result.edge_px_avg,
                  (int)result.top_edge_angle_deg);
-        app_ui_set_vision_text(buf);
+        if (!app_ai_capture_is_active()) {
+            app_ui_set_vision_text(buf);
+        }
         // 信息日志：用于确认程序执行到了哪个阶段。
         ESP_LOGI(TAG,
                  "tag seq=%lu id=%u hm=%u rot=%u th=%u border=%u area=%ld center=(%ld,%ld) bbox=(%ld,%ld,%ld,%ld) edge=%.1f ang=%.1f stable=%u detect=%lums",
@@ -293,7 +299,9 @@ static void app_vision_update_result(const app_vision_gray_slot_t *slot,
              (unsigned)*lost_count,
              (unsigned)*stable_count,
              (unsigned long)detect_ms);
-    app_ui_set_vision_text(buf);
+    if (!app_ai_capture_is_active()) {
+        app_ui_set_vision_text(buf);
+    }
 }
 /*
  * 视觉后台任务，持续获取最新灰度帧并调用 AprilTag 检测。
@@ -325,7 +333,9 @@ static void app_vision_task(void *arg)
     uint16_t lost_count = 0;
     uint16_t last_tag_id = 0;
 
-    app_ui_set_vision_text("tag: wait frame");
+    if (!app_ai_capture_is_active()) {
+        app_ui_set_vision_text("tag: wait frame");
+    }
 
     while (1) {
         app_vision_frame_info_t meta;
@@ -402,7 +412,9 @@ static void app_vision_task(void *arg)
                      (unsigned long)meta.seq,
                      (unsigned long)meta.width,
                      (unsigned long)meta.height);
-            app_ui_set_vision_text(buf);
+            if (!app_ai_capture_is_active()) {
+                app_ui_set_vision_text(buf);
+            }
             last_seq = meta.seq;
             last_heartbeat_tick = xTaskGetTickCount();
         } else {

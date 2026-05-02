@@ -38,6 +38,7 @@
 #include "bsp_display_port.h"      // 板级显示初始化接口。通常封装了 MIPI-DSI 屏幕、背光、触摸、LVGL port 等底层显示相关初始化。
 #include "app_ui.h"                // 项目的 UI 模块接口。负责创建 LVGL 界面，并提供修改状态文本、视觉文本、调试文本等函数。
 #include "app_camera.h"            // 项目的摄像头模块接口。负责 MIPI-CSI 摄像头初始化、图像采集以及预览启动等。
+#include "app_ai_capture.h"
 #include "app_vision.h"            // 项目的视觉模块接口。负责 AprilTag / 图像识别流程的初始化和启动。
 #include "app_dock_judge.h"        // 接驳判定模块接口。根据 tag ID、距离、稳定性等信息判断是否允许无人机接驳。
 #include "app_ch32_link.h"         // ESP32-P4 与 CH32V203 副控通信模块接口，通常通过 UART/SPI 等方式收发控制帧。
@@ -360,6 +361,8 @@ void app_main(void)
      * - start：真正开始运行任务、定时器或状态机。
      */
     ESP_ERROR_CHECK(app_ctrl_start());
+
+    ESP_ERROR_CHECK(app_ai_capture_init());
 
     /*
      * 第十二步：初始化摄像头模块。
