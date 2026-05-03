@@ -14,7 +14,9 @@
 #include "bsp/esp-bsp.h"
 #include "app_ui.h"
 
-#define CAPTURE_DIR                 BSP_SD_MOUNT_POINT "/CAP"
+#define CAPTURE_ROOT_DIR            BSP_SD_MOUNT_POINT "/CAP"
+#define CAPTURE_DRONE_DIR           CAPTURE_ROOT_DIR "/DRONE"
+#define CAPTURE_NO_DRONE_DIR        CAPTURE_ROOT_DIR "/NODRONE"
 #define CAPTURE_WIDTH               320U
 #define CAPTURE_HEIGHT              240U
 #define CAPTURE_CHANNELS            3U
@@ -29,6 +31,7 @@
 typedef struct {
     uint8_t *bgr;
     uint32_t image_index;
+    app_ai_capture_mode_t mode;
 } app_ai_capture_slot_t;
 
 static const char *TAG = "app_ai_capture";
@@ -36,11 +39,12 @@ static const char *TAG = "app_ai_capture";
 static bool s_inited = false;
 static bool s_sd_ready = false;
 static bool s_active = false;
+static app_ai_capture_mode_t s_mode = APP_AI_CAPTURE_MODE_DRONE;
 static uint32_t s_frame_skip = 0;
-static uint32_t s_saved_count = 0;
-static uint32_t s_drop_count = 0;
+static uint32_t s_saved_count[APP_AI_CAPTURE_MODE_COUNT] = {0};
+static uint32_t s_drop_count[APP_AI_CAPTURE_MODE_COUNT] = {0};
 static uint32_t s_wait_count = 0;
-static uint32_t s_next_index = 1;
+static uint32_t s_next_index[APP_AI_CAPTURE_MODE_COUNT] = {1, 1};
 static TaskHandle_t s_writer_task = NULL;
 static QueueHandle_t s_free_queue = NULL;
 static QueueHandle_t s_write_queue = NULL;
@@ -84,6 +88,28 @@ static void app_ai_capture_put_le_i32(uint8_t *dst, int32_t value)
     app_ai_capture_put_le32(dst, (uint32_t)value);
 }
 
+const char *app_ai_capture_mode_label(app_ai_capture_mode_t mode)
+{
+    switch (mode) {
+        case APP_AI_CAPTURE_MODE_NO_DRONE:
+            return "NO";
+        case APP_AI_CAPTURE_MODE_DRONE:
+        default:
+            return "DRONE";
+    }
+}
+
+static const char *app_ai_capture_mode_dir(app_ai_capture_mode_t mode)
+{
+    switch (mode) {
+        case APP_AI_CAPTURE_MODE_NO_DRONE:
+            return CAPTURE_NO_DRONE_DIR;
+        case APP_AI_CAPTURE_MODE_DRONE:
+        default:
+            return CAPTURE_DRONE_DIR;
+    }
+}
+
 static bool app_ai_capture_parse_image_name(const char *name, uint32_t *out_index)
 {
     if (name == NULL || out_index == NULL || strlen(name) != 12U) {
@@ -108,10 +134,10 @@ static bool app_ai_capture_parse_image_name(const char *name, uint32_t *out_inde
     return true;
 }
 
-static uint32_t app_ai_capture_find_next_index(void)
+static uint32_t app_ai_capture_find_next_index(const char *dir_path)
 {
     uint32_t max_index = 0;
-    DIR *dir = opendir(CAPTURE_DIR);
+    DIR *dir = opendir(dir_path);
     if (dir == NULL) {
         return 1;
     }
@@ -142,24 +168,28 @@ static void app_ai_capture_set_status(const char *status)
 static void app_ai_capture_format_status(const char *state)
 {
     char text[64];
+    app_ai_capture_mode_t mode = APP_AI_CAPTURE_MODE_DRONE;
     uint32_t saved = 0;
     uint32_t dropped = 0;
 
     taskENTER_CRITICAL(&s_mux);
-    saved = s_saved_count;
-    dropped = s_drop_count;
+    mode = s_mode;
+    saved = s_saved_count[mode];
+    dropped = s_drop_count[mode];
     taskEXIT_CRITICAL(&s_mux);
 
     if (dropped == 0) {
         snprintf(text,
                  sizeof(text),
-                 "cap: %s #%lu",
+                 "cap:%s %s #%lu",
+                 app_ai_capture_mode_label(mode),
                  state != NULL ? state : "-",
                  (unsigned long)saved);
     } else {
         snprintf(text,
                  sizeof(text),
-                 "cap: %s #%lu drop:%lu",
+                 "cap:%s %s #%lu drop:%lu",
+                 app_ai_capture_mode_label(mode),
                  state != NULL ? state : "-",
                  (unsigned long)saved,
                  (unsigned long)dropped);
@@ -183,16 +213,31 @@ static esp_err_t app_ai_capture_prepare_storage(void)
         return ret;
     }
 
-    if (mkdir(CAPTURE_DIR, 0775) != 0 && errno != EEXIST) {
+    if (mkdir(CAPTURE_ROOT_DIR, 0775) != 0 && errno != EEXIST) {
         ret = ESP_FAIL;
-        ESP_LOGW(TAG, "mkdir %s failed, errno=%d", CAPTURE_DIR, errno);
+        ESP_LOGW(TAG, "mkdir %s failed, errno=%d", CAPTURE_ROOT_DIR, errno);
         app_ai_capture_set_status("cap: mkdir fail");
         return ret;
     }
 
-    s_next_index = app_ai_capture_find_next_index();
+    for (int i = 0; i < APP_AI_CAPTURE_MODE_COUNT; i++) {
+        const char *dir_path = app_ai_capture_mode_dir((app_ai_capture_mode_t)i);
+        if (mkdir(dir_path, 0775) != 0 && errno != EEXIST) {
+            ret = ESP_FAIL;
+            ESP_LOGW(TAG, "mkdir %s failed, errno=%d", dir_path, errno);
+            app_ai_capture_set_status("cap: mkdir fail");
+            return ret;
+        }
+        s_next_index[i] = app_ai_capture_find_next_index(dir_path);
+    }
+
     s_sd_ready = true;
-    ESP_LOGI(TAG, "capture dir ready: %s next=%lu", CAPTURE_DIR, (unsigned long)s_next_index);
+    ESP_LOGI(TAG,
+             "capture dirs ready: %s next=%lu, %s next=%lu",
+             CAPTURE_DRONE_DIR,
+             (unsigned long)s_next_index[APP_AI_CAPTURE_MODE_DRONE],
+             CAPTURE_NO_DRONE_DIR,
+             (unsigned long)s_next_index[APP_AI_CAPTURE_MODE_NO_DRONE]);
     return ESP_OK;
 }
 
@@ -233,7 +278,11 @@ static esp_err_t app_ai_capture_write_bmp(const app_ai_capture_slot_t *slot)
     }
 
     char path[64];
-    snprintf(path, sizeof(path), CAPTURE_DIR "/IMG%05lu.BMP", (unsigned long)slot->image_index);
+    snprintf(path,
+             sizeof(path),
+             "%s/IMG%05lu.BMP",
+             app_ai_capture_mode_dir(slot->mode),
+             (unsigned long)slot->image_index);
 
     FILE *file = fopen(path, "wb");
     if (file == NULL) {
@@ -290,9 +339,9 @@ static void app_ai_capture_writer_task(void *arg)
 
         taskENTER_CRITICAL(&s_mux);
         if (ret == ESP_OK) {
-            s_saved_count++;
+            s_saved_count[slot->mode]++;
         } else {
-            s_drop_count++;
+            s_drop_count[slot->mode]++;
         }
         taskEXIT_CRITICAL(&s_mux);
 
@@ -375,6 +424,41 @@ void app_ai_capture_stop(void)
     ESP_LOGI(TAG, "continuous capture stopped");
 }
 
+esp_err_t app_ai_capture_set_mode(app_ai_capture_mode_t mode)
+{
+    if ((int)mode < 0 || mode >= APP_AI_CAPTURE_MODE_COUNT) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    taskENTER_CRITICAL(&s_mux);
+    s_mode = mode;
+    s_frame_skip = 0;
+    taskEXIT_CRITICAL(&s_mux);
+
+    app_ai_capture_format_status("mode");
+    ESP_LOGI(TAG, "capture mode: %s", app_ai_capture_mode_label(mode));
+    return ESP_OK;
+}
+
+app_ai_capture_mode_t app_ai_capture_get_mode(void)
+{
+    app_ai_capture_mode_t mode = APP_AI_CAPTURE_MODE_DRONE;
+    taskENTER_CRITICAL(&s_mux);
+    mode = s_mode;
+    taskEXIT_CRITICAL(&s_mux);
+    return mode;
+}
+
+app_ai_capture_mode_t app_ai_capture_toggle_mode(void)
+{
+    app_ai_capture_mode_t mode = app_ai_capture_get_mode();
+    mode = (mode == APP_AI_CAPTURE_MODE_DRONE) ?
+           APP_AI_CAPTURE_MODE_NO_DRONE :
+           APP_AI_CAPTURE_MODE_DRONE;
+    (void)app_ai_capture_set_mode(mode);
+    return mode;
+}
+
 bool app_ai_capture_is_active(void)
 {
     bool active = false;
@@ -438,9 +522,10 @@ esp_err_t app_ai_capture_submit_frame(const uint8_t *rgb565,
     }
 
     taskENTER_CRITICAL(&s_mux);
-    slot->image_index = s_next_index;
-    if (s_next_index < CAPTURE_MAX_INDEX) {
-        s_next_index++;
+    slot->mode = s_mode;
+    slot->image_index = s_next_index[slot->mode];
+    if (s_next_index[slot->mode] < CAPTURE_MAX_INDEX) {
+        s_next_index[slot->mode]++;
     }
     taskEXIT_CRITICAL(&s_mux);
 
@@ -448,7 +533,7 @@ esp_err_t app_ai_capture_submit_frame(const uint8_t *rgb565,
 
     if (xQueueSend(s_write_queue, &slot, 0) != pdTRUE) {
         taskENTER_CRITICAL(&s_mux);
-        s_drop_count++;
+        s_drop_count[slot->mode]++;
         taskEXIT_CRITICAL(&s_mux);
         (void)xQueueSend(s_free_queue, &slot, 0);
         app_ai_capture_format_status("busy");

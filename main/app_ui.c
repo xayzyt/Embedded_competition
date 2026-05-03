@@ -40,6 +40,8 @@ static lv_obj_t *s_lock_seg[HUD_LOCK_SEG_COUNT] = {0};           // 模块级静
 static lv_obj_t *s_auth = NULL;                                  // 模块级静态变量 s_auth，只在本文件内部使用，避免被其他文件直接修改。
 static lv_obj_t *s_cap_btn = NULL;
 static lv_obj_t *s_stop_btn = NULL;
+static lv_obj_t *s_mode_btn = NULL;
+static lv_obj_t *s_mode_label = NULL;
 static lv_obj_t *s_capture = NULL;
 static bool s_have_last_box = false;                             // 模块级静态变量 s_have_last_box，只在本文件内部使用，避免被其他文件直接修改。
 static int32_t s_last_box_x = 0;                                 // 模块级静态变量 s_last_box_x，只在本文件内部使用，避免被其他文件直接修改。
@@ -208,13 +210,14 @@ static void app_ui_style_capture_button(lv_obj_t *obj, lv_color_t color)
     lv_obj_add_flag(obj, LV_OBJ_FLAG_CLICKABLE);
 }
 
-static void app_ui_add_button_label(lv_obj_t *btn, const char *text)
+static lv_obj_t *app_ui_add_button_label(lv_obj_t *btn, const char *text)
 {
     lv_obj_t *label = lv_label_create(btn);
     lv_label_set_text(label, text);
     lv_obj_set_style_text_color(label, lv_color_white(), 0);
     lv_obj_clear_flag(label, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_center(label);
+    return label;
 }
 
 static void app_ui_set_vision_text_unlocked(const char *text)
@@ -244,9 +247,6 @@ static void app_ui_capture_start_event_cb(lv_event_t *e)
         ESP_LOGW(TAG, "CAP start failed: %s", esp_err_to_name(ret));
         app_ui_set_capture_text_unlocked("cap: start fail");
         app_ui_set_vision_text_unlocked("cap: start fail");
-    } else {
-        app_ui_set_capture_text_unlocked("cap: on");
-        app_ui_set_vision_text_unlocked("cap: on");
     }
 }
 
@@ -257,8 +257,21 @@ static void app_ui_capture_stop_event_cb(lv_event_t *e)
     }
     ESP_LOGI(TAG, "STOP pressed");
     app_ai_capture_stop();
-    app_ui_set_capture_text_unlocked("cap: stopped");
-    app_ui_set_vision_text_unlocked("cap: stopped");
+}
+
+static void app_ui_capture_mode_event_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_PRESSED) {
+        return;
+    }
+
+    app_ai_capture_mode_t mode = app_ai_capture_toggle_mode();
+    const char *label = app_ai_capture_mode_label(mode);
+    ESP_LOGI(TAG, "CAP mode pressed: %s", label);
+    if (s_mode_label != NULL) {
+        lv_label_set_text(s_mode_label, label);
+        lv_obj_center(s_mode_label);
+    }
 }
 /*
  * 根据接驳状态返回 HUD 主颜色，例如错误红、跟踪黄、对准蓝、就绪绿。
@@ -637,10 +650,18 @@ bool app_ui_create(void)
         lv_obj_align(s_stop_btn, LV_ALIGN_RIGHT_MID, -14, 118);
         lv_obj_add_event_cb(s_stop_btn, app_ui_capture_stop_event_cb, LV_EVENT_PRESSED, NULL);
     }
+    if (s_mode_btn == NULL) {
+        s_mode_btn = app_ui_button_create(scr);
+        app_ui_style_capture_button(s_mode_btn, lv_color_hex(0x2F5D88));
+        s_mode_label = app_ui_add_button_label(s_mode_btn,
+                                               app_ai_capture_mode_label(app_ai_capture_get_mode()));
+        lv_obj_align(s_mode_btn, LV_ALIGN_RIGHT_MID, -14, 18);
+        lv_obj_add_event_cb(s_mode_btn, app_ui_capture_mode_event_cb, LV_EVENT_PRESSED, NULL);
+    }
     if (s_capture == NULL) {
         s_capture = lv_label_create(scr);
         app_ui_style_hint_label(s_capture);
-        lv_label_set_text(s_capture, "cap: off");
+        lv_label_set_text(s_capture, "cap:DRONE off #0");
         lv_obj_set_width(s_capture, 132);
         lv_obj_set_style_text_align(s_capture, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_align(s_capture, LV_ALIGN_RIGHT_MID, -14, 166);
@@ -651,6 +672,7 @@ bool app_ui_create(void)
     if (s_dock) lv_obj_move_foreground(s_dock);
     if (s_hint) lv_obj_move_foreground(s_hint);
     if (s_auth) lv_obj_move_foreground(s_auth);
+    if (s_mode_btn) lv_obj_move_foreground(s_mode_btn);
     if (s_cap_btn) lv_obj_move_foreground(s_cap_btn);
     if (s_stop_btn) lv_obj_move_foreground(s_stop_btn);
     if (s_capture) lv_obj_move_foreground(s_capture);
