@@ -10,7 +10,7 @@ extern "C" {
 #endif
 
 /* =========================
- * CH32 <-> ESP32-P4 UART Link
+ * CH32 与 ESP32-P4 UART 通信链路
  *
  * 新协议帧：
  *   SOF1 SOF2 VER TYPE CMD SEQ LEN PAYLOAD... CRC16_LO CRC16_HI
@@ -130,18 +130,18 @@ typedef enum {
 #define APP_CH32_FLAG_LOCKED               (1U << 7)
 
 typedef struct {
-    app_ch32_line_type_t type;
-    char line[APP_CH32_LINK_LINE_MAX];
+    app_ch32_line_type_t type;                         /* 当前消息类型：文本、ACK、NACK、状态或错误。 */
+    char line[APP_CH32_LINK_LINE_MAX];                 /* 便于日志和上层显示的文本化消息内容。 */
 
-    uint8_t proto_type;
-    uint8_t proto_cmd;
-    uint8_t proto_seq;
-    uint16_t proto_flags;
-    app_ch32_proto_stage_t proto_stage;
-    uint8_t proto_detail;
-    int32_t proto_weight_g;
-    uint8_t payload[APP_CH32_LINK_PROTO_MAX_PAYLOAD];
-    uint16_t payload_len;
+    uint8_t proto_type;                                /* 原始协议帧 TYPE 字节。 */
+    uint8_t proto_cmd;                                 /* 原始协议帧 CMD 字节。 */
+    uint8_t proto_seq;                                 /* 原始协议帧 SEQ 字节。 */
+    uint16_t proto_flags;                              /* 状态帧中的 flags 位集合。 */
+    app_ch32_proto_stage_t proto_stage;                /* 状态帧中的执行阶段。 */
+    uint8_t proto_detail;                              /* 错误帧或状态帧中的细节码。 */
+    int32_t proto_weight_g;                            /* 状态帧携带的称重值，单位为克。 */
+    uint8_t payload[APP_CH32_LINK_PROTO_MAX_PAYLOAD];  /* 协议帧原始 payload 缓冲。 */
+    uint16_t payload_len;                              /* 当前 payload 的有效长度。 */
 } app_ch32_line_t;
 
 typedef void (*app_ch32_line_cb_t)(const app_ch32_line_t *msg, void *user_ctx);

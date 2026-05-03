@@ -30,6 +30,10 @@
 
 static const char *TAG = "app_video";
 
+/* -------------------------------------------------------------------------- */
+/* V4L2 缓冲和任务配置                                          */
+/* -------------------------------------------------------------------------- */
+
 #define MAX_BUFFER_COUNT              6
 #define MIN_BUFFER_COUNT              2
 #define VIDEO_TASK_STACK_SIZE         (4 * 1024)
@@ -37,19 +41,30 @@ static const char *TAG = "app_video";
 #define VIDEO_DQBUF_RETRY_DELAY_MS    10
 #define VIDEO_QBUF_RETRY_DELAY_MS     10
 #define VIDEO_ERROR_RECOVER_THRESHOLD 8
+
+/* -------------------------------------------------------------------------- */
+/* 运行状态                                                               */
+/* -------------------------------------------------------------------------- */
+
 typedef struct {
-    uint8_t *camera_buffer[MAX_BUFFER_COUNT];
-    size_t camera_buf_size;
-    uint32_t camera_buf_hes;
-    uint32_t camera_buf_ves;
-    struct v4l2_buffer v4l2_buf;
-    uint8_t camera_mem_mode;
-    app_video_frame_operation_cb_t user_camera_video_frame_operation_cb;
-    TaskHandle_t video_stream_task_handle;
-    int video_fd_task_arg;
-    bool first_frame_logged;
+    uint8_t *camera_buffer[MAX_BUFFER_COUNT];                       /* 注册给 V4L2 的帧缓冲地址表。 */
+    size_t camera_buf_size;                                         /* 单个摄像头帧缓冲大小。 */
+    uint32_t camera_buf_hes;                                        /* 当前帧宽度，保留原 BSP 命名 hes。 */
+    uint32_t camera_buf_ves;                                        /* 当前帧高度，保留原 BSP 命名 ves。 */
+    struct v4l2_buffer v4l2_buf;                                    /* 当前 DQBUF/QBUF 使用的 V4L2 缓冲描述。 */
+    uint8_t camera_mem_mode;                                        /* V4L2 缓冲内存模式，例如 MMAP 或 USERPTR。 */
+    app_video_frame_operation_cb_t user_camera_video_frame_operation_cb; /* 上层注册的逐帧处理回调。 */
+    TaskHandle_t video_stream_task_handle;                          /* 视频流任务句柄。 */
+    int video_fd_task_arg;                                          /* 传给视频流任务的设备 fd。 */
+    bool first_frame_logged;                                        /* 是否已经打印过首帧日志。 */
 } app_video_t;
+
 static app_video_t s_video;
+
+/* -------------------------------------------------------------------------- */
+/* 格式和摄像头控制辅助函数                                           */
+/* -------------------------------------------------------------------------- */
+
 static const char *fourcc_to_str(uint32_t fourcc, char out[5])
 {
     out[0] = (char)(fourcc & 0xFF);
@@ -65,13 +80,17 @@ static int32_t app_video_clamp_ctrl_value(const struct v4l2_query_ext_ctrl *qctr
     int64_t min_value = qctrl->minimum;
     int64_t max_value = qctrl->maximum;
 
-    if (value < min_value) {
+    if (value < min_value)
+    {
         value = min_value;
-    } else if (value > max_value) {
+    }
+    else if (value > max_value)
+    {
         value = max_value;
     }
 
-    if (qctrl->step > 1 && value > min_value) {
+    if (qctrl->step > 1 && value > min_value)
+    {
         uint64_t offset = (uint64_t)(value - min_value);
         value = min_value + (int64_t)((offset / qctrl->step) * qctrl->step);
     }
@@ -88,7 +107,8 @@ static esp_err_t app_video_set_ext_ctrl_value(int video_fd,
     struct v4l2_query_ext_ctrl qctrl = {
         .id = ctrl_id,
     };
-    if (ioctl(video_fd, VIDIOC_QUERY_EXT_CTRL, &qctrl) != 0) {
+    if (ioctl(video_fd, VIDIOC_QUERY_EXT_CTRL, &qctrl) != 0)
+    {
         return ESP_ERR_NOT_SUPPORTED;
     }
 
@@ -102,11 +122,13 @@ static esp_err_t app_video_set_ext_ctrl_value(int video_fd,
     control[0].id = ctrl_id;
     control[0].value = value;
 
-    if (ioctl(video_fd, VIDIOC_S_EXT_CTRLS, &controls) != 0) {
+    if (ioctl(video_fd, VIDIOC_S_EXT_CTRLS, &controls) != 0)
+    {
         return ESP_FAIL;
     }
 
-    if (applied_value) {
+    if (applied_value)
+    {
         *applied_value = value;
     }
     return ESP_OK;
@@ -114,7 +136,8 @@ static esp_err_t app_video_set_ext_ctrl_value(int video_fd,
 
 esp_err_t app_video_apply_recognition_profile(int video_fd, uint32_t exposure_us, uint8_t gain_percent)
 {
-    if (video_fd < 0 || exposure_us == 0) {
+    if (video_fd < 0 || exposure_us == 0)
+    {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -130,7 +153,8 @@ esp_err_t app_video_apply_recognition_profile(int video_fd, uint32_t exposure_us
         .id = V4L2_CID_GAIN,
     };
     int32_t applied_gain = 0;
-    if (ioctl(video_fd, VIDIOC_QUERY_EXT_CTRL, &gain_qctrl) == 0) {
+    if (ioctl(video_fd, VIDIOC_QUERY_EXT_CTRL, &gain_qctrl) == 0)
+    {
         uint8_t clipped_percent = gain_percent > 100U ? 100U : gain_percent;
         int64_t gain_range = gain_qctrl.maximum - gain_qctrl.minimum;
         int64_t target_gain = gain_qctrl.minimum + (gain_range * clipped_percent) / 100;
@@ -139,10 +163,13 @@ esp_err_t app_video_apply_recognition_profile(int video_fd, uint32_t exposure_us
             V4L2_CID_GAIN,
             target_gain,
             &applied_gain);
-        if (first_error == ESP_OK && gain_ret != ESP_OK) {
+        if (first_error == ESP_OK && gain_ret != ESP_OK)
+        {
             first_error = gain_ret;
         }
-    } else if (first_error == ESP_OK) {
+    }
+    else if (first_error == ESP_OK)
+    {
         first_error = ESP_ERR_NOT_SUPPORTED;
     }
 
@@ -152,18 +179,25 @@ esp_err_t app_video_apply_recognition_profile(int video_fd, uint32_t exposure_us
         applied_gain);
     return first_error;
 }
+
+/* -------------------------------------------------------------------------- */
+/* 设备初始化                                                                */
+/* -------------------------------------------------------------------------- */
+
 int app_video_open(char *dev, video_fmt_t init_fmt)
 {
     struct v4l2_format default_format = {0};
     struct v4l2_capability capability = {0};
     const int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     int fd = open(dev, O_RDWR);
-    if (fd < 0) {
+    if (fd < 0)
+    {
         ESP_LOGE(TAG, "open video failed");
         return -1;
     }
 
-    if (ioctl(fd, VIDIOC_QUERYCAP, &capability) != 0) {
+    if (ioctl(fd, VIDIOC_QUERYCAP, &capability) != 0)
+    {
         ESP_LOGE(TAG, "VIDIOC_QUERYCAP failed");
         goto err;
     }
@@ -176,7 +210,8 @@ int app_video_open(char *dev, video_fmt_t init_fmt)
     ESP_LOGD(TAG, "bus:     %s", capability.bus_info);
     default_format.type = type;
 
-    if (ioctl(fd, VIDIOC_G_FMT, &default_format) != 0) {
+    if (ioctl(fd, VIDIOC_G_FMT, &default_format) != 0)
+    {
         ESP_LOGE(TAG, "VIDIOC_G_FMT failed");
         goto err;
     }
@@ -190,7 +225,8 @@ int app_video_open(char *dev, video_fmt_t init_fmt)
             default_format.fmt.pix.bytesperline,
             default_format.fmt.pix.sizeimage);
     }
-    if (default_format.fmt.pix.pixelformat != init_fmt) {
+    if (default_format.fmt.pix.pixelformat != init_fmt)
+    {
         struct v4l2_format request_format = {
             .type = type,
             .fmt.pix.width = default_format.fmt.pix.width,
@@ -198,7 +234,8 @@ int app_video_open(char *dev, video_fmt_t init_fmt)
             .fmt.pix.pixelformat = init_fmt,
         };
 
-        if (ioctl(fd, VIDIOC_S_FMT, &request_format) != 0) {
+        if (ioctl(fd, VIDIOC_S_FMT, &request_format) != 0)
+        {
             ESP_LOGE(TAG, "VIDIOC_S_FMT failed");
             goto err;
         }
@@ -224,7 +261,8 @@ int app_video_open(char *dev, video_fmt_t init_fmt)
     struct v4l2_format actual_format = {0};
     actual_format.type = type;
 
-    if (ioctl(fd, VIDIOC_G_FMT, &actual_format) != 0) {
+    if (ioctl(fd, VIDIOC_G_FMT, &actual_format) != 0)
+    {
         ESP_LOGE(TAG, "read actual format failed");
         goto err;
     }
@@ -260,11 +298,13 @@ int app_video_open(char *dev, video_fmt_t init_fmt)
 }
 esp_err_t app_video_set_bufs(int video_fd, uint32_t fb_num, const void **fb)
 {
-    if (fb_num > MAX_BUFFER_COUNT) {
+    if (fb_num > MAX_BUFFER_COUNT)
+    {
         ESP_LOGE(TAG, "buffer num too large");
         return ESP_FAIL;
     }
-    if (fb_num < MIN_BUFFER_COUNT) {
+    if (fb_num < MIN_BUFFER_COUNT)
+    {
         ESP_LOGE(TAG, "at least two buffers are required");
         return ESP_FAIL;
     }
@@ -274,7 +314,8 @@ esp_err_t app_video_set_bufs(int video_fd, uint32_t fb_num, const void **fb)
     req.type = type;
     s_video.camera_mem_mode = req.memory = fb ? V4L2_MEMORY_USERPTR : V4L2_MEMORY_MMAP;
 
-    if (ioctl(video_fd, VIDIOC_REQBUFS, &req) != 0) {
+    if (ioctl(video_fd, VIDIOC_REQBUFS, &req) != 0)
+    {
         ESP_LOGE(TAG, "VIDIOC_REQBUFS failed");
         goto err;
     }
@@ -284,18 +325,24 @@ esp_err_t app_video_set_bufs(int video_fd, uint32_t fb_num, const void **fb)
         buf.memory = req.memory;
         buf.index = i;
 
-        if (ioctl(video_fd, VIDIOC_QUERYBUF, &buf) != 0) {
+        if (ioctl(video_fd, VIDIOC_QUERYBUF, &buf) != 0)
+        {
             ESP_LOGE(TAG, "VIDIOC_QUERYBUF failed");
             goto err;
         }
-        if (req.memory == V4L2_MEMORY_MMAP) {
+        if (req.memory == V4L2_MEMORY_MMAP)
+        {
             s_video.camera_buffer[i] = mmap(NULL, buf.length, PROT_READ | PROT_WRITE, MAP_SHARED, video_fd, buf.m.offset);
-            if (s_video.camera_buffer[i] == MAP_FAILED || s_video.camera_buffer[i] == NULL) {
+            if (s_video.camera_buffer[i] == MAP_FAILED || s_video.camera_buffer[i] == NULL)
+            {
                 ESP_LOGE(TAG, "mmap failed");
                 goto err;
             }
-        } else {
-            if (!fb || !fb[i]) {
+        }
+        else
+        {
+            if (!fb || !fb[i])
+            {
                 ESP_LOGE(TAG, "USERPTR buffer is NULL");
                 goto err;
             }
@@ -305,7 +352,8 @@ esp_err_t app_video_set_bufs(int video_fd, uint32_t fb_num, const void **fb)
         }
         s_video.camera_buf_size = buf.length;
 
-        if (ioctl(video_fd, VIDIOC_QBUF, &buf) != 0) {
+        if (ioctl(video_fd, VIDIOC_QBUF, &buf) != 0)
+        {
             ESP_LOGE(TAG, "VIDIOC_QBUF failed");
             goto err;
         }
@@ -317,23 +365,31 @@ esp_err_t app_video_set_bufs(int video_fd, uint32_t fb_num, const void **fb)
 }
 uint32_t app_video_get_buf_size(void)
 {
-    if (s_video.camera_buf_size != 0) {
+    if (s_video.camera_buf_size != 0)
+    {
         return s_video.camera_buf_size;
     }
     return (uint32_t)(s_video.camera_buf_hes * s_video.camera_buf_ves * 2);
 }
+
+/* -------------------------------------------------------------------------- */
+/* 视频流循环辅助函数                                                      */
+/* -------------------------------------------------------------------------- */
+
 static inline esp_err_t video_receive_video_frame(int video_fd)
 {
     memset(&s_video.v4l2_buf, 0, sizeof(s_video.v4l2_buf));
     s_video.v4l2_buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     s_video.v4l2_buf.memory = s_video.camera_mem_mode;
 
-    if (ioctl(video_fd, VIDIOC_DQBUF, &s_video.v4l2_buf) != 0) {
+    if (ioctl(video_fd, VIDIOC_DQBUF, &s_video.v4l2_buf) != 0)
+    {
 
         ESP_LOGW(TAG, "VIDIOC_DQBUF failed errno=%d", errno);
         return ESP_FAIL;
     }
-    if (!s_video.first_frame_logged) {
+    if (!s_video.first_frame_logged)
+    {
         ESP_LOGD(TAG, "first frame: index=%" PRIu32 ", bytesused=%" PRIu32 ", length=%" PRIu32,
             s_video.v4l2_buf.index,
             s_video.v4l2_buf.bytesused,
@@ -345,7 +401,8 @@ static inline esp_err_t video_receive_video_frame(int video_fd)
 static inline void video_operation_video_frame(void)
 {
     const uint8_t buf_index = s_video.v4l2_buf.index;
-    if (s_video.user_camera_video_frame_operation_cb) {
+    if (s_video.user_camera_video_frame_operation_cb)
+    {
         s_video.user_camera_video_frame_operation_cb(
             s_video.camera_buffer[buf_index],
             buf_index,
@@ -356,12 +413,14 @@ static inline void video_operation_video_frame(void)
 }
 static inline esp_err_t video_free_video_frame(int video_fd)
 {
-    if (s_video.camera_mem_mode == V4L2_MEMORY_USERPTR) {
+    if (s_video.camera_mem_mode == V4L2_MEMORY_USERPTR)
+    {
         s_video.v4l2_buf.m.userptr = (unsigned long)s_video.camera_buffer[s_video.v4l2_buf.index];
         s_video.v4l2_buf.length = s_video.camera_buf_size;
     }
 
-    if (ioctl(video_fd, VIDIOC_QBUF, &s_video.v4l2_buf) != 0) {
+    if (ioctl(video_fd, VIDIOC_QBUF, &s_video.v4l2_buf) != 0)
+    {
 
         ESP_LOGW(TAG, "VIDIOC_QBUF failed errno=%d", errno);
         return ESP_FAIL;
@@ -372,7 +431,8 @@ static inline esp_err_t video_stream_start(int video_fd)
 {
     const int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 
-    if (ioctl(video_fd, VIDIOC_STREAMON, (void *)&type) != 0) {
+    if (ioctl(video_fd, VIDIOC_STREAMON, (void *)&type) != 0)
+    {
 
         ESP_LOGE(TAG, "VIDIOC_STREAMON failed");
         return ESP_FAIL;
@@ -384,35 +444,44 @@ static inline esp_err_t video_stream_stop(int video_fd)
 {
     const int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 
-    if (ioctl(video_fd, VIDIOC_STREAMOFF, (void *)&type) != 0) {
+    if (ioctl(video_fd, VIDIOC_STREAMOFF, (void *)&type) != 0)
+    {
 
         ESP_LOGW(TAG, "VIDIOC_STREAMOFF failed errno=%d", errno);
         return ESP_FAIL;
     }
     return ESP_OK;
 }
+
+static void video_stream_restart(int video_fd)
+{
+    video_stream_stop(video_fd);
+    vTaskDelay(pdMS_TO_TICKS(20));
+    video_stream_start(video_fd);
+}
+
 static void video_stream_task(void *arg)
 {
     const int video_fd = *((int *)arg);
     int error_count = 0;
 
     while (1) {
-        if (video_receive_video_frame(video_fd) != ESP_OK) {
+        if (video_receive_video_frame(video_fd) != ESP_OK)
+        {
             error_count++;
 
             vTaskDelay(pdMS_TO_TICKS(VIDEO_DQBUF_RETRY_DELAY_MS));
-            if (error_count >= VIDEO_ERROR_RECOVER_THRESHOLD) {
+            if (error_count >= VIDEO_ERROR_RECOVER_THRESHOLD)
+            {
                 ESP_LOGW(TAG, "too many DQBUF errors, restarting stream");
-                video_stream_stop(video_fd);
-
-                vTaskDelay(pdMS_TO_TICKS(20));
-                video_stream_start(video_fd);
+                video_stream_restart(video_fd);
                 error_count = 0;
             }
             continue;
         }
         video_operation_video_frame();
-        if (video_free_video_frame(video_fd) != ESP_OK) {
+        if (video_free_video_frame(video_fd) != ESP_OK)
+        {
             error_count++;
 
             vTaskDelay(pdMS_TO_TICKS(VIDEO_QBUF_RETRY_DELAY_MS));
@@ -421,9 +490,15 @@ static void video_stream_task(void *arg)
         error_count = 0;
     }
 }
+
+/* -------------------------------------------------------------------------- */
+/* 公开接口                                                                  */
+/* -------------------------------------------------------------------------- */
+
 esp_err_t app_video_stream_task_start(int video_fd, int core_id)
 {
-    if (video_stream_start(video_fd) != ESP_OK) {
+    if (video_stream_start(video_fd) != ESP_OK)
+    {
         return ESP_FAIL;
     }
     s_video.video_fd_task_arg = video_fd;
@@ -435,7 +510,8 @@ esp_err_t app_video_stream_task_start(int video_fd, int core_id)
         VIDEO_TASK_PRIORITY,
         &s_video.video_stream_task_handle,
         core_id);
-    if (ret != pdPASS) {
+    if (ret != pdPASS)
+    {
         video_stream_stop(video_fd);
         return ESP_FAIL;
     }

@@ -33,8 +33,18 @@ typedef struct {
     int32_t corner_br_y;
     int32_t corner_bl_x;
     int32_t corner_bl_y;
+
     float edge_px_avg;
     float top_edge_angle_deg;
+
+    uint32_t src_width;
+    uint32_t src_height;
+    uint32_t crop_x;
+    uint32_t crop_y;
+    uint32_t crop_w;
+    uint32_t crop_h;
+    uint32_t gray_width;
+    uint32_t gray_height;
 
     uint32_t frame_seq;
     uint32_t detect_ms;
@@ -55,6 +65,10 @@ typedef struct {
     uint32_t src_height;
     uint32_t gray_width;
     uint32_t gray_height;
+    uint32_t crop_x;
+    uint32_t crop_y;
+    uint32_t crop_w;
+    uint32_t crop_h;
     size_t gray_len;
     uint32_t seq;
     uint32_t tick_ms;

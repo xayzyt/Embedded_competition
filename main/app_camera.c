@@ -34,6 +34,11 @@
 #if SOC_PPA_SUPPORTED
 #include "driver/ppa.h"
 #endif
+
+/* -------------------------------------------------------------------------- */
+/* 缓冲、任务和识别配置                                   */
+/* -------------------------------------------------------------------------- */
+
 #define CAMERA_NUM_BUFS          4
 #define STAGE_NUM_BUFS           3
 #define ALIGN_UP(num, align)     (((num) + ((align) - 1)) & ~((align) - 1))
@@ -43,6 +48,11 @@
 #define RECOGNITION_CAMERA_EXPOSURE_US      4000U
 #define RECOGNITION_CAMERA_GAIN_PERCENT     35U
 static const char *TAG = "app_camera";
+
+/* -------------------------------------------------------------------------- */
+/* 运行状态                                                               */
+/* -------------------------------------------------------------------------- */
+
 static bool s_camera_inited = false;
 static bool s_preview_running = false;
 static int s_video_fd = -1;
@@ -68,9 +78,15 @@ static disp_buf_state_t s_stage_state[STAGE_NUM_BUFS] = {0};
 #if SOC_PPA_SUPPORTED
 static ppa_client_handle_t s_ppa_srm_handle = NULL;
 #endif
+
+/* -------------------------------------------------------------------------- */
+/* 缓存和 LVGL 辅助函数                                                      */
+/* -------------------------------------------------------------------------- */
+
 static esp_err_t app_camera_msync_aligned(void *addr, size_t size, int flags)
 {
-    if (addr == NULL || size == 0) {
+    if (addr == NULL || size == 0)
+    {
 
         return ESP_ERR_INVALID_ARG;
     }
@@ -100,10 +116,16 @@ static lv_obj_t *app_get_active_screen(void)
     return lv_scr_act();
 #endif
 }
+
+/* -------------------------------------------------------------------------- */
+/* 缓冲区生命周期                                                            */
+/* -------------------------------------------------------------------------- */
+
 static void app_camera_free_camera_buffers(void)
 {
     for (int i = 0; i < CAMERA_NUM_BUFS; i++) {
-        if (s_cam_buf[i]) {
+        if (s_cam_buf[i])
+        {
 
             heap_caps_free(s_cam_buf[i]);
             s_cam_buf[i] = NULL;
@@ -114,14 +136,16 @@ static void app_camera_free_camera_buffers(void)
 static void app_camera_free_display_buffers(void)
 {
     for (int i = 0; i < STAGE_NUM_BUFS; i++) {
-        if (s_stage_buf[i]) {
+        if (s_stage_buf[i])
+        {
 
             heap_caps_free(s_stage_buf[i]);
             s_stage_buf[i] = NULL;
         }
         s_stage_state[i] = DISP_BUF_FREE;
     }
-    if (s_ui_canvas_buf) {
+    if (s_ui_canvas_buf)
+    {
 
         heap_caps_free(s_ui_canvas_buf);
         s_ui_canvas_buf = NULL;
@@ -133,14 +157,16 @@ static void app_camera_free_display_buffers(void)
 static esp_err_t app_camera_alloc_display_buffers(void)
 {
     esp_err_t ret = esp_cache_get_alignment(MALLOC_CAP_SPIRAM, &s_cache_line_size);
-    if (ret != ESP_OK) {
+    if (ret != ESP_OK)
+    {
         ESP_LOGE(TAG, "esp_cache_get_alignment failed: %s", esp_err_to_name(ret));
         return ret;
     }
     s_disp_buf_size = ALIGN_UP(BSP_LCD_H_RES * BSP_LCD_V_RES * 2, s_cache_line_size);
 
     s_ui_canvas_buf = heap_caps_aligned_calloc(s_cache_line_size, 1, s_disp_buf_size, MALLOC_CAP_SPIRAM);
-    if (s_ui_canvas_buf == NULL) {
+    if (s_ui_canvas_buf == NULL)
+    {
         ESP_LOGE(TAG, "alloc ui canvas buffer failed");
 
         return ESP_ERR_NO_MEM;
@@ -148,7 +174,8 @@ static esp_err_t app_camera_alloc_display_buffers(void)
     for (int i = 0; i < STAGE_NUM_BUFS; i++) {
 
         s_stage_buf[i] = heap_caps_aligned_calloc(s_cache_line_size, 1, s_disp_buf_size, MALLOC_CAP_SPIRAM);
-        if (s_stage_buf[i] == NULL) {
+        if (s_stage_buf[i] == NULL)
+        {
             ESP_LOGE(TAG, "alloc stage buffer %d failed", i);
             app_camera_free_display_buffers();
 
@@ -160,9 +187,11 @@ static esp_err_t app_camera_alloc_display_buffers(void)
 }
 static esp_err_t app_camera_alloc_userptr_buffers(size_t frame_size)
 {
-    if (s_cache_line_size == 0) {
+    if (s_cache_line_size == 0)
+    {
         esp_err_t ret = esp_cache_get_alignment(MALLOC_CAP_SPIRAM, &s_cache_line_size);
-        if (ret != ESP_OK) {
+        if (ret != ESP_OK)
+        {
             ESP_LOGE(TAG, "esp_cache_get_alignment failed: %s", esp_err_to_name(ret));
             return ret;
         }
@@ -171,7 +200,8 @@ static esp_err_t app_camera_alloc_userptr_buffers(size_t frame_size)
     for (int i = 0; i < CAMERA_NUM_BUFS; i++) {
 
         s_cam_buf[i] = heap_caps_aligned_calloc(s_cache_line_size, 1, s_cam_buf_size, MALLOC_CAP_SPIRAM);
-        if (s_cam_buf[i] == NULL) {
+        if (s_cam_buf[i] == NULL)
+        {
             ESP_LOGE(TAG, "alloc USERPTR camera buffer %d failed", i);
             app_camera_free_camera_buffers();
 
@@ -181,18 +211,26 @@ static esp_err_t app_camera_alloc_userptr_buffers(size_t frame_size)
     ESP_LOGD(TAG, "USERPTR camera buffers ready: %d x %u bytes", CAMERA_NUM_BUFS, (unsigned)s_cam_buf_size);
     return ESP_OK;
 }
+
+/* -------------------------------------------------------------------------- */
+/* 画布和 PPA 初始化                                                        */
+/* -------------------------------------------------------------------------- */
+
 static esp_err_t app_camera_create_canvas(void)
 {
-    if (s_camera_canvas != NULL) {
+    if (s_camera_canvas != NULL)
+    {
         return ESP_OK;
     }
 
-    if (!bsp_display_lock(0)) {
+    if (!bsp_display_lock(0))
+    {
         return ESP_FAIL;
     }
     lv_obj_t *scr = app_get_active_screen();
     s_camera_canvas = lv_canvas_create(scr);
-    if (s_camera_canvas == NULL) {
+    if (s_camera_canvas == NULL)
+    {
 
         bsp_display_unlock();
         return ESP_FAIL;
@@ -213,14 +251,16 @@ static esp_err_t app_camera_create_canvas(void)
 #if SOC_PPA_SUPPORTED
 static void app_ppa_init(void)
 {
-    if (s_ppa_srm_handle) {
+    if (s_ppa_srm_handle)
+    {
         return;
     }
     ppa_client_config_t cfg = {
         .oper_type = PPA_OPERATION_SRM,
     };
     esp_err_t ret = ppa_register_client(&cfg, &s_ppa_srm_handle);
-    if (ret != ESP_OK) {
+    if (ret != ESP_OK)
+    {
         ESP_LOGE(TAG, "ppa_register_client failed: 0x%x", ret);
     }
 }
@@ -230,10 +270,13 @@ static void calc_aspect_fit(uint32_t src_w, uint32_t src_h,
 {
     const float src_aspect = (float)src_w / (float)src_h;
     const float dst_aspect = (float)dst_w / (float)dst_h;
-    if (src_aspect > dst_aspect) {
+    if (src_aspect > dst_aspect)
+    {
         *out_w = dst_w;
         *out_h = (uint32_t)(dst_w / src_aspect);
-    } else {
+    }
+    else
+    {
         *out_h = dst_h;
         *out_w = (uint32_t)(dst_h * src_aspect);
     }
@@ -242,7 +285,8 @@ static esp_err_t app_camera_clear_letterbox(uint8_t *out_buf,
     uint32_t out_width,
     uint32_t out_height)
 {
-    if (out_buf == NULL || out_width > BSP_LCD_H_RES || out_height > BSP_LCD_V_RES) {
+    if (out_buf == NULL || out_width > BSP_LCD_H_RES || out_height > BSP_LCD_V_RES)
+    {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -253,34 +297,41 @@ static esp_err_t app_camera_clear_letterbox(uint8_t *out_buf,
     const uint32_t bottom_y = y_off + out_height;
     const uint32_t right_x = x_off + out_width;
 
-    if (y_off > 0) {
+    if (y_off > 0)
+    {
         size_t bytes = (size_t)y_off * row_stride;
         memset(out_buf, 0, bytes);
         esp_err_t ret = app_camera_msync_c2m(out_buf, bytes);
-        if (ret != ESP_OK) {
+        if (ret != ESP_OK)
+        {
             return ret;
         }
     }
 
-    if (bottom_y < BSP_LCD_V_RES) {
+    if (bottom_y < BSP_LCD_V_RES)
+    {
         uint8_t *bottom = out_buf + (size_t)bottom_y * row_stride;
         size_t bytes = (size_t)(BSP_LCD_V_RES - bottom_y) * row_stride;
         memset(bottom, 0, bytes);
         esp_err_t ret = app_camera_msync_c2m(bottom, bytes);
-        if (ret != ESP_OK) {
+        if (ret != ESP_OK)
+        {
             return ret;
         }
     }
 
-    if (x_off > 0 || right_x < BSP_LCD_H_RES) {
+    if (x_off > 0 || right_x < BSP_LCD_H_RES)
+    {
         const size_t left_bytes = (size_t)x_off * pixel_size;
         const size_t right_bytes = (size_t)(BSP_LCD_H_RES - right_x) * pixel_size;
         for (uint32_t y = y_off; y < bottom_y; y++) {
             uint8_t *row = out_buf + (size_t)y * row_stride;
-            if (left_bytes > 0) {
+            if (left_bytes > 0)
+            {
                 memset(row, 0, left_bytes);
             }
-            if (right_bytes > 0) {
+            if (right_bytes > 0)
+            {
                 memset(row + (size_t)right_x * pixel_size, 0, right_bytes);
             }
         }
@@ -288,7 +339,8 @@ static esp_err_t app_camera_clear_letterbox(uint8_t *out_buf,
         uint8_t *rows = out_buf + (size_t)y_off * row_stride;
         size_t bytes = (size_t)out_height * row_stride;
         esp_err_t ret = app_camera_msync_c2m(rows, bytes);
-        if (ret != ESP_OK) {
+        if (ret != ESP_OK)
+        {
             return ret;
         }
     }
@@ -306,12 +358,14 @@ static esp_err_t app_image_process_scale_crop(uint8_t *in_buf,
 {
     float scale_x = (float)out_width / (float)in_width;
     float scale_y = (float)out_height / (float)in_height;
-    if (rotation_angle == PPA_SRM_ROTATION_ANGLE_90 || rotation_angle == PPA_SRM_ROTATION_ANGLE_270) {
+    if (rotation_angle == PPA_SRM_ROTATION_ANGLE_90 || rotation_angle == PPA_SRM_ROTATION_ANGLE_270)
+    {
         scale_x = (float)out_height / (float)in_width;
         scale_y = (float)out_width / (float)in_height;
     }
     esp_err_t clear_ret = app_camera_clear_letterbox(out_buf, out_width, out_height);
-    if (clear_ret != ESP_OK) {
+    if (clear_ret != ESP_OK)
+    {
         return clear_ret;
     }
     ppa_srm_oper_config_t srm_cfg = {
@@ -339,7 +393,38 @@ static esp_err_t app_image_process_scale_crop(uint8_t *in_buf,
     };
     return ppa_do_scale_rotate_mirror(s_ppa_srm_handle, &srm_cfg);
 }
+
+static ppa_srm_rotation_angle_t app_camera_ppa_rotation(void)
+{
+    switch (BSP_CAMERA_ROTATION) {
+    case 90:  return PPA_SRM_ROTATION_ANGLE_90;
+    case 180: return PPA_SRM_ROTATION_ANGLE_180;
+    case 270: return PPA_SRM_ROTATION_ANGLE_270;
+    case 0:
+    default:  return PPA_SRM_ROTATION_ANGLE_0;
+    }
+}
+
+static void app_camera_calc_preview_fit(uint32_t camera_width,
+    uint32_t camera_height,
+    uint32_t *out_w,
+    uint32_t *out_h)
+{
+    if ((BSP_CAMERA_ROTATION == 90) || (BSP_CAMERA_ROTATION == 270))
+    {
+        calc_aspect_fit(camera_height, camera_width, BSP_LCD_H_RES, BSP_LCD_V_RES, out_w, out_h);
+    }
+    else
+    {
+        calc_aspect_fit(camera_width, camera_height, BSP_LCD_H_RES, BSP_LCD_V_RES, out_w, out_h);
+    }
+}
 #endif
+
+/* -------------------------------------------------------------------------- */
+/* Stage 缓冲交接                                                        */
+/* -------------------------------------------------------------------------- */
+
 static bool app_camera_has_pending_stage(void)
 {
     bool has_pending = false;
@@ -356,7 +441,8 @@ static int app_camera_pick_writable_stage_buffer(void)
 
     taskENTER_CRITICAL(&s_display_mux);
     for (int i = 0; i < STAGE_NUM_BUFS; i++) {
-        if (s_stage_state[i] == DISP_BUF_FREE) {
+        if (s_stage_state[i] == DISP_BUF_FREE)
+        {
             s_stage_state[i] = DISP_BUF_WRITING;
             idx = i;
             break;
@@ -371,25 +457,29 @@ static void app_camera_publish_stage_buffer(int ready_index)
 
     taskENTER_CRITICAL(&s_display_mux);
     if (s_pending_stage_index >= 0 && s_pending_stage_index < STAGE_NUM_BUFS &&
-        s_stage_state[s_pending_stage_index] == DISP_BUF_READY) {
+        s_stage_state[s_pending_stage_index] == DISP_BUF_READY)
+    {
         s_stage_state[s_pending_stage_index] = DISP_BUF_FREE;
     }
     s_stage_state[ready_index] = DISP_BUF_READY;
     s_pending_stage_index = ready_index;
 
     taskEXIT_CRITICAL(&s_display_mux);
-    if (s_display_task_handle) {
+    if (s_display_task_handle)
+    {
         xTaskNotifyGive(s_display_task_handle);
     }
 }
 static void app_camera_abandon_stage_buffer(int buf_index)
 {
-    if (buf_index < 0 || buf_index >= STAGE_NUM_BUFS) {
+    if (buf_index < 0 || buf_index >= STAGE_NUM_BUFS)
+    {
         return;
     }
 
     taskENTER_CRITICAL(&s_display_mux);
-    if (s_stage_state[buf_index] == DISP_BUF_WRITING) {
+    if (s_stage_state[buf_index] == DISP_BUF_WRITING)
+    {
         s_stage_state[buf_index] = DISP_BUF_FREE;
     }
 
@@ -401,7 +491,8 @@ static int app_camera_take_ready_stage_buffer(void)
 
     taskENTER_CRITICAL(&s_display_mux);
     if (s_pending_stage_index >= 0 && s_pending_stage_index < STAGE_NUM_BUFS &&
-        s_stage_state[s_pending_stage_index] == DISP_BUF_READY) {
+        s_stage_state[s_pending_stage_index] == DISP_BUF_READY)
+    {
         idx = s_pending_stage_index;
         s_pending_stage_index = -1;
     }
@@ -411,16 +502,19 @@ static int app_camera_take_ready_stage_buffer(void)
 }
 static void app_camera_release_stage_buffer(int buf_index)
 {
-    if (buf_index < 0 || buf_index >= STAGE_NUM_BUFS) {
+    if (buf_index < 0 || buf_index >= STAGE_NUM_BUFS)
+    {
         return;
     }
 
     taskENTER_CRITICAL(&s_display_mux);
     s_stage_state[buf_index] = DISP_BUF_FREE;
-    if (s_displayed_stage_index == buf_index) {
+    if (s_displayed_stage_index == buf_index)
+    {
         s_displayed_stage_index = -1;
     }
-    if (s_pending_stage_index == buf_index) {
+    if (s_pending_stage_index == buf_index)
+    {
         s_pending_stage_index = -1;
     }
 
@@ -428,20 +522,27 @@ static void app_camera_release_stage_buffer(int buf_index)
 }
 static void app_camera_mark_displayed_stage_buffer(int buf_index)
 {
-    if (buf_index < 0 || buf_index >= STAGE_NUM_BUFS) {
+    if (buf_index < 0 || buf_index >= STAGE_NUM_BUFS)
+    {
         return;
     }
 
     taskENTER_CRITICAL(&s_display_mux);
     int old_index = s_displayed_stage_index;
     if (old_index >= 0 && old_index < STAGE_NUM_BUFS && old_index != buf_index &&
-        s_stage_state[old_index] == DISP_BUF_DISPLAYED) {
+        s_stage_state[old_index] == DISP_BUF_DISPLAYED)
+    {
         s_stage_state[old_index] = DISP_BUF_FREE;
     }
     s_stage_state[buf_index] = DISP_BUF_DISPLAYED;
     s_displayed_stage_index = buf_index;
     taskEXIT_CRITICAL(&s_display_mux);
 }
+
+/* -------------------------------------------------------------------------- */
+/* 显示任务和摄像头帧回调                                      */
+/* -------------------------------------------------------------------------- */
+
 static void app_camera_display_task(void *arg)
 {
     (void)arg;
@@ -449,16 +550,19 @@ static void app_camera_display_task(void *arg)
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         while (1) {
             int buf_index = app_camera_take_ready_stage_buffer();
-            if (buf_index < 0 || s_camera_canvas == NULL || s_ui_canvas_buf == NULL) {
+            if (buf_index < 0 || s_camera_canvas == NULL || s_ui_canvas_buf == NULL)
+            {
                 break;
             }
-            if (app_camera_msync_m2c(s_stage_buf[buf_index], s_disp_buf_size) != ESP_OK) {
+            if (app_camera_msync_m2c(s_stage_buf[buf_index], s_disp_buf_size) != ESP_OK)
+            {
                 app_camera_release_stage_buffer(buf_index);
                 continue;
             }
 
             bool displayed = false;
-            if (bsp_display_lock(0)) {
+            if (bsp_display_lock(0))
+            {
 #if LVGL_VERSION_MAJOR >= 9
                 lv_canvas_set_buffer(s_camera_canvas,
                     s_stage_buf[buf_index],
@@ -478,9 +582,12 @@ static void app_camera_display_task(void *arg)
 
                 bsp_display_unlock();
             }
-            if (displayed) {
+            if (displayed)
+            {
                 app_camera_mark_displayed_stage_buffer(buf_index);
-            } else {
+            }
+            else
+            {
                 app_camera_release_stage_buffer(buf_index);
             }
         }
@@ -494,30 +601,38 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
 {
     (void)camera_buf_index;
 
-    if (camera_buf == NULL || s_camera_canvas == NULL || s_ui_canvas_buf == NULL) {
+    if (camera_buf == NULL || s_camera_canvas == NULL || s_ui_canvas_buf == NULL)
+    {
         return;
     }
 
     bool camera_synced_for_cpu = false;
     bool capture_active = app_ai_capture_is_active();
     bool vision_due = false;
-    if (capture_active) {
+    if (capture_active)
+    {
         s_vision_sample_skip = 0;
-    } else if (++s_vision_sample_skip >= VISION_SAMPLE_INTERVAL) {
+    }
+    else if (++s_vision_sample_skip >= VISION_SAMPLE_INTERVAL)
+    {
         s_vision_sample_skip = 0;
         vision_due = true;
     }
     bool capture_due = app_ai_capture_should_capture_frame();
-    if (vision_due || capture_due) {
-        if (app_camera_msync_m2c(camera_buf, camera_buf_len) == ESP_OK) {
+    if (vision_due || capture_due)
+    {
+        if (app_camera_msync_m2c(camera_buf, camera_buf_len) == ESP_OK)
+        {
             camera_synced_for_cpu = true;
-            if (vision_due) {
+            if (vision_due)
+            {
                 (void)app_vision_submit_frame(camera_buf,
                     camera_buf_hes,
                     camera_buf_ves,
                     camera_buf_len);
             }
-            if (capture_due) {
+            if (capture_due)
+            {
                 (void)app_ai_capture_submit_frame(camera_buf,
                     camera_buf_hes,
                     camera_buf_ves,
@@ -525,11 +640,13 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
             }
         }
     }
-    if (app_camera_has_pending_stage()) {
+    if (app_camera_has_pending_stage())
+    {
         return;
     }
     int stage_index = app_camera_pick_writable_stage_buffer();
-    if (stage_index < 0) {
+    if (stage_index < 0)
+    {
         return;
     }
 
@@ -538,20 +655,10 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
     uint8_t *out_buf = s_stage_buf[stage_index];
     bool stage_written_by_cpu = false;
 #if SOC_PPA_SUPPORTED
-    if (s_ppa_srm_handle) {
-        ppa_srm_rotation_angle_t rotation = PPA_SRM_ROTATION_ANGLE_0;
-        switch (BSP_CAMERA_ROTATION) {
-        case 90:  rotation = PPA_SRM_ROTATION_ANGLE_90; break;
-        case 180: rotation = PPA_SRM_ROTATION_ANGLE_180; break;
-        case 270: rotation = PPA_SRM_ROTATION_ANGLE_270; break;
-        case 0:
-        default:  rotation = PPA_SRM_ROTATION_ANGLE_0; break;
-        }
-        if (BSP_CAMERA_ROTATION == 90 || BSP_CAMERA_ROTATION == 270) {
-            calc_aspect_fit(camera_buf_ves, camera_buf_hes, BSP_LCD_H_RES, BSP_LCD_V_RES, &out_w, &out_h);
-        } else {
-            calc_aspect_fit(camera_buf_hes, camera_buf_ves, BSP_LCD_H_RES, BSP_LCD_V_RES, &out_w, &out_h);
-        }
+    if (s_ppa_srm_handle)
+    {
+        ppa_srm_rotation_angle_t rotation = app_camera_ppa_rotation();
+        app_camera_calc_preview_fit(camera_buf_hes, camera_buf_ves, &out_w, &out_h);
         if (app_image_process_scale_crop(camera_buf,
             camera_buf_hes,
             camera_buf_ves,
@@ -559,14 +666,16 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
             out_w,
             out_h,
             s_disp_buf_size,
-            rotation) != ESP_OK) {
+            rotation) != ESP_OK)
+        {
             app_camera_abandon_stage_buffer(stage_index);
             return;
         }
     } else
 #endif
     {
-        if (!camera_synced_for_cpu && app_camera_msync_m2c(camera_buf, camera_buf_len) != ESP_OK) {
+        if (!camera_synced_for_cpu && app_camera_msync_m2c(camera_buf, camera_buf_len) != ESP_OK)
+        {
             app_camera_abandon_stage_buffer(stage_index);
             return;
         }
@@ -574,7 +683,8 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
         memcpy(out_buf, camera_buf, copy_len);
         stage_written_by_cpu = true;
     }
-    if (stage_written_by_cpu && app_camera_msync_c2m(out_buf, s_disp_buf_size) != ESP_OK) {
+    if (stage_written_by_cpu && app_camera_msync_c2m(out_buf, s_disp_buf_size) != ESP_OK)
+    {
         app_camera_abandon_stage_buffer(stage_index);
         return;
     }
@@ -582,7 +692,8 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
 }
 static esp_err_t app_camera_start_display_task(void)
 {
-    if (s_display_task_handle) {
+    if (s_display_task_handle)
+    {
         return ESP_OK;
     }
 
@@ -595,9 +706,15 @@ static esp_err_t app_camera_start_display_task(void)
         1);
     return (ret == pdPASS) ? ESP_OK : ESP_FAIL;
 }
+
+/* -------------------------------------------------------------------------- */
+/* 公开接口                                                                  */
+/* -------------------------------------------------------------------------- */
+
 esp_err_t app_camera_init(void)
 {
-    if (s_camera_inited) {
+    if (s_camera_inited)
+    {
         return ESP_OK;
     }
 #if !BSP_CAPS_CAMERA
@@ -606,7 +723,8 @@ esp_err_t app_camera_init(void)
 #else
     ESP_LOGD(TAG, "starting camera preview pipeline (USERPTR + stage queue + fixed canvas)");
     esp_err_t ret = bsp_camera_start(NULL);
-    if (ret != ESP_OK) {
+    if (ret != ESP_OK)
+    {
         ESP_LOGE(TAG, "bsp_camera_start failed: %s", esp_err_to_name(ret));
         return ret;
     }
@@ -614,21 +732,25 @@ esp_err_t app_camera_init(void)
     app_ppa_init();
 #endif
     ret = app_camera_alloc_display_buffers();
-    if (ret != ESP_OK) {
+    if (ret != ESP_OK)
+    {
         return ret;
     }
     ret = app_camera_create_canvas();
-    if (ret != ESP_OK) {
+    if (ret != ESP_OK)
+    {
         app_camera_free_display_buffers();
         return ret;
     }
     ret = app_camera_start_display_task();
-    if (ret != ESP_OK) {
+    if (ret != ESP_OK)
+    {
         app_camera_free_display_buffers();
         return ret;
     }
     ret = app_video_register_frame_operation_cb(app_camera_frame_cb);
-    if (ret != ESP_OK) {
+    if (ret != ESP_OK)
+    {
         app_camera_free_display_buffers();
         return ret;
     }
@@ -638,14 +760,17 @@ esp_err_t app_camera_init(void)
 }
 esp_err_t app_camera_preview_start(void)
 {
-    if (!s_camera_inited) {
+    if (!s_camera_inited)
+    {
         return ESP_ERR_INVALID_STATE;
     }
-    if (s_preview_running) {
+    if (s_preview_running)
+    {
         return ESP_OK;
     }
     s_video_fd = app_video_open(BSP_CAMERA_DEVICE, APP_VIDEO_FMT_RGB565);
-    if (s_video_fd < 0) {
+    if (s_video_fd < 0)
+    {
         ESP_LOGE(TAG, "app_video_open failed");
         ESP_LOGW(TAG, "please check camera sensor selection in menuconfig");
         return ESP_FAIL;
@@ -653,18 +778,21 @@ esp_err_t app_camera_preview_start(void)
     esp_err_t profile_ret = app_video_apply_recognition_profile(s_video_fd,
         RECOGNITION_CAMERA_EXPOSURE_US,
         RECOGNITION_CAMERA_GAIN_PERCENT);
-    if (profile_ret != ESP_OK) {
+    if (profile_ret != ESP_OK)
+    {
         ESP_LOGW(TAG, "recognition camera profile init skipped: %s", esp_err_to_name(profile_ret));
     }
 
     esp_err_t ret = app_camera_alloc_userptr_buffers(app_video_get_buf_size());
-    if (ret != ESP_OK) {
+    if (ret != ESP_OK)
+    {
         close(s_video_fd);
         s_video_fd = -1;
         return ret;
     }
     ret = app_video_set_bufs(s_video_fd, CAMERA_NUM_BUFS, (const void **)s_cam_buf);
-    if (ret != ESP_OK) {
+    if (ret != ESP_OK)
+    {
         ESP_LOGE(TAG, "app_video_set_bufs(USERPTR) failed: %s", esp_err_to_name(ret));
         app_camera_free_camera_buffers();
         close(s_video_fd);
@@ -672,7 +800,8 @@ esp_err_t app_camera_preview_start(void)
         return ret;
     }
     ret = app_video_stream_task_start(s_video_fd, 0);
-    if (ret != ESP_OK) {
+    if (ret != ESP_OK)
+    {
         ESP_LOGE(TAG, "app_video_stream_task_start failed: %s", esp_err_to_name(ret));
         app_camera_free_camera_buffers();
         close(s_video_fd);

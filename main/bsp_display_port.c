@@ -17,9 +17,11 @@
 
 static const char *TAG = "display_port";
 static lv_display_t *s_disp = NULL;
+
 bool app_display_init(void)
 {
-    if (s_disp != NULL) {
+    if (s_disp != NULL)
+    {
         return true;
     }
     ESP_LOGD(TAG, "start display init (custom LVGL cfg)");
@@ -36,7 +38,8 @@ bool app_display_init(void)
     cfg.lvgl_port_cfg.task_stack = 8192;
     cfg.hw_cfg.dsi_bus.lane_bit_rate_mbps = BSP_LCD_MIPI_DSI_LANE_BITRATE_MBPS;
     s_disp = bsp_display_start_with_config(&cfg);
-    if (s_disp == NULL) {
+    if (s_disp == NULL)
+    {
         ESP_LOGE(TAG, "bsp_display_start_with_config failed");
         return false;
     }

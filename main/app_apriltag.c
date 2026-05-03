@@ -40,6 +40,11 @@ static uint8_t *s_binary = NULL;
 static uint8_t *s_visited = NULL;
 static uint32_t *s_queue = NULL;
 static bool s_inited = false;
+
+/* -------------------------------------------------------------------------- */
+/* Tag36h11 参考码表                                                     */
+/* -------------------------------------------------------------------------- */
+
 /*
  * Tag36h11 合法码表。检测时会把采样出的 6x6 数据位打包成编码，然后遍历这个表寻找汉明距离最近的 ID。这里是纯数据，不建议逐个常量解释，否则反而影响阅读。
  */
@@ -638,30 +643,35 @@ static const uint8_t s_tag36h11_bit_x[36] = {
 static const uint8_t s_tag36h11_bit_y[36] = {
     1,1,1,1,1,2,2,2,3,1,2,3,4,5,2,3,4,3,6,6,6,6,6,5,5,5,4,6,5,4,3,2,5,4,3,4
 };
+
+/* -------------------------------------------------------------------------- */
+/* 内部几何和打包类型                                         */
+/* -------------------------------------------------------------------------- */
+
 /*
  * 结构体类型：把同一类运行时数据或协议字段打包在一起，方便函数之间传递。
  */
 typedef struct {
-    float x;
-    float y;
+    float x;    /* 图像坐标系中的 x 坐标，单位为像素。 */
+    float y;    /* 图像坐标系中的 y 坐标，单位为像素。 */
 } at_pt_t;
 /*
  * 结构体类型：把同一类运行时数据或协议字段打包在一起，方便函数之间传递。
  */
 typedef struct {
-    bool valid;
-    uint32_t area;
-    uint32_t min_x;
-    uint32_t min_y;
-    uint32_t max_x;
-    uint32_t max_y;
-    float cx;
-    float cy;
-    at_pt_t tl;
-    at_pt_t tr;
-    at_pt_t br;
-    at_pt_t bl;
-    uint32_t score;
+    bool valid;        /* 候选区域是否通过基础筛选。 */
+    uint32_t area;     /* 连通域像素面积。 */
+    uint32_t min_x;    /* 候选外接框左边界。 */
+    uint32_t min_y;    /* 候选外接框上边界。 */
+    uint32_t max_x;    /* 候选外接框右边界。 */
+    uint32_t max_y;    /* 候选外接框下边界。 */
+    float cx;          /* 候选区域质心 x 坐标。 */
+    float cy;          /* 候选区域质心 y 坐标。 */
+    at_pt_t tl;        /* 近似左上角点。 */
+    at_pt_t tr;        /* 近似右上角点。 */
+    at_pt_t br;        /* 近似右下角点。 */
+    at_pt_t bl;        /* 近似左下角点。 */
+    uint32_t score;    /* 候选质量分数，用于保留最值得解码的区域。 */
 } at_candidate_t;
 /*
  * 枚举类型：用一组有名字的常量表示状态/类型，比直接写数字更清晰，也方便调试。
@@ -687,6 +697,11 @@ typedef enum {
     AT_PACK_COL_LSB,
     AT_PACK_MODE_COUNT,
 } at_pack_mode_t;
+
+/* -------------------------------------------------------------------------- */
+/* 图像阈值化和候选收集                                 */
+/* -------------------------------------------------------------------------- */
+
 /*
  * 把二维图像坐标 (x,y) 转成一维数组下标，灰度图/二值图都按行优先连续存储。
  */
@@ -728,7 +743,8 @@ static uint8_t at_otsu_threshold(const uint8_t *gray, uint32_t width, uint32_t h
         sum_b += (uint64_t)t * hist[t];
         int64_t diff = (int64_t)(sum_b * w_f) - (int64_t)((sum - sum_b) * w_b);
         uint64_t between = (uint64_t)(diff * diff);
-        if (between > best_between) {
+        if (between > best_between)
+        {
             best_between = between;
             best_t = (uint8_t)t;
         }
@@ -745,7 +761,8 @@ static inline uint32_t at_hamming64(uint64_t a, uint64_t b)
     return (uint32_t)__builtin_popcountll(x);
 #else
     uint32_t c = 0;
-    while (x) { x &= (x - 1); c++; }
+    while (x)
+   { x &= (x - 1); c++; }
     return c;
 #endif
 }
@@ -839,10 +856,13 @@ static void at_insert_candidate(at_candidate_t *cands, int *count, const at_cand
 {
     if (!cand->valid) return;
     int n = *count;
-    if (n < AT_MAX_CANDIDATES) {
+    if (n < AT_MAX_CANDIDATES)
+    {
         cands[n] = *cand;
         (*count)++;
-    } else {
+    }
+    else
+    {
         int worst = 0;
         for (int i = 1; i < n; i++) {
             if (cands[i].score < cands[worst].score) worst = i;
@@ -905,10 +925,30 @@ static int at_collect_candidates(uint32_t width, uint32_t height, at_candidate_t
                  * - x+y 最大近似右下；
                  * - x-y 最小近似左下。
                  */
-                if (fsum < best_tl) { best_tl = fsum; tl.x = (float)cx; tl.y = (float)cy; }
-                if (fdiff > best_tr) { best_tr = fdiff; tr.x = (float)cx; tr.y = (float)cy; }
-                if (fsum > best_br) { best_br = fsum; br.x = (float)cx; br.y = (float)cy; }
-                if (fdiff < best_bl) { best_bl = fdiff; bl.x = (float)cx; bl.y = (float)cy; }
+                if (fsum < best_tl)
+                {
+                    best_tl = fsum;
+                    tl.x = (float)cx;
+                    tl.y = (float)cy;
+                }
+                if (fdiff > best_tr)
+                {
+                    best_tr = fdiff;
+                    tr.x = (float)cx;
+                    tr.y = (float)cy;
+                }
+                if (fsum > best_br)
+                {
+                    best_br = fsum;
+                    br.x = (float)cx;
+                    br.y = (float)cy;
+                }
+                if (fdiff < best_bl)
+                {
+                    best_bl = fdiff;
+                    bl.x = (float)cx;
+                    bl.y = (float)cy;
+                }
 
                 /*
                  * 扫描当前像素周围 8 邻域。
@@ -921,7 +961,8 @@ static int at_collect_candidates(uint32_t width, uint32_t height, at_candidate_t
                 for (uint32_t ny = ny0; ny <= ny1; ny++) {
                     for (uint32_t nx = nx0; nx <= nx1; nx++) {
                         uint32_t nidx = at_index(nx, ny, width);
-                        if (!s_visited[nidx] && s_binary[nidx]) {
+                        if (!s_visited[nidx] && s_binary[nidx])
+                        {
                             s_visited[nidx] = 1U;
                             s_queue[tail++] = nidx;
                         }
@@ -956,10 +997,12 @@ static int at_collect_candidates(uint32_t width, uint32_t height, at_candidate_t
              * 贴边或过大的候选不直接丢弃，而是降低评分。
              * 这样在候选很少时仍然保留一点尝试机会，但优先级更低。
              */
-            if (at_candidate_touch_edge(&cand, width, height, AT_EDGE_MARGIN)) {
+            if (at_candidate_touch_edge(&cand, width, height, AT_EDGE_MARGIN))
+            {
                 score /= 4U;
             }
-            if (at_candidate_too_large(&cand, width, height)) {
+            if (at_candidate_too_large(&cand, width, height))
+            {
                 score /= 4U;
             }
             cand.score = score;
@@ -968,6 +1011,11 @@ static int at_collect_candidates(uint32_t width, uint32_t height, at_candidate_t
     }
     return count;
 }
+
+/* -------------------------------------------------------------------------- */
+/* 四边形投影和 bit 解码                                            */
+/* -------------------------------------------------------------------------- */
+
 /*
  * 计算两个点之间的平方距离，避免不必要的 sqrt，提高几何判断效率。
  */
@@ -1043,7 +1091,8 @@ static bool at_solve_homography(const at_pt_t quad[4], float H[9])
         float maxv = fabsf(A[col][col]);
         for (int row = col + 1; row < 8; row++) {
             float v = fabsf(A[row][col]);
-            if (v > maxv) {
+            if (v > maxv)
+            {
                 maxv = v;
                 pivot = row;
             }
@@ -1053,7 +1102,8 @@ static bool at_solve_homography(const at_pt_t quad[4], float H[9])
         /*
          * 把 pivot 行换到当前列。
          */
-        if (pivot != col) {
+        if (pivot != col)
+        {
             for (int k = col; k < 9; k++) {
                 float tmp = A[col][k];
                 A[col][k] = A[pivot][k];
@@ -1198,7 +1248,8 @@ static void at_transform_bits(const uint8_t src[AT_DATA_GRID][AT_DATA_GRID],
 static uint64_t at_build_code_family(const uint8_t bits[AT_DATA_GRID][AT_DATA_GRID], bool lsb_first)
 {
     uint64_t code = 0;
-    if (!lsb_first) {
+    if (!lsb_first)
+    {
         for (int i = 0; i < 36; i++) {
             uint8_t x = s_tag36h11_bit_x[i] - 1U;
             uint8_t y = s_tag36h11_bit_y[i] - 1U;
@@ -1209,7 +1260,8 @@ static uint64_t at_build_code_family(const uint8_t bits[AT_DATA_GRID][AT_DATA_GR
     for (int i = 0; i < 36; i++) {
         uint8_t x = s_tag36h11_bit_x[i] - 1U;
         uint8_t y = s_tag36h11_bit_y[i] - 1U;
-        if (bits[y][x]) {
+        if (bits[y][x])
+        {
             code |= (1ULL << i);
         }
     }
@@ -1224,9 +1276,12 @@ static uint64_t at_build_code_row_major(const uint8_t bits[AT_DATA_GRID][AT_DATA
     uint32_t idx = 0;
     for (uint32_t r = 0; r < AT_DATA_GRID; r++) {
         for (uint32_t c = 0; c < AT_DATA_GRID; c++, idx++) {
-            if (!lsb_first) {
+            if (!lsb_first)
+            {
                 code = (code << 1) | (bits[r][c] ? 1ULL : 0ULL);
-            } else if (bits[r][c]) {
+            }
+            else if (bits[r][c])
+            {
                 code |= (1ULL << idx);
             }
         }
@@ -1242,9 +1297,12 @@ static uint64_t at_build_code_col_major(const uint8_t bits[AT_DATA_GRID][AT_DATA
     uint32_t idx = 0;
     for (uint32_t c = 0; c < AT_DATA_GRID; c++) {
         for (uint32_t r = 0; r < AT_DATA_GRID; r++, idx++) {
-            if (!lsb_first) {
+            if (!lsb_first)
+            {
                 code = (code << 1) | (bits[r][c] ? 1ULL : 0ULL);
-            } else if (bits[r][c]) {
+            }
+            else if (bits[r][c])
+            {
                 code |= (1ULL << idx);
             }
         }
@@ -1282,7 +1340,8 @@ static void at_match_code(uint64_t code, uint16_t *best_id, uint32_t *best_h)
     *best_id = 0;
     for (uint16_t id = 0; id < 587U; id++) {
         uint32_t h = at_hamming64(code, s_tag36h11_codes[id]);
-        if (h < *best_h) {
+        if (h < *best_h)
+        {
             *best_h = h;
             *best_id = id;
             if (h == 0U) break;
@@ -1307,10 +1366,12 @@ static bool at_decode_with_quad(const uint8_t *gray,
     /*
      * 先做四边形基本几何校验，再求透视单应矩阵。
      */
-    if (!at_validate_quad(cand)) {
+    if (!at_validate_quad(cand))
+    {
         return false;
     }
-    if (!at_solve_homography(quad, H)) {
+    if (!at_solve_homography(quad, H))
+    {
         return false;
     }
 
@@ -1328,9 +1389,12 @@ static bool at_decode_with_quad(const uint8_t *gray,
         for (uint32_t gx = 0; gx < AT_GRID_SIZE; gx++) {
             uint8_t v = at_sample_cell(gray, width, height, H, (float)gx, (float)gy);
             cells[gy][gx] = v;
-            if (gx == 0U || gy == 0U || gx == (AT_GRID_SIZE - 1U) || gy == (AT_GRID_SIZE - 1U)) {
+            if (gx == 0U || gy == 0U || gx == (AT_GRID_SIZE - 1U) || gy == (AT_GRID_SIZE - 1U))
+            {
                 border_sum += v;
-            } else {
+            }
+            else
+            {
                 inner_vals[inner_idx++] = v;
             }
         }
@@ -1343,7 +1407,8 @@ static bool at_decode_with_quad(const uint8_t *gray,
      */
     for (uint32_t i = 0; i < inner_idx; i++) {
         for (uint32_t j = i + 1; j < inner_idx; j++) {
-            if (inner_vals[j] < inner_vals[i]) {
+            if (inner_vals[j] < inner_vals[i])
+            {
                 uint8_t t = inner_vals[i]; inner_vals[i] = inner_vals[j]; inner_vals[j] = t;
             }
         }
@@ -1363,7 +1428,8 @@ static bool at_decode_with_quad(const uint8_t *gray,
     uint32_t dark_mean = dark_sum / 12U;
     uint32_t white_mean = bright_sum / 12U;
     if (black_mean > dark_mean) black_mean = dark_mean;
-    if (white_mean <= black_mean + 18U) {
+    if (white_mean <= black_mean + 18U)
+    {
         return false;
     }
 
@@ -1377,13 +1443,15 @@ static bool at_decode_with_quad(const uint8_t *gray,
     for (uint32_t i = 0; i < AT_GRID_SIZE; i++) {
         border_dark += (cells[0][i] < threshold);
         border_dark += (cells[AT_GRID_SIZE - 1U][i] < threshold);
-        if (i > 0U && i < (AT_GRID_SIZE - 1U)) {
+        if (i > 0U && i < (AT_GRID_SIZE - 1U))
+        {
             border_dark += (cells[i][0] < threshold);
             border_dark += (cells[i][AT_GRID_SIZE - 1U] < threshold);
         }
     }
     uint8_t border_pct = (uint8_t)((border_dark * 100U) / AT_RING_CELLS);
-    if (border_pct < 85U) {
+    if (border_pct < 85U)
+    {
         return false;
     }
 
@@ -1421,16 +1489,19 @@ static bool at_decode_with_quad(const uint8_t *gray,
                 /*
                  * 记录所有尝试中的全局最佳匹配。
                  */
-                if (local_h < best_hamming) {
+                if (local_h < best_hamming)
+                {
                     best_hamming = local_h;
                     best_id = local_id;
                     best_rot = rot;
-                    if (best_hamming == 0U) {
+                    if (best_hamming == 0U)
+                    {
                         break;
                     }
                 }
             }
-            if (best_hamming == 0U) {
+            if (best_hamming == 0U)
+            {
                 break;
             }
         }
@@ -1442,7 +1513,8 @@ static bool at_decode_with_quad(const uint8_t *gray,
         at_rotate_bits_cw(bits_rot, bits_tmp);
         memcpy(bits_rot, bits_tmp, sizeof(bits_rot));
     }
-    if (best_hamming > AT_MAX_HAMMING) {
+    if (best_hamming > AT_MAX_HAMMING)
+    {
         return false;
     }
 
@@ -1488,6 +1560,11 @@ static bool at_decode_with_quad(const uint8_t *gray,
                                      cand->tr.x - cand->tl.x) * (180.0f / (float)M_PI);
     return true;
 }
+
+/* -------------------------------------------------------------------------- */
+/* 公开接口                                                                  */
+/* -------------------------------------------------------------------------- */
+
 /*
  * 初始化 AprilTag 模块所需的工作缓冲区，例如二值图、访问标记和 BFS 队列。
  */
@@ -1497,7 +1574,8 @@ esp_err_t app_apriltag_init(void)
     s_binary = (uint8_t *)heap_caps_malloc(AT_MAX_PIXELS, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     s_visited = (uint8_t *)heap_caps_malloc(AT_MAX_PIXELS, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     s_queue = (uint32_t *)heap_caps_malloc(sizeof(uint32_t) * AT_MAX_PIXELS, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (s_binary == NULL || s_visited == NULL || s_queue == NULL) {
+    if (s_binary == NULL || s_visited == NULL || s_queue == NULL)
+    {
 
         if (s_binary) heap_caps_free(s_binary);
 
@@ -1547,7 +1625,8 @@ bool app_apriltag_detect_tag36h11(const uint8_t *gray,
      */
     at_candidate_t cands[AT_MAX_CANDIDATES] = {0};
     int cand_count = at_collect_candidates(width, height, cands);
-    if (cand_count <= 0) {
+    if (cand_count <= 0)
+    {
         return false;
     }
 
@@ -1560,10 +1639,12 @@ bool app_apriltag_detect_tag36h11(const uint8_t *gray,
         /*
          * 贴边或过大的候选在最终解码前再过滤一次。
          */
-        if (at_candidate_touch_edge(&cands[i], width, height, AT_EDGE_MARGIN)) {
+        if (at_candidate_touch_edge(&cands[i], width, height, AT_EDGE_MARGIN))
+        {
             continue;
         }
-        if (at_candidate_too_large(&cands[i], width, height)) {
+        if (at_candidate_too_large(&cands[i], width, height))
+        {
             continue;
         }
         app_apriltag_result_t cur;
@@ -1578,12 +1659,14 @@ bool app_apriltag_detect_tag36h11(const uint8_t *gray,
          */
         if (!found || cur.hamming < best.hamming ||
             (cur.hamming == best.hamming && cur.border_dark_pct > best.border_dark_pct) ||
-            (cur.hamming == best.hamming && cur.border_dark_pct == best.border_dark_pct && cur.area > best.area)) {
+            (cur.hamming == best.hamming && cur.border_dark_pct == best.border_dark_pct && cur.area > best.area))
+        {
             best = cur;
             found = true;
         }
     }
-    if (!found) {
+    if (!found)
+    {
         return false;
     }
 

@@ -14,6 +14,10 @@
 #include "bsp/esp-bsp.h"
 #include "app_ui.h"
 
+/* -------------------------------------------------------------------------- */
+/* 抓拍存储和图像格式                                            */
+/* -------------------------------------------------------------------------- */
+
 #define CAPTURE_ROOT_DIR            BSP_SD_MOUNT_POINT "/CAP"
 #define CAPTURE_DRONE_DIR           CAPTURE_ROOT_DIR "/DRONE"
 #define CAPTURE_NO_DRONE_DIR        CAPTURE_ROOT_DIR "/NODRONE"
@@ -28,10 +32,14 @@
 #define CAPTURE_TASK_CORE_ID        1
 #define CAPTURE_MAX_INDEX           99999U
 
+/* -------------------------------------------------------------------------- */
+/* 运行状态                                                               */
+/* -------------------------------------------------------------------------- */
+
 typedef struct {
-    uint8_t *bgr;
-    uint32_t image_index;
-    app_ai_capture_mode_t mode;
+    uint8_t *bgr;                  /* 下采样后的 BGR 像素缓冲，用于写 BMP 文件。 */
+    uint32_t image_index;          /* 当前抓拍文件序号，用于生成 IMGxxxxx.BMP 文件名。 */
+    app_ai_capture_mode_t mode;    /* 本次抓拍所属类别：有无人机或无无人机。 */
 } app_ai_capture_slot_t;
 
 static const char *TAG = "app_ai_capture";
@@ -50,6 +58,10 @@ static QueueHandle_t s_free_queue = NULL;
 static QueueHandle_t s_write_queue = NULL;
 static app_ai_capture_slot_t s_slots[CAPTURE_SLOT_COUNT] = {0};
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
+
+/* -------------------------------------------------------------------------- */
+/* 像素和 BMP 字节辅助函数                                                  */
+/* -------------------------------------------------------------------------- */
 
 static inline uint8_t app_ai_capture_rgb565_r(uint16_t pixel)
 {
@@ -88,6 +100,54 @@ static void app_ai_capture_put_le_i32(uint8_t *dst, int32_t value)
     app_ai_capture_put_le32(dst, (uint32_t)value);
 }
 
+static void app_ai_capture_calc_center_crop(uint32_t src_width,
+                                            uint32_t src_height,
+                                            uint32_t dst_width,
+                                            uint32_t dst_height,
+                                            uint32_t *crop_x,
+                                            uint32_t *crop_y,
+                                            uint32_t *crop_w,
+                                            uint32_t *crop_h)
+{
+    uint32_t x = 0;
+    uint32_t y = 0;
+    uint32_t w = src_width;
+    uint32_t h = src_height;
+
+    if (src_width == 0U || src_height == 0U || dst_width == 0U || dst_height == 0U)
+    {
+        w = 0;
+        h = 0;
+    }
+    else if (((uint64_t)src_width * dst_height) > ((uint64_t)src_height * dst_width))
+    {
+        w = (uint32_t)(((uint64_t)src_height * dst_width) / dst_height);
+        if (w == 0U || w > src_width)
+        {
+            w = src_width;
+        }
+        x = (src_width - w) / 2U;
+    }
+    else if (((uint64_t)src_width * dst_height) < ((uint64_t)src_height * dst_width))
+    {
+        h = (uint32_t)(((uint64_t)src_width * dst_height) / dst_width);
+        if (h == 0U || h > src_height)
+        {
+            h = src_height;
+        }
+        y = (src_height - h) / 2U;
+    }
+
+    if (crop_x) *crop_x = x;
+    if (crop_y) *crop_y = y;
+    if (crop_w) *crop_w = w;
+    if (crop_h) *crop_h = h;
+}
+
+/* -------------------------------------------------------------------------- */
+/* 模式、状态和存储辅助函数                                           */
+/* -------------------------------------------------------------------------- */
+
 const char *app_ai_capture_mode_label(app_ai_capture_mode_t mode)
 {
     switch (mode) {
@@ -112,22 +172,26 @@ static const char *app_ai_capture_mode_dir(app_ai_capture_mode_t mode)
 
 static bool app_ai_capture_parse_image_name(const char *name, uint32_t *out_index)
 {
-    if (name == NULL || out_index == NULL || strlen(name) != 12U) {
+    if (name == NULL || out_index == NULL || strlen(name) != 12U)
+    {
         return false;
     }
     if (name[0] != 'I' || name[1] != 'M' || name[2] != 'G' ||
-        name[8] != '.' || name[9] != 'B' || name[10] != 'M' || name[11] != 'P') {
+        name[8] != '.' || name[9] != 'B' || name[10] != 'M' || name[11] != 'P')
+    {
         return false;
     }
 
     uint32_t value = 0;
     for (int i = 3; i < 8; i++) {
-        if (name[i] < '0' || name[i] > '9') {
+        if (name[i] < '0' || name[i] > '9')
+        {
             return false;
         }
         value = (value * 10U) + (uint32_t)(name[i] - '0');
     }
-    if (value == 0 || value > CAPTURE_MAX_INDEX) {
+    if (value == 0 || value > CAPTURE_MAX_INDEX)
+    {
         return false;
     }
     *out_index = value;
@@ -138,20 +202,23 @@ static uint32_t app_ai_capture_find_next_index(const char *dir_path)
 {
     uint32_t max_index = 0;
     DIR *dir = opendir(dir_path);
-    if (dir == NULL) {
+    if (dir == NULL)
+    {
         return 1;
     }
 
     struct dirent *ent = NULL;
     while ((ent = readdir(dir)) != NULL) {
         uint32_t index = 0;
-        if (app_ai_capture_parse_image_name(ent->d_name, &index) && index > max_index) {
+        if (app_ai_capture_parse_image_name(ent->d_name, &index) && index > max_index)
+        {
             max_index = index;
         }
     }
     closedir(dir);
 
-    if (max_index >= CAPTURE_MAX_INDEX) {
+    if (max_index >= CAPTURE_MAX_INDEX)
+    {
         return CAPTURE_MAX_INDEX;
     }
     return max_index + 1U;
@@ -159,7 +226,8 @@ static uint32_t app_ai_capture_find_next_index(const char *dir_path)
 
 static void app_ai_capture_set_status(const char *status)
 {
-    if (status != NULL) {
+    if (status != NULL)
+    {
         app_ui_set_capture_text(status);
         app_ui_set_vision_text(status);
     }
@@ -178,14 +246,17 @@ static void app_ai_capture_format_status(const char *state)
     dropped = s_drop_count[mode];
     taskEXIT_CRITICAL(&s_mux);
 
-    if (dropped == 0) {
+    if (dropped == 0)
+    {
         snprintf(text,
                  sizeof(text),
                  "cap:%s %s #%lu",
                  app_ai_capture_mode_label(mode),
                  state != NULL ? state : "-",
                  (unsigned long)saved);
-    } else {
+    }
+    else
+    {
         snprintf(text,
                  sizeof(text),
                  "cap:%s %s #%lu drop:%lu",
@@ -199,21 +270,25 @@ static void app_ai_capture_format_status(const char *state)
 
 static esp_err_t app_ai_capture_prepare_storage(void)
 {
-    if (s_sd_ready) {
+    if (s_sd_ready)
+    {
         return ESP_OK;
     }
 
     esp_err_t ret = bsp_sdcard_mount();
-    if (ret == ESP_ERR_INVALID_STATE) {
+    if (ret == ESP_ERR_INVALID_STATE)
+    {
         ret = ESP_OK;
     }
-    if (ret != ESP_OK) {
+    if (ret != ESP_OK)
+    {
         ESP_LOGW(TAG, "sd mount failed: %s", esp_err_to_name(ret));
         app_ai_capture_set_status("cap: sd fail");
         return ret;
     }
 
-    if (mkdir(CAPTURE_ROOT_DIR, 0775) != 0 && errno != EEXIST) {
+    if (mkdir(CAPTURE_ROOT_DIR, 0775) != 0 && errno != EEXIST)
+    {
         ret = ESP_FAIL;
         ESP_LOGW(TAG, "mkdir %s failed, errno=%d", CAPTURE_ROOT_DIR, errno);
         app_ai_capture_set_status("cap: mkdir fail");
@@ -222,7 +297,8 @@ static esp_err_t app_ai_capture_prepare_storage(void)
 
     for (int i = 0; i < APP_AI_CAPTURE_MODE_COUNT; i++) {
         const char *dir_path = app_ai_capture_mode_dir((app_ai_capture_mode_t)i);
-        if (mkdir(dir_path, 0775) != 0 && errno != EEXIST) {
+        if (mkdir(dir_path, 0775) != 0 && errno != EEXIST)
+        {
             ret = ESP_FAIL;
             ESP_LOGW(TAG, "mkdir %s failed, errno=%d", dir_path, errno);
             app_ai_capture_set_status("cap: mkdir fail");
@@ -241,22 +317,42 @@ static esp_err_t app_ai_capture_prepare_storage(void)
     return ESP_OK;
 }
 
+/* -------------------------------------------------------------------------- */
+/* 图像转换和文件写入                                           */
+/* -------------------------------------------------------------------------- */
+
 static void app_ai_capture_downsample_rgb565_to_bgr(const uint8_t *rgb565,
                                                     uint32_t src_width,
                                                     uint32_t src_height,
                                                     uint8_t *dst_bgr)
 {
     const uint16_t *src = (const uint16_t *)rgb565;
+    uint32_t crop_x = 0;
+    uint32_t crop_y = 0;
+    uint32_t crop_w = src_width;
+    uint32_t crop_h = src_height;
+    app_ai_capture_calc_center_crop(src_width,
+                                    src_height,
+                                    CAPTURE_WIDTH,
+                                    CAPTURE_HEIGHT,
+                                    &crop_x,
+                                    &crop_y,
+                                    &crop_w,
+                                    &crop_h);
     for (uint32_t y = 0; y < CAPTURE_HEIGHT; y++) {
-        uint32_t sy = (y * src_height) / CAPTURE_HEIGHT;
-        if (sy >= src_height) {
+        uint32_t sy = crop_y +
+                      (uint32_t)((((uint64_t)(2U * y + 1U)) * crop_h) / (2U * CAPTURE_HEIGHT));
+        if (sy >= src_height)
+        {
             sy = src_height - 1U;
         }
         const uint16_t *src_row = src + ((size_t)sy * src_width);
         uint8_t *dst_row = dst_bgr + ((size_t)y * CAPTURE_WIDTH * CAPTURE_CHANNELS);
         for (uint32_t x = 0; x < CAPTURE_WIDTH; x++) {
-            uint32_t sx = (x * src_width) / CAPTURE_WIDTH;
-            if (sx >= src_width) {
+            uint32_t sx = crop_x +
+                          (uint32_t)((((uint64_t)(2U * x + 1U)) * crop_w) / (2U * CAPTURE_WIDTH));
+            if (sx >= src_width)
+            {
                 sx = src_width - 1U;
             }
             uint16_t pixel = src_row[sx];
@@ -270,10 +366,12 @@ static void app_ai_capture_downsample_rgb565_to_bgr(const uint8_t *rgb565,
 
 static esp_err_t app_ai_capture_write_bmp(const app_ai_capture_slot_t *slot)
 {
-    if (slot == NULL || slot->bgr == NULL) {
+    if (slot == NULL || slot->bgr == NULL)
+    {
         return ESP_ERR_INVALID_ARG;
     }
-    if (slot->image_index > CAPTURE_MAX_INDEX) {
+    if (slot->image_index > CAPTURE_MAX_INDEX)
+    {
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -285,7 +383,8 @@ static esp_err_t app_ai_capture_write_bmp(const app_ai_capture_slot_t *slot)
              (unsigned long)slot->image_index);
 
     FILE *file = fopen(path, "wb");
-    if (file == NULL) {
+    if (file == NULL)
+    {
         ESP_LOGW(TAG, "open %s failed, errno=%d", path, errno);
         return ESP_FAIL;
     }
@@ -306,41 +405,55 @@ static esp_err_t app_ai_capture_write_bmp(const app_ai_capture_slot_t *slot)
     app_ai_capture_put_le32(&header[34], image_bytes);
 
     esp_err_t ret = ESP_OK;
-    if (fwrite(header, 1, sizeof(header), file) != sizeof(header)) {
+    if (fwrite(header, 1, sizeof(header), file) != sizeof(header))
+    {
         ret = ESP_FAIL;
     }
 
-    if (ret == ESP_OK && fwrite(slot->bgr, 1, image_bytes, file) != image_bytes) {
+    if (ret == ESP_OK && fwrite(slot->bgr, 1, image_bytes, file) != image_bytes)
+    {
         ret = ESP_FAIL;
     }
 
-    if (fclose(file) != 0 && ret == ESP_OK) {
+    if (fclose(file) != 0 && ret == ESP_OK)
+    {
         ret = ESP_FAIL;
     }
 
-    if (ret == ESP_OK) {
+    if (ret == ESP_OK)
+    {
         ESP_LOGD(TAG, "saved %s", path);
-    } else {
+    }
+    else
+    {
         ESP_LOGW(TAG, "write %s failed", path);
     }
     return ret;
 }
+
+/* -------------------------------------------------------------------------- */
+/* 写入任务和公开接口                                                  */
+/* -------------------------------------------------------------------------- */
 
 static void app_ai_capture_writer_task(void *arg)
 {
     (void)arg;
     while (1) {
         app_ai_capture_slot_t *slot = NULL;
-        if (xQueueReceive(s_write_queue, &slot, portMAX_DELAY) != pdTRUE || slot == NULL) {
+        if (xQueueReceive(s_write_queue, &slot, portMAX_DELAY) != pdTRUE || slot == NULL)
+        {
             continue;
         }
 
         esp_err_t ret = app_ai_capture_write_bmp(slot);
 
         taskENTER_CRITICAL(&s_mux);
-        if (ret == ESP_OK) {
+        if (ret == ESP_OK)
+        {
             s_saved_count[slot->mode]++;
-        } else {
+        }
+        else
+        {
             s_drop_count[slot->mode]++;
         }
         taskEXIT_CRITICAL(&s_mux);
@@ -352,23 +465,27 @@ static void app_ai_capture_writer_task(void *arg)
 
 esp_err_t app_ai_capture_init(void)
 {
-    if (s_inited) {
+    if (s_inited)
+    {
         return ESP_OK;
     }
 
     s_free_queue = xQueueCreate(CAPTURE_SLOT_COUNT, sizeof(app_ai_capture_slot_t *));
     s_write_queue = xQueueCreate(CAPTURE_SLOT_COUNT, sizeof(app_ai_capture_slot_t *));
-    if (s_free_queue == NULL || s_write_queue == NULL) {
+    if (s_free_queue == NULL || s_write_queue == NULL)
+    {
         return ESP_ERR_NO_MEM;
     }
 
     for (int i = 0; i < CAPTURE_SLOT_COUNT; i++) {
         s_slots[i].bgr = heap_caps_malloc(CAPTURE_FRAME_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (s_slots[i].bgr == NULL) {
+        if (s_slots[i].bgr == NULL)
+        {
             return ESP_ERR_NO_MEM;
         }
         app_ai_capture_slot_t *slot = &s_slots[i];
-        if (xQueueSend(s_free_queue, &slot, 0) != pdTRUE) {
+        if (xQueueSend(s_free_queue, &slot, 0) != pdTRUE)
+        {
             return ESP_FAIL;
         }
     }
@@ -380,7 +497,8 @@ esp_err_t app_ai_capture_init(void)
                                             CAPTURE_TASK_PRIORITY,
                                             &s_writer_task,
                                             CAPTURE_TASK_CORE_ID);
-    if (ok != pdPASS) {
+    if (ok != pdPASS)
+    {
         s_writer_task = NULL;
         return ESP_FAIL;
     }
@@ -393,12 +511,14 @@ esp_err_t app_ai_capture_init(void)
 
 esp_err_t app_ai_capture_start(void)
 {
-    if (!s_inited) {
+    if (!s_inited)
+    {
         return ESP_ERR_INVALID_STATE;
     }
 
     esp_err_t ret = app_ai_capture_prepare_storage();
-    if (ret != ESP_OK) {
+    if (ret != ESP_OK)
+    {
         return ret;
     }
 
@@ -426,7 +546,8 @@ void app_ai_capture_stop(void)
 
 esp_err_t app_ai_capture_set_mode(app_ai_capture_mode_t mode)
 {
-    if ((int)mode < 0 || mode >= APP_AI_CAPTURE_MODE_COUNT) {
+    if ((int)mode < 0 || mode >= APP_AI_CAPTURE_MODE_COUNT)
+    {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -479,16 +600,21 @@ bool app_ai_capture_should_capture_frame(void)
     sd_ready = s_sd_ready;
     taskEXIT_CRITICAL(&s_mux);
 
-    if (active && sd_ready) {
-        if (s_free_queue != NULL && uxQueueMessagesWaiting(s_free_queue) == 0) {
+    if (active && sd_ready)
+    {
+        if (s_free_queue != NULL && uxQueueMessagesWaiting(s_free_queue) == 0)
+        {
             taskENTER_CRITICAL(&s_mux);
             s_wait_count++;
             s_frame_skip = 0;
             taskEXIT_CRITICAL(&s_mux);
-        } else {
+        }
+        else
+        {
             taskENTER_CRITICAL(&s_mux);
             s_frame_skip++;
-            if (s_frame_skip >= CAPTURE_FRAME_INTERVAL) {
+            if (s_frame_skip >= CAPTURE_FRAME_INTERVAL)
+            {
                 s_frame_skip = 0;
                 capture = true;
             }
@@ -504,16 +630,19 @@ esp_err_t app_ai_capture_submit_frame(const uint8_t *rgb565,
                                       uint32_t height,
                                       size_t len)
 {
-    if (rgb565 == NULL || width == 0 || height == 0) {
+    if (rgb565 == NULL || width == 0 || height == 0)
+    {
         return ESP_ERR_INVALID_ARG;
     }
     const size_t min_len = (size_t)width * (size_t)height * 2U;
-    if (len < min_len) {
+    if (len < min_len)
+    {
         return ESP_ERR_INVALID_SIZE;
     }
 
     app_ai_capture_slot_t *slot = NULL;
-    if (xQueueReceive(s_free_queue, &slot, 0) != pdTRUE || slot == NULL) {
+    if (xQueueReceive(s_free_queue, &slot, 0) != pdTRUE || slot == NULL)
+    {
         taskENTER_CRITICAL(&s_mux);
         s_wait_count++;
         taskEXIT_CRITICAL(&s_mux);
@@ -524,14 +653,16 @@ esp_err_t app_ai_capture_submit_frame(const uint8_t *rgb565,
     taskENTER_CRITICAL(&s_mux);
     slot->mode = s_mode;
     slot->image_index = s_next_index[slot->mode];
-    if (s_next_index[slot->mode] < CAPTURE_MAX_INDEX) {
+    if (s_next_index[slot->mode] < CAPTURE_MAX_INDEX)
+    {
         s_next_index[slot->mode]++;
     }
     taskEXIT_CRITICAL(&s_mux);
 
     app_ai_capture_downsample_rgb565_to_bgr(rgb565, width, height, slot->bgr);
 
-    if (xQueueSend(s_write_queue, &slot, 0) != pdTRUE) {
+    if (xQueueSend(s_write_queue, &slot, 0) != pdTRUE)
+    {
         taskENTER_CRITICAL(&s_mux);
         s_drop_count[slot->mode]++;
         taskEXIT_CRITICAL(&s_mux);

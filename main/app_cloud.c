@@ -35,6 +35,10 @@
 
 static const char *TAG = "app_cloud";
 
+/* -------------------------------------------------------------------------- */
+/* 网络、MQTT 和载荷尺寸                                           */
+/* -------------------------------------------------------------------------- */
+
 #define APP_CLOUD_WIFI_CONNECTED_BIT   BIT0
 #define APP_CLOUD_MQTT_CONNECTED_BIT   BIT1
 #define APP_CLOUD_START_MQTT_BIT       BIT2
@@ -43,69 +47,86 @@ static const char *TAG = "app_cloud";
 #define APP_CLOUD_TOPIC_BUF_LEN        192
 #define APP_CLOUD_JSON_BUF_LEN         512
 #define APP_CLOUD_CMD_PAYLOAD_LEN      256
+
+/* -------------------------------------------------------------------------- */
+/* 运行状态                                                               */
+/* -------------------------------------------------------------------------- */
+
 typedef struct {
-    char cmd[24];
-    uint16_t target_id;
-    char request_id[32];
+    char cmd[24];           /* 云端下发的命令名称。 */
+    uint16_t target_id;     /* 命令携带的目标 tag ID。 */
+    char request_id[32];    /* 云端请求 ID，用于应答消息关联。 */
 } app_cloud_cmd_t;
 typedef struct {
-    bool inited;
-    bool mqtt_started;
-    bool mqtt_connected;
-    bool have_last_snapshot;
-    uint32_t msg_seq;
-    EventGroupHandle_t event_group;
-    esp_netif_t *sta_netif;
-    esp_mqtt_client_handle_t mqtt_client;
-    app_task_snapshot_t last_snapshot;
-    char current_request_id[32];
-    char topic_cmd[APP_CLOUD_TOPIC_BUF_LEN];
-    char topic_ack[APP_CLOUD_TOPIC_BUF_LEN];
-    char topic_state[APP_CLOUD_TOPIC_BUF_LEN];
+    bool inited;                                      /* 云端模块是否完成初始化。 */
+    bool mqtt_started;                                /* MQTT 客户端是否已经启动。 */
+    bool mqtt_connected;                              /* MQTT 当前是否已连接。 */
+    bool have_last_snapshot;                          /* 是否缓存了最近一次任务快照。 */
+    uint32_t msg_seq;                                 /* 发布状态消息时递增的本地序号。 */
+    EventGroupHandle_t event_group;                   /* Wi-Fi/MQTT 状态同步事件组。 */
+    esp_netif_t *sta_netif;                           /* Wi-Fi STA 网络接口句柄。 */
+    esp_mqtt_client_handle_t mqtt_client;             /* MQTT 客户端句柄。 */
+    app_task_snapshot_t last_snapshot;                /* 最近一次任务状态快照。 */
+    char current_request_id[32];                      /* 当前正在处理的云端请求 ID。 */
+    char topic_cmd[APP_CLOUD_TOPIC_BUF_LEN];          /* 订阅云端命令的 topic。 */
+    char topic_ack[APP_CLOUD_TOPIC_BUF_LEN];          /* 发布命令应答的 topic。 */
+    char topic_state[APP_CLOUD_TOPIC_BUF_LEN];        /* 发布任务状态的 topic。 */
 } app_cloud_runtime_t;
 static app_cloud_runtime_t s_cloud = {0};
 static TaskHandle_t s_cloud_task = NULL;
+
 static void app_cloud_mqtt_event_handler(void *handler_args,
     esp_event_base_t base,
     int32_t event_id,
     void *event_data);
+
+/* -------------------------------------------------------------------------- */
+/* JSON 小工具                                                          */
+/* -------------------------------------------------------------------------- */
+
 static bool app_cloud_json_get_string(const char *json,
     const char *key,
     char *out,
     size_t out_size)
 {
-    if (json == NULL || key == NULL || out == NULL || out_size == 0U) {
+    if (json == NULL || key == NULL || out == NULL || out_size == 0U)
+    {
         return false;
     }
     char pattern[48];
     snprintf(pattern, sizeof(pattern), "\"%s\"", key);
     const char *p = strstr(json, pattern);
-    if (p == NULL) {
+    if (p == NULL)
+    {
         return false;
     }
     p += strlen(pattern);
     while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') {
         p++;
     }
-    if (*p != ':') {
+    if (*p != ':')
+    {
         return false;
     }
     p++;
     while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') {
         p++;
     }
-    if (*p != '"') {
+    if (*p != '"')
+    {
         return false;
     }
     p++;
     size_t i = 0;
     while (*p != '\0' && *p != '"' && i + 1U < out_size) {
-        if (*p == '\\' && p[1] != '\0') {
+        if (*p == '\\' && p[1] != '\0')
+        {
             p++;
         }
         out[i++] = *p++;
     }
-    if (*p != '"') {
+    if (*p != '"')
+    {
         return false;
     }
     out[i] = '\0';
@@ -115,33 +136,38 @@ static bool app_cloud_json_get_u16(const char *json,
     const char *key,
     uint16_t *out)
 {
-    if (json == NULL || key == NULL || out == NULL) {
+    if (json == NULL || key == NULL || out == NULL)
+    {
         return false;
     }
     char pattern[48];
     snprintf(pattern, sizeof(pattern), "\"%s\"", key);
     const char *p = strstr(json, pattern);
-    if (p == NULL) {
+    if (p == NULL)
+    {
         return false;
     }
     p += strlen(pattern);
     while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') {
         p++;
     }
-    if (*p != ':') {
+    if (*p != ':')
+    {
         return false;
     }
     p++;
     while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') {
         p++;
     }
-    if (!isdigit((unsigned char)*p)) {
+    if (!isdigit((unsigned char)*p))
+    {
         return false;
     }
     unsigned value = 0U;
     while (isdigit((unsigned char)*p)) {
         value = value * 10U + (unsigned)(*p - '0');
-        if (value > UINT16_MAX) {
+        if (value > UINT16_MAX)
+        {
             return false;
         }
         p++;
@@ -151,12 +177,14 @@ static bool app_cloud_json_get_u16(const char *json,
 }
 static esp_err_t app_cloud_parse_command_json(const char *payload, app_cloud_cmd_t *out)
 {
-    if (payload == NULL || out == NULL) {
+    if (payload == NULL || out == NULL)
+    {
 
         return ESP_ERR_INVALID_ARG;
     }
     memset(out, 0, sizeof(*out));
-    if (!app_cloud_json_get_string(payload, "cmd", out->cmd, sizeof(out->cmd))) {
+    if (!app_cloud_json_get_string(payload, "cmd", out->cmd, sizeof(out->cmd)))
+    {
 
         return ESP_ERR_INVALID_ARG;
     }
@@ -164,10 +192,16 @@ static esp_err_t app_cloud_parse_command_json(const char *payload, app_cloud_cmd
     (void)app_cloud_json_get_string(payload, "request_id", out->request_id, sizeof(out->request_id));
     return ESP_OK;
 }
+
+/* -------------------------------------------------------------------------- */
+/* Wi-Fi / MQTT 初始化辅助函数                                                  */
+/* -------------------------------------------------------------------------- */
+
 static esp_err_t app_cloud_init_netif_once(void)
 {
     esp_err_t ret = esp_netif_init();
-    if (ret == ESP_ERR_INVALID_STATE) {
+    if (ret == ESP_ERR_INVALID_STATE)
+    {
         return ESP_OK;
     }
     return ret;
@@ -175,7 +209,8 @@ static esp_err_t app_cloud_init_netif_once(void)
 static esp_err_t app_cloud_init_event_loop_once(void)
 {
     esp_err_t ret = esp_event_loop_create_default();
-    if (ret == ESP_ERR_INVALID_STATE) {
+    if (ret == ESP_ERR_INVALID_STATE)
+    {
         return ESP_OK;
     }
     return ret;
@@ -208,51 +243,66 @@ static void app_cloud_log_topics_once(void)
 }
 static esp_err_t app_cloud_validate_config(void)
 {
-    if (CONFIG_SKY_WIFI_SSID[0] == '\0') {
+    if (CONFIG_SKY_WIFI_SSID[0] == '\0')
+    {
         ESP_LOGE(TAG, "CONFIG_SKY_WIFI_SSID is empty, please set it in menuconfig");
         return ESP_ERR_INVALID_STATE;
     }
-    if (CONFIG_SKY_MQTT_BROKER_URI[0] == '\0') {
+    if (CONFIG_SKY_MQTT_BROKER_URI[0] == '\0')
+    {
         ESP_LOGE(TAG, "CONFIG_SKY_MQTT_BROKER_URI is empty");
         return ESP_ERR_INVALID_STATE;
     }
-    if (CONFIG_SKY_MQTT_CLIENT_ID[0] == '\0') {
+    if (CONFIG_SKY_MQTT_CLIENT_ID[0] == '\0')
+    {
         ESP_LOGE(TAG, "CONFIG_SKY_MQTT_CLIENT_ID is empty");
         return ESP_ERR_INVALID_STATE;
     }
-    if (CONFIG_SKY_MQTT_DEVICE_NAME[0] == '\0') {
+    if (CONFIG_SKY_MQTT_DEVICE_NAME[0] == '\0')
+    {
         ESP_LOGE(TAG, "CONFIG_SKY_MQTT_DEVICE_NAME is empty");
         return ESP_ERR_INVALID_STATE;
     }
-    if (CONFIG_SKY_MQTT_TOPIC_PREFIX[0] == '\0') {
+    if (CONFIG_SKY_MQTT_TOPIC_PREFIX[0] == '\0')
+    {
         ESP_LOGE(TAG, "CONFIG_SKY_MQTT_TOPIC_PREFIX is empty");
         return ESP_ERR_INVALID_STATE;
     }
-    if (strlen(CONFIG_SKY_WIFI_SSID) >= sizeof(((wifi_config_t *)0)->sta.ssid)) {
+    if (strlen(CONFIG_SKY_WIFI_SSID) >= sizeof(((wifi_config_t *)0)->sta.ssid))
+    {
         ESP_LOGE(TAG, "Wi-Fi SSID too long");
         return ESP_ERR_INVALID_SIZE;
     }
-    if (strlen(CONFIG_SKY_WIFI_PASSWORD) >= sizeof(((wifi_config_t *)0)->sta.password)) {
+    if (strlen(CONFIG_SKY_WIFI_PASSWORD) >= sizeof(((wifi_config_t *)0)->sta.password))
+    {
         ESP_LOGE(TAG, "Wi-Fi password too long");
         return ESP_ERR_INVALID_SIZE;
     }
     return ESP_OK;
 }
+
+/* -------------------------------------------------------------------------- */
+/* 发布辅助函数                                                             */
+/* -------------------------------------------------------------------------- */
+
 static esp_err_t app_cloud_publish_raw(const char *topic,
     const char *payload,
     int qos,
     int retain)
 {
-    if (topic == NULL || payload == NULL) {
+    if (topic == NULL || payload == NULL)
+    {
 
         return ESP_ERR_INVALID_ARG;
     }
-    if (s_cloud.mqtt_client == NULL || !s_cloud.mqtt_connected) {
+    if (s_cloud.mqtt_client == NULL || !s_cloud.mqtt_connected)
+    {
         return ESP_ERR_INVALID_STATE;
     }
 
     int msg_id = esp_mqtt_client_publish(s_cloud.mqtt_client, topic, payload, 0, qos, retain);
-    if (msg_id < 0) {
+    if (msg_id < 0)
+    {
         ESP_LOGW(TAG, "mqtt publish failed, topic=%s", topic);
         return ESP_FAIL;
     }
@@ -264,7 +314,8 @@ static esp_err_t app_cloud_publish_ack(const app_cloud_cmd_t *cmd,
     const char *msg,
     uint16_t target_id)
 {
-    if (cmd == NULL) {
+    if (cmd == NULL)
+    {
 
         return ESP_ERR_INVALID_ARG;
     }
@@ -287,7 +338,8 @@ static esp_err_t app_cloud_publish_ack(const app_cloud_cmd_t *cmd,
 }
 static void app_cloud_publish_task_snapshot_internal(const app_task_snapshot_t *snap)
 {
-    if (snap == NULL) {
+    if (snap == NULL)
+    {
         return;
     }
     uint32_t seq = ++s_cloud.msg_seq;
@@ -326,17 +378,24 @@ static void app_cloud_publish_task_snapshot_internal(const app_task_snapshot_t *
         snap->note);
 
     esp_err_t ret = app_cloud_publish_raw(s_cloud.topic_state, json, CONFIG_SKY_MQTT_QOS, 1);
-    if (ret != ESP_OK) {
+    if (ret != ESP_OK)
+    {
         ESP_LOGW(TAG, "task snapshot not sent yet: %s", esp_err_to_name(ret));
     }
 }
+
+/* -------------------------------------------------------------------------- */
+/* 任务和云端命令处理                                             */
+/* -------------------------------------------------------------------------- */
+
 static void app_cloud_on_task_event(app_task_event_t event,
     const app_task_snapshot_t *snap,
     void *user_ctx)
 {
     (void)event;
     (void)user_ctx;
-    if (snap == NULL) {
+    if (snap == NULL)
+    {
         return;
     }
     s_cloud.last_snapshot = *snap;
@@ -345,7 +404,8 @@ static void app_cloud_on_task_event(app_task_event_t event,
 }
 static esp_err_t app_cloud_create_mqtt_client(void)
 {
-    if (s_cloud.mqtt_client != NULL) {
+    if (s_cloud.mqtt_client != NULL)
+    {
         return ESP_OK;
     }
     esp_mqtt_client_config_t mqtt_cfg = {
@@ -363,7 +423,8 @@ static esp_err_t app_cloud_create_mqtt_client(void)
     mqtt_cfg.broker.verification.skip_cert_common_name_check = true;
 #endif
     s_cloud.mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
-    if (s_cloud.mqtt_client == NULL) {
+    if (s_cloud.mqtt_client == NULL)
+    {
 
         ESP_LOGE(TAG, "esp_mqtt_client_init failed");
         return ESP_FAIL;
@@ -372,7 +433,8 @@ static esp_err_t app_cloud_create_mqtt_client(void)
 }
 static void app_cloud_destroy_mqtt_client(void)
 {
-    if (s_cloud.mqtt_client != NULL) {
+    if (s_cloud.mqtt_client != NULL)
+    {
         esp_mqtt_client_destroy(s_cloud.mqtt_client);
         s_cloud.mqtt_client = NULL;
     }
@@ -381,10 +443,12 @@ static void app_cloud_destroy_mqtt_client(void)
 }
 static void app_cloud_start_mqtt_if_needed(void)
 {
-    if (s_cloud.mqtt_client == NULL && app_cloud_create_mqtt_client() != ESP_OK) {
+    if (s_cloud.mqtt_client == NULL && app_cloud_create_mqtt_client() != ESP_OK)
+    {
         return;
     }
-    if (s_cloud.mqtt_client == NULL || s_cloud.mqtt_started) {
+    if (s_cloud.mqtt_client == NULL || s_cloud.mqtt_started)
+    {
         return;
     }
     ESP_ERROR_CHECK(esp_mqtt_client_register_event(s_cloud.mqtt_client,
@@ -403,7 +467,8 @@ static esp_err_t app_cloud_receive_set_target(uint16_t target_id)
 }
 static esp_err_t app_cloud_receive_start_task(const app_cloud_cmd_t *cmd)
 {
-    if (cmd == NULL) {
+    if (cmd == NULL)
+    {
 
         return ESP_ERR_INVALID_ARG;
     }
@@ -416,7 +481,8 @@ static esp_err_t app_cloud_receive_start_task(const app_cloud_cmd_t *cmd)
         (cmd->request_id[0] != '\0') ? cmd->request_id : "-");
 
     esp_err_t ret = app_task_submit_remote_request(cmd->target_id, "emqx");
-    if (ret != ESP_OK) {
+    if (ret != ESP_OK)
+    {
         strlcpy(s_cloud.current_request_id, previous_request_id, sizeof(s_cloud.current_request_id));
     }
     return ret;
@@ -430,19 +496,22 @@ static esp_err_t app_cloud_receive_cancel(void)
 static esp_err_t app_cloud_handle_command(const char *payload, size_t payload_len)
 {
     char json[APP_CLOUD_CMD_PAYLOAD_LEN];
-    if (payload == NULL || payload_len == 0U) {
+    if (payload == NULL || payload_len == 0U)
+    {
 
         return ESP_ERR_INVALID_ARG;
     }
     size_t copy_len = payload_len;
-    if (copy_len >= sizeof(json)) {
+    if (copy_len >= sizeof(json))
+    {
         copy_len = sizeof(json) - 1U;
     }
     memcpy(json, payload, copy_len);
     json[copy_len] = '\0';
     app_cloud_cmd_t cmd = {0};
     esp_err_t ret = app_cloud_parse_command_json(json, &cmd);
-    if (ret != ESP_OK) {
+    if (ret != ESP_OK)
+    {
         ESP_LOGW(TAG, "bad EMQX cmd payload, len=%u", (unsigned)copy_len);
         return ret;
     }
@@ -451,7 +520,8 @@ static esp_err_t app_cloud_handle_command(const char *payload, size_t payload_le
         cmd.cmd,
         (unsigned)cmd.target_id,
         (cmd.request_id[0] != '\0') ? cmd.request_id : "-");
-    if (strcmp(cmd.cmd, "start_task") == 0) {
+    if (strcmp(cmd.cmd, "start_task") == 0)
+    {
         ret = app_cloud_receive_start_task(&cmd);
 
         (void)app_cloud_publish_ack(&cmd,
@@ -460,7 +530,8 @@ static esp_err_t app_cloud_handle_command(const char *payload, size_t payload_le
             cmd.target_id);
         return ret;
     }
-    if (strcmp(cmd.cmd, "set_target") == 0) {
+    if (strcmp(cmd.cmd, "set_target") == 0)
+    {
         ret = app_cloud_receive_set_target(cmd.target_id);
 
         (void)app_cloud_publish_ack(&cmd,
@@ -469,7 +540,8 @@ static esp_err_t app_cloud_handle_command(const char *payload, size_t payload_le
             cmd.target_id);
         return ret;
     }
-    if (strcmp(cmd.cmd, "cancel") == 0) {
+    if (strcmp(cmd.cmd, "cancel") == 0)
+    {
         ret = app_cloud_receive_cancel();
 
         (void)app_cloud_publish_ack(&cmd,
@@ -483,36 +555,54 @@ static esp_err_t app_cloud_handle_command(const char *payload, size_t payload_le
     (void)app_cloud_publish_ack(&cmd, -2, "unknown_cmd", cmd.target_id);
     return ESP_ERR_NOT_SUPPORTED;
 }
+
+static int app_cloud_copy_event_slice(char *dst, size_t dst_size, const char *src, int src_len)
+{
+    if ((dst == NULL) || (dst_size == 0U))
+    {
+        return 0;
+    }
+
+    int copy_len = src_len;
+    if ((src == NULL) || (copy_len < 0))
+    {
+        copy_len = 0;
+    }
+    if ((size_t)copy_len >= dst_size)
+    {
+        copy_len = (int)dst_size - 1;
+    }
+    if (copy_len > 0)
+    {
+        memcpy(dst, src, (size_t)copy_len);
+    }
+    dst[copy_len] = '\0';
+    return copy_len;
+}
+
+/* -------------------------------------------------------------------------- */
+/* MQTT 和 Wi-Fi 事件回调                                              */
+/* -------------------------------------------------------------------------- */
+
 static void app_cloud_handle_mqtt_data_event(esp_mqtt_event_handle_t event)
 {
-    if (event == NULL || event->topic == NULL || event->data == NULL) {
+    if (event == NULL || event->topic == NULL || event->data == NULL)
+    {
         return;
     }
     char topic[APP_CLOUD_TOPIC_BUF_LEN];
     char payload[APP_CLOUD_JSON_BUF_LEN];
-    int topic_len = event->topic_len;
-    int data_len = event->data_len;
 
-    if (topic_len <= 0) {
+    if (event->topic_len <= 0)
+    {
         return;
     }
-    if ((size_t)topic_len >= sizeof(topic)) {
-        topic_len = sizeof(topic) - 1;
-    }
-    memcpy(topic, event->topic, (size_t)topic_len);
-    topic[topic_len] = '\0';
-    if (data_len < 0) {
-        data_len = 0;
-    }
-    if ((size_t)data_len >= sizeof(payload)) {
-        data_len = sizeof(payload) - 1;
-    }
-    if (data_len > 0) {
-        memcpy(payload, event->data, (size_t)data_len);
-    }
-    payload[data_len] = '\0';
+
+    (void)app_cloud_copy_event_slice(topic, sizeof(topic), event->topic, event->topic_len);
+    const int data_len = app_cloud_copy_event_slice(payload, sizeof(payload), event->data, event->data_len);
     ESP_LOGD(TAG, "mqtt rx topic=%s len=%d", topic, data_len);
-    if (strcmp(topic, s_cloud.topic_cmd) == 0) {
+    if (strcmp(topic, s_cloud.topic_cmd) == 0)
+    {
         (void)app_cloud_handle_command(payload, (size_t)data_len);
     }
 }
@@ -525,7 +615,8 @@ static void app_cloud_task(void *arg)
             pdTRUE,
             pdFALSE,
             portMAX_DELAY);
-        if ((bits & APP_CLOUD_START_MQTT_BIT) != 0) {
+        if ((bits & APP_CLOUD_START_MQTT_BIT) != 0)
+        {
             ESP_LOGD(TAG, "cloud task: start mqtt");
             app_cloud_start_mqtt_if_needed();
         }
@@ -537,7 +628,8 @@ static void app_cloud_wifi_event_handler(void *arg,
     void *event_data)
 {
     (void)arg;
-    if (event_base == WIFI_EVENT) {
+    if (event_base == WIFI_EVENT)
+    {
         switch (event_id) {
         case WIFI_EVENT_STA_START:
             ESP_LOGD(TAG, "wifi sta start -> connect");
@@ -564,7 +656,9 @@ static void app_cloud_wifi_event_handler(void *arg,
         default:
             break;
         }
-    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+    }
+    else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP)
+    {
         ESP_LOGI(TAG, "wifi got ip");
 
         xEventGroupSetBits(s_cloud.event_group,
@@ -592,7 +686,8 @@ static void app_cloud_mqtt_event_handler(void *handler_args,
                 CONFIG_SKY_MQTT_QOS);
             ESP_LOGD(TAG, "subscribe sent cmd=%d", sub_cmd);
         }
-        if (s_cloud.have_last_snapshot) {
+        if (s_cloud.have_last_snapshot)
+        {
 
             app_cloud_publish_task_snapshot_internal(&s_cloud.last_snapshot);
         }
@@ -620,16 +715,23 @@ static void app_cloud_mqtt_event_handler(void *handler_args,
         break;
     }
 }
+
+/* -------------------------------------------------------------------------- */
+/* 公开接口                                                                  */
+/* -------------------------------------------------------------------------- */
+
 esp_err_t app_cloud_init(void)
 {
-    if (s_cloud.inited) {
+    if (s_cloud.inited)
+    {
         return ESP_OK;
     }
 
     ESP_RETURN_ON_ERROR(app_cloud_validate_config(), TAG, "invalid network/mqtt config");
 
     s_cloud.event_group = xEventGroupCreate();
-    if (s_cloud.event_group == NULL) {
+    if (s_cloud.event_group == NULL)
+    {
 
         return ESP_ERR_NO_MEM;
     }
@@ -640,7 +742,8 @@ esp_err_t app_cloud_init(void)
     ESP_RETURN_ON_ERROR(app_cloud_init_netif_once(), TAG, "esp_netif_init failed");
     ESP_RETURN_ON_ERROR(app_cloud_init_event_loop_once(), TAG, "event loop init failed");
     s_cloud.sta_netif = esp_netif_create_default_wifi_sta();
-    if (s_cloud.sta_netif == NULL) {
+    if (s_cloud.sta_netif == NULL)
+    {
         ESP_LOGE(TAG, "esp_netif_create_default_wifi_sta failed");
         return ESP_FAIL;
     }
@@ -660,7 +763,8 @@ esp_err_t app_cloud_init(void)
         NULL),
         TAG,
         "register ip event failed");
-    if (s_cloud_task == NULL) {
+    if (s_cloud_task == NULL)
+    {
 
         BaseType_t ok = xTaskCreate(app_cloud_task,
             "app_cloud",
@@ -668,7 +772,8 @@ esp_err_t app_cloud_init(void)
             NULL,
             APP_CLOUD_TASK_PRIORITY,
             &s_cloud_task);
-        if (ok != pdPASS) {
+        if (ok != pdPASS)
+        {
             ESP_LOGE(TAG, "create app_cloud task failed");
 
             return ESP_ERR_NO_MEM;

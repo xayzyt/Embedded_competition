@@ -1,21 +1,8 @@
-/*
- * main.c - SkyAnchor ESP32-P4 应用入口
- *
- * 这个文件只负责启动编排：
- * NVS -> 显示/UI -> CH32 通信 -> 视觉/接驳规则
- * -> 任务/云端/控制 -> 摄像头/预览 -> 就绪状态。
- *
- * 具体功能细节放在各自模块里，例如 app_camera.c、
- * app_vision.c、app_ctrl.c、app_cloud.c、app_dock_judge.c。
- */
-
 #include <stdbool.h>
 #include <stdio.h>
-
 #include "esp_err.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
-
 #include "app_ai_capture.h"
 #include "app_camera.h"
 #include "app_ch32_link.h"
@@ -29,6 +16,10 @@
 
 static const char *TAG = "main";
 
+/* -------------------------------------------------------------------------- */
+/* 接驳默认参数                                                            */
+/* -------------------------------------------------------------------------- */
+
 /* 接驳判定参数集中放在这里，后续调参时不用到处找。 */
 #define APP_TARGET_TAG_ID            (1U)
 #define APP_TAG_SIZE_MM              (100)
@@ -37,11 +28,16 @@ static const char *TAG = "main";
 #define APP_MIN_DISTANCE_MM          (260)
 #define APP_MAX_DISTANCE_MM          (420)
 
+/* -------------------------------------------------------------------------- */
+/* 启动步骤                                                                  */
+/* -------------------------------------------------------------------------- */
+
 static void app_init_nvs(void)
 {
     esp_err_t ret = nvs_flash_init();
 
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
+    {
         ESP_ERROR_CHECK(nvs_flash_erase());
         ret = nvs_flash_init();
     }
@@ -51,12 +47,14 @@ static void app_init_nvs(void)
 
 static bool app_start_display_ui(void)
 {
-    if (!app_display_init()) {
+    if (!app_display_init())
+    {
         ESP_LOGE(TAG, "display init failed");
         return false;
     }
 
-    if (!app_ui_create()) {
+    if (!app_ui_create())
+    {
         ESP_LOGE(TAG, "ui create failed");
         return false;
     }
@@ -83,6 +81,10 @@ static app_dock_judge_config_t app_make_dock_config(void)
 
     return cfg;
 }
+
+/* -------------------------------------------------------------------------- */
+/* 运行时启动流程                                                             */
+/* -------------------------------------------------------------------------- */
 
 static void app_log_dock_config(const app_dock_judge_config_t *cfg)
 {
@@ -119,9 +121,11 @@ static void app_show_ready_status(const app_dock_judge_config_t *dock_cfg)
 {
     char vision_text[64];
 
-    if (dock_cfg->use_distance_gate) {
+    if (dock_cfg->use_distance_gate)
+    {
         app_ui_set_status("task: configured / dist gate on");
-    } else {
+    } else
+    {
         app_ui_set_status("task: configured / z calib");
     }
 
@@ -134,17 +138,16 @@ static void app_show_ready_status(const app_dock_judge_config_t *dock_cfg)
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "==== SkyAnchor AprilTag + CH32 dock chain start ====");
-
     app_init_nvs();
 
-    if (!app_start_display_ui()) {
+    if (!app_start_display_ui())
+    {
         return;
     }
 
     app_dock_judge_config_t dock_cfg = app_make_dock_config();
-    app_log_dock_config(&dock_cfg);
 
+    app_log_dock_config(&dock_cfg);
     app_init_runtime_modules(&dock_cfg);
     app_start_camera_pipeline();
     app_show_ready_status(&dock_cfg);

@@ -18,26 +18,36 @@
 #include "esp_log.h"
 
 static const char *TAG = "app_dock";
+
+/* -------------------------------------------------------------------------- */
+/* 运行状态                                                               */
+/* -------------------------------------------------------------------------- */
+
 typedef struct {
-    bool have_filter;
-    uint16_t last_tag_id;
-    uint8_t ready_pass_count;
-    uint8_t ready_bad_count;
-    uint8_t aligned_pass_count;
-    uint8_t wrong_id_count;
-    uint8_t invalid_hold_count;
-    int32_t filtered_center_x;
-    int32_t filtered_center_y;
-    int32_t filtered_area;
-    int32_t filtered_bbox_w;
-    int32_t filtered_bbox_h;
-    float filtered_edge_px;
-    float filtered_angle_deg;
-    app_dock_state_t last_state;
+    bool have_filter;                   /* EMA 滤波器是否已有历史值。 */
+    uint16_t last_tag_id;               /* 上一次用于滤波的 tag ID。 */
+    uint8_t ready_pass_count;           /* 连续满足 ready 条件的帧数。 */
+    uint8_t ready_bad_count;            /* 连续不满足 ready 条件的帧数。 */
+    uint8_t aligned_pass_count;         /* 连续满足 aligned 条件的帧数。 */
+    uint8_t wrong_id_count;             /* 连续识别到错误 ID 的帧数。 */
+    uint8_t invalid_hold_count;         /* 识别丢失后保留上一状态的帧数。 */
+    int32_t filtered_center_x;          /* 滤波后的目标中心 x 坐标。 */
+    int32_t filtered_center_y;          /* 滤波后的目标中心 y 坐标。 */
+    int32_t filtered_area;              /* 滤波后的目标面积。 */
+    int32_t filtered_bbox_w;            /* 滤波后的外接框宽度。 */
+    int32_t filtered_bbox_h;            /* 滤波后的外接框高度。 */
+    float filtered_edge_px;             /* 滤波后的 tag 边长像素估计。 */
+    float filtered_angle_deg;           /* 滤波后的 tag 顶边角度。 */
+    app_dock_state_t last_state;        /* 上一次输出的接驳判定状态。 */
 } app_dock_judge_runtime_t;
 static app_dock_judge_config_t s_cfg = {0};
 static app_dock_judge_runtime_t s_rt = {0};
 static bool s_inited = false;
+
+/* -------------------------------------------------------------------------- */
+/* 数学和滤波辅助函数                                                  */
+/* -------------------------------------------------------------------------- */
+
 static inline int32_t app_abs_i32(int32_t v)
 {
     return (v >= 0) ? v : -v;
@@ -48,7 +58,8 @@ static inline uint8_t app_sat_inc_u8(uint8_t v)
 }
 static int32_t app_filter_ema_i32(int32_t prev, int32_t sample, uint8_t shift)
 {
-    if (shift == 0U) {
+    if (shift == 0U)
+    {
         return sample;
     }
     int32_t delta = sample - prev;
@@ -57,7 +68,8 @@ static int32_t app_filter_ema_i32(int32_t prev, int32_t sample, uint8_t shift)
 }
 static float app_filter_ema_f32(float prev, float sample, uint8_t shift)
 {
-    if (shift == 0U) {
+    if (shift == 0U)
+    {
         return sample;
     }
     const float alpha = 1.0f / (float)(1U << shift);
@@ -71,7 +83,8 @@ static int32_t app_clip_i32(int32_t v, int32_t lo, int32_t hi)
 }
 static void app_dock_apply_filter(const app_vision_result_t *vision)
 {
-    if (!s_rt.have_filter || (s_rt.last_tag_id != vision->tag_id)) {
+    if (!s_rt.have_filter || (s_rt.last_tag_id != vision->tag_id))
+    {
         s_rt.have_filter = true;
         s_rt.last_tag_id = vision->tag_id;
         s_rt.filtered_center_x = vision->center_x;
@@ -111,7 +124,8 @@ static void app_dock_apply_filter(const app_vision_result_t *vision)
 }
 static int32_t app_dock_estimate_distance_mm(float edge_px)
 {
-    if (edge_px <= 1.0f || s_cfg.focal_length_px <= 1.0f || s_cfg.tag_size_mm <= 0) {
+    if (edge_px <= 1.0f || s_cfg.focal_length_px <= 1.0f || s_cfg.tag_size_mm <= 0)
+    {
         return -1;
     }
     return (int32_t)((s_cfg.focal_length_px * (float)s_cfg.tag_size_mm / edge_px) + 0.5f);
@@ -127,23 +141,32 @@ static uint8_t app_dock_calc_hover_score(const app_dock_judge_result_t *out)
     const int32_t y_den = (s_cfg.center_y_tol > 0) ? (s_cfg.center_y_tol * 2) : 1;
     center_x_score = 100 - app_clip_i32((app_abs_i32(out->dx) * 100) / x_den, 0, 100);
     center_y_score = 100 - app_clip_i32((app_abs_i32(out->dy) * 100) / y_den, 0, 100);
-    if (s_cfg.min_stable_count > 0) {
+    if (s_cfg.min_stable_count > 0)
+    {
         stable_score = app_clip_i32(((int32_t)out->stable_count * 100) / (int32_t)s_cfg.min_stable_count, 0, 100);
     }
-    if (s_cfg.min_area > 0) {
+    if (s_cfg.min_area > 0)
+    {
         near_score = app_clip_i32((out->filtered_area * 100) / s_cfg.min_area, 0, 100);
     }
-    if (out->est_distance_mm > 0) {
-        if (s_cfg.use_distance_gate) {
+    if (out->est_distance_mm > 0)
+    {
+        if (s_cfg.use_distance_gate)
+        {
             if (out->est_distance_mm >= s_cfg.min_distance_mm &&
-                out->est_distance_mm <= s_cfg.max_distance_mm) {
+                out->est_distance_mm <= s_cfg.max_distance_mm)
+            {
                 dist_score = 100;
-            } else {
+            }
+            else
+            {
                 const int32_t target_mid = (s_cfg.min_distance_mm + s_cfg.max_distance_mm) / 2;
                 const int32_t tol = ((s_cfg.max_distance_mm - s_cfg.min_distance_mm) / 2) + 1;
                 dist_score = 100 - app_clip_i32((app_abs_i32(out->est_distance_mm - target_mid) * 100) / tol, 0, 100);
             }
-        } else {
+        }
+        else
+        {
             dist_score = 100;
         }
     }
@@ -152,10 +175,12 @@ static uint8_t app_dock_calc_hover_score(const app_dock_judge_result_t *out)
     + near_score * 20
     + dist_score * 20;
     score /= 100;
-    if (!out->target_id_ok) {
+    if (!out->target_id_ok)
+    {
         score /= 4;
     }
-    if (!out->vision_valid) {
+    if (!out->vision_valid)
+    {
         score = 0;
     }
     return (uint8_t)app_clip_i32(score, 0, 100);
@@ -187,16 +212,22 @@ static void app_dock_fill_result_base(const app_vision_result_t *vision,
     out->invalid_hold_count = s_rt.invalid_hold_count;
     out->est_distance_mm = app_dock_estimate_distance_mm(s_rt.filtered_edge_px);
 }
+
+/* -------------------------------------------------------------------------- */
+/* 公开接口                                                                  */
+/* -------------------------------------------------------------------------- */
+
 void app_dock_judge_get_default_config(app_dock_judge_config_t *out)
 {
-    if (out == NULL) {
+    if (out == NULL)
+    {
         return;
     }
     memset(out, 0, sizeof(*out));
     out->use_target_id = true;
     out->target_tag_id = 1;
-    out->center_x_ref = 120;
-    out->center_y_ref = 90;
+    out->center_x_ref = 160;
+    out->center_y_ref = 120;
     out->center_x_tol = 28;
     out->center_y_tol = 18;
     out->min_area = 2400;
@@ -217,7 +248,8 @@ void app_dock_judge_get_default_config(app_dock_judge_config_t *out)
 }
 esp_err_t app_dock_judge_init(const app_dock_judge_config_t *cfg)
 {
-    if (cfg == NULL) {
+    if (cfg == NULL)
+    {
 
         return ESP_ERR_INVALID_ARG;
     }
@@ -245,7 +277,8 @@ esp_err_t app_dock_judge_init(const app_dock_judge_config_t *cfg)
 }
 esp_err_t app_dock_judge_set_target_id(uint16_t target_tag_id, bool enable_filter)
 {
-    if (!s_inited) {
+    if (!s_inited)
+    {
         return ESP_ERR_INVALID_STATE;
     }
     s_cfg.target_tag_id = target_tag_id;
@@ -269,12 +302,15 @@ void app_dock_judge_reset(void)
 bool app_dock_judge_process(const app_vision_result_t *vision,
     app_dock_judge_result_t *out)
 {
-    if (!s_inited || vision == NULL || out == NULL) {
+    if (!s_inited || vision == NULL || out == NULL)
+    {
         return false;
     }
     memset(out, 0, sizeof(*out));
-    if (!vision->valid) {
-        if (s_rt.invalid_hold_count < s_cfg.lost_hold_frames) {
+    if (!vision->valid)
+    {
+        if (s_rt.invalid_hold_count < s_cfg.lost_hold_frames)
+        {
             s_rt.invalid_hold_count++;
         }
         s_rt.ready_bad_count = app_sat_inc_u8(s_rt.ready_bad_count);
@@ -288,7 +324,8 @@ bool app_dock_judge_process(const app_vision_result_t *vision,
         out->ready_bad_count = s_rt.ready_bad_count;
         out->state = APP_DOCK_STATE_SEARCHING;
         if (s_rt.last_state != APP_DOCK_STATE_SEARCHING &&
-            s_rt.invalid_hold_count < s_cfg.lost_hold_frames) {
+            s_rt.invalid_hold_count < s_cfg.lost_hold_frames)
+        {
             out->state = s_rt.last_state;
             out->filtered_center_x = s_rt.filtered_center_x;
             out->filtered_center_y = s_rt.filtered_center_y;
@@ -316,24 +353,34 @@ bool app_dock_judge_process(const app_vision_result_t *vision,
     (s_rt.filtered_bbox_w >= s_cfg.min_bbox_w) &&
     (s_rt.filtered_bbox_h >= s_cfg.min_bbox_h);
     out->stable_ok = (vision->stable_count >= s_cfg.min_stable_count);
-    if (out->est_distance_mm > 0) {
-        if (s_cfg.use_distance_gate) {
+    if (out->est_distance_mm > 0)
+    {
+        if (s_cfg.use_distance_gate)
+        {
             out->distance_ok = (out->est_distance_mm >= s_cfg.min_distance_mm) &&
             (out->est_distance_mm <= s_cfg.max_distance_mm);
-        } else {
+        }
+        else
+        {
             out->distance_ok = true;
         }
-    } else {
+    }
+    else
+    {
         out->distance_ok = false;
     }
-    if (!out->target_id_ok) {
+    if (!out->target_id_ok)
+    {
         s_rt.wrong_id_count = app_sat_inc_u8(s_rt.wrong_id_count);
         s_rt.ready_pass_count = 0;
         s_rt.ready_bad_count = 0;
         s_rt.aligned_pass_count = 0;
-        if (s_rt.wrong_id_count >= s_cfg.wrong_id_enter_frames) {
+        if (s_rt.wrong_id_count >= s_cfg.wrong_id_enter_frames)
+        {
             s_rt.last_state = APP_DOCK_STATE_WRONG_ID;
-        } else {
+        }
+        else
+        {
             s_rt.last_state = APP_DOCK_STATE_TRACKING;
         }
         out->state = s_rt.last_state;
@@ -350,34 +397,50 @@ bool app_dock_judge_process(const app_vision_result_t *vision,
     (!s_cfg.use_distance_gate || out->distance_ok);
     const bool aligned_cond = out->centered_ok &&
     (out->near_ok || out->stable_ok);
-    if (ready_cond) {
+    if (ready_cond)
+    {
         s_rt.ready_pass_count = app_sat_inc_u8(s_rt.ready_pass_count);
         s_rt.ready_bad_count = 0;
-    } else {
+    }
+    else
+    {
         s_rt.ready_pass_count = 0;
         s_rt.ready_bad_count = app_sat_inc_u8(s_rt.ready_bad_count);
     }
-    if (aligned_cond) {
+    if (aligned_cond)
+    {
         s_rt.aligned_pass_count = app_sat_inc_u8(s_rt.aligned_pass_count);
-    } else {
+    }
+    else
+    {
         s_rt.aligned_pass_count = 0;
     }
     switch (s_rt.last_state) {
     case APP_DOCK_STATE_READY_TO_DOCK:
-        if (ready_cond || (s_rt.ready_bad_count < s_cfg.ready_exit_bad_frames)) {
+        if (ready_cond || (s_rt.ready_bad_count < s_cfg.ready_exit_bad_frames))
+        {
             s_rt.last_state = APP_DOCK_STATE_READY_TO_DOCK;
-        } else if (aligned_cond) {
+        }
+        else if (aligned_cond)
+        {
             s_rt.last_state = APP_DOCK_STATE_ALIGNED;
-        } else {
+        }
+        else
+        {
             s_rt.last_state = APP_DOCK_STATE_TRACKING;
         }
         break;
     case APP_DOCK_STATE_ALIGNED:
-        if (ready_cond && (s_rt.ready_pass_count >= s_cfg.ready_enter_frames)) {
+        if (ready_cond && (s_rt.ready_pass_count >= s_cfg.ready_enter_frames))
+        {
             s_rt.last_state = APP_DOCK_STATE_READY_TO_DOCK;
-        } else if (aligned_cond || (s_rt.ready_bad_count < s_cfg.ready_exit_bad_frames)) {
+        }
+        else if (aligned_cond || (s_rt.ready_bad_count < s_cfg.ready_exit_bad_frames))
+        {
             s_rt.last_state = APP_DOCK_STATE_ALIGNED;
-        } else {
+        }
+        else
+        {
             s_rt.last_state = APP_DOCK_STATE_TRACKING;
         }
         break;
@@ -385,11 +448,16 @@ bool app_dock_judge_process(const app_vision_result_t *vision,
     case APP_DOCK_STATE_SEARCHING:
     case APP_DOCK_STATE_WRONG_ID:
     default:
-        if (ready_cond && (s_rt.ready_pass_count >= s_cfg.ready_enter_frames)) {
+        if (ready_cond && (s_rt.ready_pass_count >= s_cfg.ready_enter_frames))
+        {
             s_rt.last_state = APP_DOCK_STATE_READY_TO_DOCK;
-        } else if (aligned_cond && (s_rt.aligned_pass_count >= s_cfg.aligned_enter_frames)) {
+        }
+        else if (aligned_cond && (s_rt.aligned_pass_count >= s_cfg.aligned_enter_frames))
+        {
             s_rt.last_state = APP_DOCK_STATE_ALIGNED;
-        } else {
+        }
+        else
+        {
             s_rt.last_state = APP_DOCK_STATE_TRACKING;
         }
         break;
@@ -401,6 +469,11 @@ bool app_dock_judge_process(const app_vision_result_t *vision,
     out->invalid_hold_count = s_rt.invalid_hold_count;
     return true;
 }
+
+/* -------------------------------------------------------------------------- */
+/* 格式化辅助函数                                                          */
+/* -------------------------------------------------------------------------- */
+
 const char *app_dock_judge_state_to_text(app_dock_state_t state)
 {
     switch (state) {
@@ -422,7 +495,8 @@ void app_dock_judge_format_status(const app_dock_judge_result_t *result,
     char *buf,
     size_t buf_len)
 {
-    if (result == NULL || buf == NULL || buf_len == 0) {
+    if (result == NULL || buf == NULL || buf_len == 0)
+    {
         return;
     }
     switch (result->state) {
@@ -450,11 +524,14 @@ void app_dock_judge_format_detail(const app_dock_judge_result_t *result,
     char *buf,
     size_t buf_len)
 {
-    if (result == NULL || buf == NULL || buf_len == 0) {
+    if (result == NULL || buf == NULL || buf_len == 0)
+    {
         return;
     }
-    if (!result->vision_valid) {
-        if (result->state != APP_DOCK_STATE_SEARCHING) {
+    if (!result->vision_valid)
+    {
+        if (result->state != APP_DOCK_STATE_SEARCHING)
+        {
             snprintf(buf,
                 buf_len,
                 "dock dbg: hold:%u lost:%u dx:%ld dy:%ld z:%ld e:%.1f",
@@ -464,15 +541,21 @@ void app_dock_judge_format_detail(const app_dock_judge_result_t *result,
                 (long)result->dy,
                 (long)result->est_distance_mm,
                 (double)result->filtered_edge_px);
-        } else {
+        }
+        else
+        {
             snprintf(buf, buf_len, "dock dbg: wait valid tag");
         }
         return;
     }
     snprintf(buf,
         buf_len,
-        "dock dbg: id:%u dx:%ld dy:%ld z:%ldmm e:%.1f/%.1f ang:%d st:%u score:%u f:%c%c%c%c%c r:%u",
+        "dock dbg: id:%u c:%ld,%ld b:%ldx%ld dx:%ld dy:%ld z:%ldmm e:%.1f/%.1f ang:%d st:%u score:%u f:%c%c%c%c%c r:%u",
         (unsigned)result->tag_id,
+        (long)result->filtered_center_x,
+        (long)result->filtered_center_y,
+        (long)result->bbox_w,
+        (long)result->bbox_h,
         (long)result->dx,
         (long)result->dy,
         (long)result->est_distance_mm,
