@@ -1,5 +1,5 @@
 /*
- * app_apriltag.c - AprilTag Tag36h11 轻量识别模块（详细注释版）
+ * app_apriltag.c - AprilTag Tag36h11 轻量识别模块
  *
  * 这个文件负责在 ESP32-P4 本地对灰度图进行 AprilTag 识别。它没有依赖大型视觉库，
  * 而是自己完成二值化、候选区域连通域搜索、四边形校验、透视采样、bit 解码、码表匹配等流程。
@@ -13,33 +13,33 @@
  * 不需要逐个常量解释；真正需要理解的是“从图像找候选框 -> 采样网格 -> 计算汉明距离 -> 输出 tag 结果”的流程。
  */
 
-#include "app_apriltag.h"                          // 项目自定义模块头文件，声明 app_apriltag 对外提供的接口。
-#include <float.h>                                 // 浮点数极值定义，用于几何计算时初始化最小/最大值。
-#include <math.h>                                  // 数学函数，例如 sqrtf、fabsf、atan2f，用于图像几何计算。
-#include <stdbool.h>                               // C99 布尔类型支持，提供 bool、true、false。
-#include <stdint.h>                                // 固定宽度整数类型，例如 uint8_t、uint16_t、uint32_t，嵌入式代码常用。
-#include <string.h>                                // 字符串和内存处理函数，例如 memset、memcpy、strlen、strstr。
-#include "esp_log.h"                               // ESP-IDF 日志系统，提供 ESP_LOGI/ESP_LOGE 等调试输出。
-#include "esp_heap_caps.h"                         // 带内存能力属性的堆分配接口，例如申请 PSRAM/DMA 可访问内存。
-#define AT_MAX_WIDTH            360                      // 最大门限，用于限制资源或过滤异常数据。
-#define AT_MAX_HEIGHT           280                      // 最大门限，用于限制资源或过滤异常数据。
-#define AT_MAX_PIXELS           (AT_MAX_WIDTH * AT_MAX_HEIGHT) // 最大门限，用于限制资源或过滤异常数据。
-#define AT_MIN_AREA             160                      // 最小门限，用于过滤异常数据。
-#define AT_MIN_SIDE             20                       // 最小门限，用于过滤异常数据。
-#define AT_MAX_CANDIDATES       10                       // 最大门限，用于限制资源或过滤异常数据。
-#define AT_MAX_HAMMING          4                        // 最大门限，用于限制资源或过滤异常数据。
-#define AT_GRID_SIZE            8                        // AprilTag 网格尺寸相关定义。
-#define AT_DATA_GRID            6                        // AprilTag 网格尺寸相关定义。
-#define AT_RING_CELLS           28                       // AprilTag 检测算法相关常量。
-#define AT_EPS                  1e-6f                    // 浮点计算中的极小值，用来避免除零或病态矩阵。
-#define AT_EDGE_MARGIN          1U                       // AprilTag 检测算法相关常量。
-#define AT_MAX_BOX_PCT          78U                      // 最大门限，用于限制资源或过滤异常数据。
-#define AT_MAX_BOX_AREA_PCT     72U                      // 最大门限，用于限制资源或过滤异常数据。
-static const char *TAG = "app_apriltag";                         // ESP-IDF 日志标签，串口日志会用它标明当前消息来自哪个模块。
-static uint8_t *s_binary = NULL;                                 // 模块级静态变量 s_binary，只在本文件内部使用，避免被其他文件直接修改。
-static uint8_t *s_visited = NULL;                                // 模块级静态变量 s_visited，只在本文件内部使用，避免被其他文件直接修改。
-static uint32_t *s_queue = NULL;                                 // 模块级静态变量 s_queue，只在本文件内部使用，避免被其他文件直接修改。
-static bool s_inited = false;                                    // 模块级静态变量 s_inited，只在本文件内部使用，避免被其他文件直接修改。
+#include "app_apriltag.h"
+#include <float.h>
+#include <math.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <string.h>
+#include "esp_log.h"
+#include "esp_heap_caps.h"
+#define AT_MAX_WIDTH            360
+#define AT_MAX_HEIGHT           280
+#define AT_MAX_PIXELS           (AT_MAX_WIDTH * AT_MAX_HEIGHT)
+#define AT_MIN_AREA             160
+#define AT_MIN_SIDE             20
+#define AT_MAX_CANDIDATES       10
+#define AT_MAX_HAMMING          4
+#define AT_GRID_SIZE            8
+#define AT_DATA_GRID            6
+#define AT_RING_CELLS           28
+#define AT_EPS                  1e-6f
+#define AT_EDGE_MARGIN          1U
+#define AT_MAX_BOX_PCT          78U
+#define AT_MAX_BOX_AREA_PCT     72U
+static const char *TAG = "app_apriltag";
+static uint8_t *s_binary = NULL;
+static uint8_t *s_visited = NULL;
+static uint32_t *s_queue = NULL;
+static bool s_inited = false;
 /*
  * Tag36h11 合法码表。检测时会把采样出的 6x6 数据位打包成编码，然后遍历这个表寻找汉明距离最近的 ID。这里是纯数据，不建议逐个常量解释，否则反而影响阅读。
  */
@@ -632,10 +632,10 @@ static const uint64_t s_tag36h11_codes[587] = {
     0xdf1609a24ULL,
     0xced27dc17ULL,
 };
-static const uint8_t s_tag36h11_bit_x[36] = {                    // 模块级静态变量 s_tag36h11_bit_x，只在本文件内部使用，避免被其他文件直接修改。
+static const uint8_t s_tag36h11_bit_x[36] = {
     1,2,3,4,5,2,3,4,3,6,6,6,6,6,5,5,5,4,6,5,4,3,2,5,4,3,4,1,1,1,1,1,2,2,2,3
 };
-static const uint8_t s_tag36h11_bit_y[36] = {                    // 模块级静态变量 s_tag36h11_bit_y，只在本文件内部使用，避免被其他文件直接修改。
+static const uint8_t s_tag36h11_bit_y[36] = {
     1,1,1,1,1,2,2,2,3,1,2,3,4,5,2,3,4,3,6,6,6,6,6,5,5,5,4,6,5,4,3,2,5,4,3,4
 };
 /*
@@ -812,7 +812,6 @@ static bool at_filter_component(uint32_t area,
  */
 static bool at_candidate_touch_edge(const at_candidate_t *cand, uint32_t width, uint32_t height, uint32_t margin)
 {
-    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
     if (cand == NULL || width == 0U || height == 0U) return true;
     if (cand->min_x <= margin || cand->min_y <= margin) return true;
     if (cand->max_x + margin >= width - 1U) return true;
@@ -824,7 +823,6 @@ static bool at_candidate_touch_edge(const at_candidate_t *cand, uint32_t width, 
  */
 static bool at_candidate_too_large(const at_candidate_t *cand, uint32_t width, uint32_t height)
 {
-    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
     if (cand == NULL || width == 0U || height == 0U) return true;
     uint32_t bw = cand->max_x - cand->min_x + 1U;
     uint32_t bh = cand->max_y - cand->min_y + 1U;
@@ -1495,29 +1493,25 @@ static bool at_decode_with_quad(const uint8_t *gray,
  */
 esp_err_t app_apriltag_init(void)
 {
-    // 正常返回 ESP_OK，表示该步骤执行成功。
     if (s_inited) return ESP_OK;
     s_binary = (uint8_t *)heap_caps_malloc(AT_MAX_PIXELS, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     s_visited = (uint8_t *)heap_caps_malloc(AT_MAX_PIXELS, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     s_queue = (uint32_t *)heap_caps_malloc(sizeof(uint32_t) * AT_MAX_PIXELS, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
     if (s_binary == NULL || s_visited == NULL || s_queue == NULL) {
-        // 释放 heap_caps 分配的缓冲区。
+
         if (s_binary) heap_caps_free(s_binary);
-        // 释放 heap_caps 分配的缓冲区。
+
         if (s_visited) heap_caps_free(s_visited);
-        // 释放 heap_caps 分配的缓冲区。
+
         if (s_queue) heap_caps_free(s_queue);
         s_binary = NULL;
         s_visited = NULL;
         s_queue = NULL;
-        // 内存不足是嵌入式项目常见问题，这里返回错误让上层决定是否停止初始化。
+
         return ESP_ERR_NO_MEM;
     }
     s_inited = true;
-    // 信息日志：用于确认程序执行到了哪个阶段。
     ESP_LOGI(TAG, "local perspective tag36h11 detector ready");
-    // 正常返回 ESP_OK，表示该步骤执行成功。
     return ESP_OK;
 }
 /*
@@ -1533,7 +1527,6 @@ bool app_apriltag_detect_tag36h11(const uint8_t *gray,
      */
     if (!s_inited) return false;
 
-    // 空指针保护：嵌入式代码里不能假设上层传入的指针一定有效。
     if (gray == NULL || out == NULL || width == 0U || height == 0U) return false;
 
     /*

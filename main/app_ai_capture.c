@@ -232,7 +232,7 @@ static esp_err_t app_ai_capture_prepare_storage(void)
     }
 
     s_sd_ready = true;
-    ESP_LOGI(TAG,
+    ESP_LOGD(TAG,
              "capture dirs ready: %s next=%lu, %s next=%lu",
              CAPTURE_DRONE_DIR,
              (unsigned long)s_next_index[APP_AI_CAPTURE_MODE_DRONE],
@@ -319,7 +319,7 @@ static esp_err_t app_ai_capture_write_bmp(const app_ai_capture_slot_t *slot)
     }
 
     if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "saved %s", path);
+        ESP_LOGD(TAG, "saved %s", path);
     } else {
         ESP_LOGW(TAG, "write %s failed", path);
     }
@@ -409,7 +409,7 @@ esp_err_t app_ai_capture_start(void)
     taskEXIT_CRITICAL(&s_mux);
 
     app_ai_capture_format_status("on");
-    ESP_LOGI(TAG, "continuous capture started");
+    ESP_LOGD(TAG, "continuous capture started");
     return ESP_OK;
 }
 
@@ -421,7 +421,7 @@ void app_ai_capture_stop(void)
     taskEXIT_CRITICAL(&s_mux);
 
     app_ai_capture_format_status("stopped");
-    ESP_LOGI(TAG, "continuous capture stopped");
+    ESP_LOGD(TAG, "continuous capture stopped");
 }
 
 esp_err_t app_ai_capture_set_mode(app_ai_capture_mode_t mode)
@@ -436,7 +436,7 @@ esp_err_t app_ai_capture_set_mode(app_ai_capture_mode_t mode)
     taskEXIT_CRITICAL(&s_mux);
 
     app_ai_capture_format_status("mode");
-    ESP_LOGI(TAG, "capture mode: %s", app_ai_capture_mode_label(mode));
+    ESP_LOGD(TAG, "capture mode: %s", app_ai_capture_mode_label(mode));
     return ESP_OK;
 }
 
