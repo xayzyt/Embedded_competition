@@ -1,3 +1,10 @@
+/*
+ * app_ai_capture.c - AI 数据集抓拍模块
+ *
+ * 将带标签的 RGB565 摄像头样本保存为 SD 卡上的 BMP 文件。
+ * 摄像头回调只负责投递队列，真正写文件放到后台任务里，避免阻塞预览。
+ */
+
 #include "app_ai_capture.h"
 
 #include <dirent.h>
@@ -63,30 +70,35 @@ static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 /* 像素和 BMP 字节辅助函数                                                  */
 /* -------------------------------------------------------------------------- */
 
+/* 从 RGB565 像素中展开 8 位红色通道。 */
 static inline uint8_t app_ai_capture_rgb565_r(uint16_t pixel)
 {
     uint8_t r = (uint8_t)((pixel >> 11) & 0x1F);
     return (uint8_t)((r << 3) | (r >> 2));
 }
 
+/* 从 RGB565 像素中展开 8 位绿色通道。 */
 static inline uint8_t app_ai_capture_rgb565_g(uint16_t pixel)
 {
     uint8_t g = (uint8_t)((pixel >> 5) & 0x3F);
     return (uint8_t)((g << 2) | (g >> 4));
 }
 
+/* 从 RGB565 像素中展开 8 位蓝色通道。 */
 static inline uint8_t app_ai_capture_rgb565_b(uint16_t pixel)
 {
     uint8_t b = (uint8_t)(pixel & 0x1F);
     return (uint8_t)((b << 3) | (b >> 2));
 }
 
+/* 按小端序写入 16 位 BMP 头字段。 */
 static void app_ai_capture_put_le16(uint8_t *dst, uint16_t value)
 {
     dst[0] = (uint8_t)(value & 0xFFU);
     dst[1] = (uint8_t)((value >> 8) & 0xFFU);
 }
 
+/* 按小端序写入 32 位 BMP 头字段。 */
 static void app_ai_capture_put_le32(uint8_t *dst, uint32_t value)
 {
     dst[0] = (uint8_t)(value & 0xFFU);
@@ -95,11 +107,13 @@ static void app_ai_capture_put_le32(uint8_t *dst, uint32_t value)
     dst[3] = (uint8_t)((value >> 24) & 0xFFU);
 }
 
+/* 按小端序写入有符号 32 位 BMP 头字段。 */
 static void app_ai_capture_put_le_i32(uint8_t *dst, int32_t value)
 {
     app_ai_capture_put_le32(dst, (uint32_t)value);
 }
 
+/* 按目标宽高比计算居中裁剪区域。 */
 static void app_ai_capture_calc_center_crop(uint32_t src_width,
                                             uint32_t src_height,
                                             uint32_t dst_width,
@@ -148,6 +162,7 @@ static void app_ai_capture_calc_center_crop(uint32_t src_width,
 /* 模式、状态和存储辅助函数                                           */
 /* -------------------------------------------------------------------------- */
 
+/* 返回抓拍类别显示标签。 */
 const char *app_ai_capture_mode_label(app_ai_capture_mode_t mode)
 {
     switch (mode) {
@@ -159,6 +174,7 @@ const char *app_ai_capture_mode_label(app_ai_capture_mode_t mode)
     }
 }
 
+/* 返回抓拍类别对应的 SD 卡目录。 */
 static const char *app_ai_capture_mode_dir(app_ai_capture_mode_t mode)
 {
     switch (mode) {
@@ -170,6 +186,7 @@ static const char *app_ai_capture_mode_dir(app_ai_capture_mode_t mode)
     }
 }
 
+/* 从 IMGxxxxx.BMP 文件名中解析图片序号。 */
 static bool app_ai_capture_parse_image_name(const char *name, uint32_t *out_index)
 {
     if (name == NULL || out_index == NULL || strlen(name) != 12U)
@@ -198,6 +215,7 @@ static bool app_ai_capture_parse_image_name(const char *name, uint32_t *out_inde
     return true;
 }
 
+/* 扫描目录，找到下一个可用图片序号。 */
 static uint32_t app_ai_capture_find_next_index(const char *dir_path)
 {
     uint32_t max_index = 0;
@@ -224,6 +242,7 @@ static uint32_t app_ai_capture_find_next_index(const char *dir_path)
     return max_index + 1U;
 }
 
+/* 同步更新抓图和视觉区域的 UI 状态文本。 */
 static void app_ai_capture_set_status(const char *status)
 {
     if (status != NULL)
@@ -233,6 +252,7 @@ static void app_ai_capture_set_status(const char *status)
     }
 }
 
+/* 拼接抓拍状态文本，包含类别、保存数和丢帧数。 */
 static void app_ai_capture_format_status(const char *state)
 {
     char text[64];
@@ -268,6 +288,7 @@ static void app_ai_capture_format_status(const char *state)
     app_ai_capture_set_status(text);
 }
 
+/* 挂载 SD 卡并确保两类数据集目录存在。 */
 static esp_err_t app_ai_capture_prepare_storage(void)
 {
     if (s_sd_ready)
@@ -321,6 +342,7 @@ static esp_err_t app_ai_capture_prepare_storage(void)
 /* 图像转换和文件写入                                           */
 /* -------------------------------------------------------------------------- */
 
+/* 将 RGB565 输入居中裁剪、下采样并转换成 BMP 需要的 BGR。 */
 static void app_ai_capture_downsample_rgb565_to_bgr(const uint8_t *rgb565,
                                                     uint32_t src_width,
                                                     uint32_t src_height,
@@ -364,6 +386,7 @@ static void app_ai_capture_downsample_rgb565_to_bgr(const uint8_t *rgb565,
     }
 }
 
+/* 将一个抓拍槽位写成 24 位 BMP 文件。 */
 static esp_err_t app_ai_capture_write_bmp(const app_ai_capture_slot_t *slot)
 {
     if (slot == NULL || slot->bgr == NULL)
@@ -435,6 +458,7 @@ static esp_err_t app_ai_capture_write_bmp(const app_ai_capture_slot_t *slot)
 /* 写入任务和公开接口                                                  */
 /* -------------------------------------------------------------------------- */
 
+/* 后台写盘任务，消费写队列并回收抓拍槽位。 */
 static void app_ai_capture_writer_task(void *arg)
 {
     (void)arg;
@@ -463,6 +487,7 @@ static void app_ai_capture_writer_task(void *arg)
     }
 }
 
+/* 初始化抓拍队列、PSRAM 缓冲、写盘任务和存储目录。 */
 esp_err_t app_ai_capture_init(void)
 {
     if (s_inited)
@@ -509,6 +534,7 @@ esp_err_t app_ai_capture_init(void)
     return ESP_OK;
 }
 
+/* 开始连续抓拍，并重置帧间隔计数。 */
 esp_err_t app_ai_capture_start(void)
 {
     if (!s_inited)
@@ -533,6 +559,7 @@ esp_err_t app_ai_capture_start(void)
     return ESP_OK;
 }
 
+/* 停止连续抓拍，并清空帧间隔计数。 */
 void app_ai_capture_stop(void)
 {
     taskENTER_CRITICAL(&s_mux);
@@ -544,6 +571,7 @@ void app_ai_capture_stop(void)
     ESP_LOGD(TAG, "continuous capture stopped");
 }
 
+/* 设置当前抓拍类别，并刷新 UI 状态。 */
 esp_err_t app_ai_capture_set_mode(app_ai_capture_mode_t mode)
 {
     if ((int)mode < 0 || mode >= APP_AI_CAPTURE_MODE_COUNT)
@@ -561,6 +589,7 @@ esp_err_t app_ai_capture_set_mode(app_ai_capture_mode_t mode)
     return ESP_OK;
 }
 
+/* 读取当前抓拍类别。 */
 app_ai_capture_mode_t app_ai_capture_get_mode(void)
 {
     app_ai_capture_mode_t mode = APP_AI_CAPTURE_MODE_DRONE;
@@ -570,6 +599,7 @@ app_ai_capture_mode_t app_ai_capture_get_mode(void)
     return mode;
 }
 
+/* 在两种抓拍类别之间切换并返回新类别。 */
 app_ai_capture_mode_t app_ai_capture_toggle_mode(void)
 {
     app_ai_capture_mode_t mode = app_ai_capture_get_mode();
@@ -580,6 +610,7 @@ app_ai_capture_mode_t app_ai_capture_toggle_mode(void)
     return mode;
 }
 
+/* 查询抓拍流程是否处于启用状态。 */
 bool app_ai_capture_is_active(void)
 {
     bool active = false;
@@ -589,6 +620,7 @@ bool app_ai_capture_is_active(void)
     return active;
 }
 
+/* 根据启用状态、SD 卡状态和间隔计数判断当前帧是否抓拍。 */
 bool app_ai_capture_should_capture_frame(void)
 {
     bool capture = false;
@@ -625,6 +657,7 @@ bool app_ai_capture_should_capture_frame(void)
     return capture;
 }
 
+/* 摄像头回调侧提交帧，转换后排队交给写盘任务。 */
 esp_err_t app_ai_capture_submit_frame(const uint8_t *rgb565,
                                       uint32_t width,
                                       uint32_t height,

@@ -1,3 +1,4 @@
+/* 实现说明：显示初始化和背光打开拆开，避免上电时先闪白屏。 */
 /*
  * bsp_display_port.c - 显示 BSP 适配封装模块
  *
@@ -18,6 +19,7 @@
 static const char *TAG = "display_port";
 static lv_display_t *s_disp = NULL;
 
+/* 初始化项目使用的 LVGL 显示端口和屏幕驱动。 */
 bool app_display_init(void)
 {
     if (s_disp != NULL)
@@ -43,8 +45,12 @@ bool app_display_init(void)
         ESP_LOGE(TAG, "bsp_display_start_with_config failed");
         return false;
     }
-    bsp_display_backlight_on();
-
     ESP_LOGI(TAG, "display init done");
     return true;
+}
+
+/* 打开 LCD 背光，通常在首帧 UI 已经绘制之后调用。 */
+void app_display_backlight_on(void)
+{
+    bsp_display_backlight_on();
 }

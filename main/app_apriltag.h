@@ -1,5 +1,10 @@
 #pragma once
 
+/*
+ * 轻量级 Tag36h11 检测器接口。
+ * 输入 8 位灰度图，输出供接驳判定和 HUD 使用的几何信息。
+ */
+
 #include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -40,7 +45,10 @@ typedef struct {
     float top_edge_angle_deg;   /* 顶边相对水平线的角度，单位为度。 */
 } app_apriltag_result_t;
 
+/* 准备检测查表和临时状态，可重复调用。 */
 esp_err_t app_apriltag_init(void);
+
+/* 在输入灰度图中检测一个 Tag36h11 标记。 */
 bool app_apriltag_detect_tag36h11(const uint8_t *gray,
                                   uint32_t width,
                                   uint32_t height,

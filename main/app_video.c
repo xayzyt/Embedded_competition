@@ -1,3 +1,4 @@
+/* 实现说明：Linux/V4L2 风格的底层细节封装在 app_camera.c 之下。 */
 /*
  * app_video.c - V4L2 摄像头设备底层封装模块
  *
@@ -65,6 +66,7 @@ static app_video_t s_video;
 /* 格式和摄像头控制辅助函数                                           */
 /* -------------------------------------------------------------------------- */
 
+/* 将 V4L2 FOURCC 像素格式转换成可打印字符串。 */
 static const char *fourcc_to_str(uint32_t fourcc, char out[5])
 {
     out[0] = (char)(fourcc & 0xFF);
@@ -75,6 +77,7 @@ static const char *fourcc_to_str(uint32_t fourcc, char out[5])
     return out;
 }
 
+/* 按 V4L2 控件的范围和步进裁剪目标值。 */
 static int32_t app_video_clamp_ctrl_value(const struct v4l2_query_ext_ctrl *qctrl, int64_t value)
 {
     int64_t min_value = qctrl->minimum;
@@ -98,6 +101,7 @@ static int32_t app_video_clamp_ctrl_value(const struct v4l2_query_ext_ctrl *qctr
     return (int32_t)value;
 }
 
+/* 查询并设置一个 V4L2 扩展控件值。 */
 static esp_err_t app_video_set_ext_ctrl_value(int video_fd,
     uint32_t ctrl_class,
     uint32_t ctrl_id,
@@ -134,6 +138,7 @@ static esp_err_t app_video_set_ext_ctrl_value(int video_fd,
     return ESP_OK;
 }
 
+/* 应用识别场景下使用的曝光和增益配置。 */
 esp_err_t app_video_apply_recognition_profile(int video_fd, uint32_t exposure_us, uint8_t gain_percent)
 {
     if (video_fd < 0 || exposure_us == 0)
@@ -184,6 +189,7 @@ esp_err_t app_video_apply_recognition_profile(int video_fd, uint32_t exposure_us
 /* 设备初始化                                                                */
 /* -------------------------------------------------------------------------- */
 
+/* 打开视频设备并设置目标像素格式，同时记录实际帧尺寸。 */
 int app_video_open(char *dev, video_fmt_t init_fmt)
 {
     struct v4l2_format default_format = {0};
@@ -296,6 +302,7 @@ int app_video_open(char *dev, video_fmt_t init_fmt)
     close(fd);
     return -1;
 }
+/* 请求并注册 V4L2 帧缓冲，支持上层传入 USERPTR 缓冲。 */
 esp_err_t app_video_set_bufs(int video_fd, uint32_t fb_num, const void **fb)
 {
     if (fb_num > MAX_BUFFER_COUNT)
@@ -363,6 +370,7 @@ esp_err_t app_video_set_bufs(int video_fd, uint32_t fb_num, const void **fb)
     close(video_fd);
     return ESP_FAIL;
 }
+/* 返回当前摄像头帧缓冲大小，缺省按 RGB565 估算。 */
 uint32_t app_video_get_buf_size(void)
 {
     if (s_video.camera_buf_size != 0)
@@ -376,6 +384,7 @@ uint32_t app_video_get_buf_size(void)
 /* 视频流循环辅助函数                                                      */
 /* -------------------------------------------------------------------------- */
 
+/* 从 V4L2 队列取出一帧摄像头数据。 */
 static inline esp_err_t video_receive_video_frame(int video_fd)
 {
     memset(&s_video.v4l2_buf, 0, sizeof(s_video.v4l2_buf));
@@ -398,6 +407,7 @@ static inline esp_err_t video_receive_video_frame(int video_fd)
     }
     return ESP_OK;
 }
+/* 调用上层注册的逐帧处理回调。 */
 static inline void video_operation_video_frame(void)
 {
     const uint8_t buf_index = s_video.v4l2_buf.index;
@@ -411,6 +421,7 @@ static inline void video_operation_video_frame(void)
             s_video.v4l2_buf.bytesused ? s_video.v4l2_buf.bytesused : s_video.camera_buf_size);
     }
 }
+/* 将处理后的帧缓冲重新放回 V4L2 队列。 */
 static inline esp_err_t video_free_video_frame(int video_fd)
 {
     if (s_video.camera_mem_mode == V4L2_MEMORY_USERPTR)
@@ -427,6 +438,7 @@ static inline esp_err_t video_free_video_frame(int video_fd)
     }
     return ESP_OK;
 }
+/* 对视频设备执行 STREAMON，开始产生帧。 */
 static inline esp_err_t video_stream_start(int video_fd)
 {
     const int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -440,6 +452,7 @@ static inline esp_err_t video_stream_start(int video_fd)
     s_video.first_frame_logged = false;
     return ESP_OK;
 }
+/* 对视频设备执行 STREAMOFF，停止产生帧。 */
 static inline esp_err_t video_stream_stop(int video_fd)
 {
     const int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -453,6 +466,7 @@ static inline esp_err_t video_stream_stop(int video_fd)
     return ESP_OK;
 }
 
+/* DQBUF/QBUF 连续失败时重启视频流做恢复。 */
 static void video_stream_restart(int video_fd)
 {
     video_stream_stop(video_fd);
@@ -460,6 +474,7 @@ static void video_stream_restart(int video_fd)
     video_stream_start(video_fd);
 }
 
+/* 视频流任务，循环 DQBUF、处理帧、QBUF 并做错误恢复。 */
 static void video_stream_task(void *arg)
 {
     const int video_fd = *((int *)arg);
@@ -495,6 +510,7 @@ static void video_stream_task(void *arg)
 /* 公开接口                                                                  */
 /* -------------------------------------------------------------------------- */
 
+/* 启动视频流并创建固定核心上的采集任务。 */
 esp_err_t app_video_stream_task_start(int video_fd, int core_id)
 {
     if (video_stream_start(video_fd) != ESP_OK)
@@ -517,6 +533,7 @@ esp_err_t app_video_stream_task_start(int video_fd, int core_id)
     }
     return ESP_OK;
 }
+/* 保存上层逐帧处理回调，供视频流任务调用。 */
 esp_err_t app_video_register_frame_operation_cb(app_video_frame_operation_cb_t operation_cb)
 {
     s_video.user_camera_video_frame_operation_cb = operation_cb;

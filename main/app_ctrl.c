@@ -1,3 +1,4 @@
+/* 实现说明：通过超时点和冷却窗口避免反复触发 CH32 执行动作。 */
 /*
  * app_ctrl.c - 接驳主控制状态机模块
  *
@@ -94,14 +95,17 @@ static app_ctrl_runtime_t s_rt = {0};
 /* 小工具函数                                                             */
 /* -------------------------------------------------------------------------- */
 
+/* 获取当前系统毫秒时间，供控制循环和超时判断使用。 */
 static inline uint32_t app_ctrl_now_ms(void)
 {
     return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
 }
+/* 判断某个截止时间在当前时刻是否仍然有效。 */
 static inline bool app_ctrl_deadline_active(uint32_t deadline_ms, uint32_t now_ms)
 {
     return (deadline_ms != 0U) && ((int32_t)(deadline_ms - now_ms) > 0);
 }
+/* 在已持锁状态下设置临时 UI 提示及其保留时间。 */
 static void app_ctrl_set_notice_locked(const char *text, uint32_t hold_ms)
 {
     if (text == NULL)
@@ -113,6 +117,7 @@ static void app_ctrl_set_notice_locked(const char *text, uint32_t hold_ms)
     strlcpy(s_rt.notice, text, sizeof(s_rt.notice));
     s_rt.notice_deadline_ms = app_ctrl_now_ms() + hold_ms;
 }
+/* 对外层辅助逻辑设置临时 UI 提示，内部负责加锁。 */
 static void app_ctrl_set_notice(const char *text, uint32_t hold_ms)
 {
 
@@ -121,6 +126,7 @@ static void app_ctrl_set_notice(const char *text, uint32_t hold_ms)
 
     taskEXIT_CRITICAL(&s_ctrl_mux);
 }
+/* 在已持锁状态下启动防重复触发冷却窗口。 */
 static void app_ctrl_start_retrigger_cooldown_locked(uint32_t hold_ms)
 {
     s_rt.retrigger_deadline_ms = app_ctrl_now_ms() + hold_ms;
@@ -130,6 +136,7 @@ static void app_ctrl_start_retrigger_cooldown_locked(uint32_t hold_ms)
 /* CH32 协议状态辅助函数                                                 */
 /* -------------------------------------------------------------------------- */
 
+/* 判断 CH32 当前阶段是否表示接驳流程正在执行。 */
 static bool app_ctrl_proto_stage_is_busy(app_ch32_proto_stage_t stage)
 {
     switch (stage) {
@@ -147,20 +154,24 @@ static bool app_ctrl_proto_stage_is_busy(app_ch32_proto_stage_t stage)
         return false;
     }
 }
+/* 判断 CH32 当前阶段是否处于等待放货窗口。 */
 static bool app_ctrl_proto_stage_is_cargo_wait_window(app_ch32_proto_stage_t stage)
 {
     return (stage == APP_CH32_STAGE_TRAY_EXTENDED) ||
     (stage == APP_CH32_STAGE_WAITING_CARGO);
 }
+/* 从 CH32 flags 判断托盘是否已经伸出。 */
 static bool app_ctrl_proto_flags_indicate_tray_out(uint16_t flags)
 {
     return (flags & APP_CH32_FLAG_LIMIT_TRAY_OUT) != 0U;
 }
+/* 判断错误码是否可能只是等待放货阶段的软错误。 */
 static bool app_ctrl_proto_error_is_cargo_wait_soft(uint8_t proto_error)
 {
     return (proto_error == APP_CH32_ERR_TIMEOUT) ||
     (proto_error == APP_CH32_ERR_WEIGHT);
 }
+/* 将 CH32 阶段转换成 UI 状态栏可显示的短文本。 */
 static const char *app_ctrl_proto_stage_status_text(app_ch32_proto_stage_t stage)
 {
     switch (stage) {
@@ -182,10 +193,12 @@ static const char *app_ctrl_proto_stage_status_text(app_ch32_proto_stage_t stage
     default:                             return "dock: CH32 online";
     }
 }
+/* 判断当前阶段是否需要启用普通 busy 超时。 */
 static bool app_ctrl_proto_stage_uses_busy_deadline(app_ch32_proto_stage_t stage)
 {
     return !app_ctrl_proto_stage_is_cargo_wait_window(stage);
 }
+/* 结合前后阶段和 flags 判断错误是否应被降级为等待放货。 */
 static bool app_ctrl_is_soft_waiting_cargo_error(app_ch32_proto_stage_t prev_stage,
     uint16_t prev_flags,
     app_ch32_proto_stage_t stage,
@@ -223,6 +236,7 @@ static bool app_ctrl_is_soft_waiting_cargo_error(app_ch32_proto_stage_t prev_sta
         (stage == APP_CH32_STAGE_TRAY_EXTENDED) ||
         (stage == APP_CH32_STAGE_WAITING_CARGO));
 }
+/* 在已持锁状态下保持等待放货状态，避免误判为接驳失败。 */
 static void app_ctrl_hold_waiting_cargo_locked(void)
 {
     s_rt.cargo_wait_window_seen = true;
@@ -237,6 +251,7 @@ static void app_ctrl_hold_waiting_cargo_locked(void)
 /* UI 文本拼装                                                         */
 /* -------------------------------------------------------------------------- */
 
+/* 拼接视觉、距离、阶段和称重等调试详情文本。 */
 static void app_ctrl_compose_detail(const app_dock_judge_result_t *dock,
     bool has_weight,
     int32_t weight_g,
@@ -287,6 +302,7 @@ static void app_ctrl_compose_detail(const app_dock_judge_result_t *dock,
         has_weight ? "" : "-",
         has_weight ? (long)weight_g : 0L);
 }
+/* 根据接驳判定结果拼接给操作员看的引导文本。 */
 static void app_ctrl_compose_guidance(const app_dock_judge_result_t *dock,
     char *buf,
     size_t buf_len)
@@ -336,6 +352,7 @@ static void app_ctrl_compose_guidance(const app_dock_judge_result_t *dock,
     }
     app_dock_judge_format_status(dock, buf, buf_len);
 }
+/* 根据任务状态、接驳状态和 CH32 ready 状态拼接主状态文本。 */
 static void app_ctrl_compose_task_status(const app_task_snapshot_t *task,
     const app_dock_judge_result_t *dock,
     bool ch32_ready,
@@ -389,6 +406,7 @@ static void app_ctrl_compose_task_status(const app_task_snapshot_t *task,
         break;
     }
 }
+/* 在已持锁状态下消化 CH32 状态帧并更新控制运行态。 */
 static void app_ctrl_apply_proto_msg_locked(const app_ch32_line_t *msg)
 {
     if (msg == NULL)
@@ -479,6 +497,7 @@ static void app_ctrl_apply_proto_msg_locked(const app_ch32_line_t *msg)
 /* 控制循环辅助函数                                                        */
 /* -------------------------------------------------------------------------- */
 
+/* 拷贝一份控制运行态快照，供本轮控制循环在锁外使用。 */
 static void app_ctrl_read_loop_state(app_ctrl_loop_state_t *out)
 {
     if (out == NULL)
@@ -507,6 +526,7 @@ static void app_ctrl_read_loop_state(app_ctrl_loop_state_t *out)
     taskEXIT_CRITICAL(&s_ctrl_mux);
 }
 
+/* 当任务目标 ID 变化时，同步到接驳判定模块。 */
 static void app_ctrl_apply_task_target_if_needed(const app_task_snapshot_t *task,
     uint16_t applied_target_id)
 {
@@ -530,6 +550,7 @@ static void app_ctrl_apply_task_target_if_needed(const app_task_snapshot_t *task
     ESP_LOGI(TAG, "applied target id => %u", (unsigned)task->target_id);
 }
 
+/* CH32 未 ready 时按固定间隔主动探测链路状态。 */
 static void app_ctrl_probe_ready_if_needed(uint32_t now_ms,
     bool ch32_ready,
     uint32_t last_probe_ms)
@@ -546,6 +567,7 @@ static void app_ctrl_probe_ready_if_needed(uint32_t now_ms,
     (void)app_ch32_link_probe_ready(200);
 }
 
+/* 同步更新全局状态和本轮局部状态为等待放货。 */
 static void app_ctrl_set_waiting_cargo_local(bool *dock_busy,
     bool *cargo_wait_window_seen,
     app_ch32_proto_stage_t *proto_stage,
@@ -578,6 +600,7 @@ static void app_ctrl_set_waiting_cargo_local(bool *dock_busy,
     }
 }
 
+/* 处理接驳 busy 阶段超时，并决定是等待放货还是进入故障。 */
 static void app_ctrl_handle_busy_timeout(uint32_t now_ms,
     app_task_snapshot_t *task,
     bool *dock_busy,
@@ -624,6 +647,7 @@ static void app_ctrl_handle_busy_timeout(uint32_t now_ms,
     }
 }
 
+/* 在软错误场景下把本轮状态保持为等待放货。 */
 static void app_ctrl_hold_soft_cargo_wait_if_needed(bool *dock_busy,
     bool *cargo_wait_window_seen,
     app_ch32_proto_stage_t *proto_stage,
@@ -657,6 +681,7 @@ static void app_ctrl_hold_soft_cargo_wait_if_needed(bool *dock_busy,
         busy_deadline_ms);
 }
 
+/* 当视觉判定首次达到 ready 时，将任务推进到认证通过。 */
 static void app_ctrl_mark_auth_if_ready(app_task_snapshot_t *task,
     const app_dock_judge_result_t *dock,
     bool ready_level)
@@ -673,6 +698,7 @@ static void app_ctrl_mark_auth_if_ready(app_task_snapshot_t *task,
     }
 }
 
+/* 在 ready 上升沿且 CH32 可用时自动下发接驳启动命令。 */
 static void app_ctrl_try_auto_dock(uint32_t now_ms,
     const app_dock_judge_result_t *dock,
     app_task_snapshot_t *task,
@@ -753,6 +779,7 @@ static void app_ctrl_try_auto_dock(uint32_t now_ms,
 #endif
 }
 
+/* 根据 dock_busy 的边沿变化同步任务的 docking、完成或故障状态。 */
 static void app_ctrl_update_task_for_busy_transition(bool prev_dock_busy,
     bool dock_busy,
     uint8_t proto_error,
@@ -791,6 +818,7 @@ static void app_ctrl_update_task_for_busy_transition(bool prev_dock_busy,
     }
 }
 
+/* 汇总任务、视觉、CH32 和提示信息并刷新 UI 文本/HUD。 */
 static void app_ctrl_publish_ui(uint32_t now_ms,
     const app_vision_result_t *vision,
     const app_dock_judge_result_t *dock,
@@ -845,6 +873,7 @@ static void app_ctrl_publish_ui(uint32_t now_ms,
 /* 公开回调和任务入口                                             */
 /* -------------------------------------------------------------------------- */
 
+/* 作为 CH32 链路回调入口，收到一帧解析结果后更新控制状态。 */
 void app_ctrl_on_ch32_line(const app_ch32_line_t *msg, void *user_ctx)
 {
     (void)user_ctx;
@@ -860,6 +889,7 @@ void app_ctrl_on_ch32_line(const app_ch32_line_t *msg, void *user_ctx)
 
     taskEXIT_CRITICAL(&s_ctrl_mux);
 }
+/* 控制循环主任务，周期性串起视觉判定、任务推进、CH32 命令和 UI 刷新。 */
 static void app_ctrl_task(void *arg)
 {
     (void)arg;
@@ -932,6 +962,7 @@ static void app_ctrl_task(void *arg)
         vTaskDelay(pdMS_TO_TICKS(CTRL_POLL_MS));
     }
 }
+/* 初始化控制模块的共享运行状态。 */
 esp_err_t app_ctrl_init(void)
 {
     if (s_rt.inited)
@@ -947,6 +978,7 @@ esp_err_t app_ctrl_init(void)
     ESP_LOGI(TAG, "ctrl init done (auto_dock=%d)", CTRL_AUTO_DOCK_ENABLE);
     return ESP_OK;
 }
+/* 创建控制循环 FreeRTOS 任务，重复调用会直接返回成功。 */
 esp_err_t app_ctrl_start(void)
 {
     if (!s_rt.inited)

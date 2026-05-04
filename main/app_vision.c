@@ -1,3 +1,4 @@
+/* 实现说明：AprilTag 检测在后台任务中运行，不放在摄像头回调里。 */
 /*
  * app_vision.c - 视觉识别任务调度模块
  *
@@ -75,10 +76,12 @@ static uint32_t s_sample_crop_h = 0;
 /* 时间、颜色和采样映射辅助函数                                         */
 /* -------------------------------------------------------------------------- */
 
+/* 获取当前系统毫秒时间，用作帧时间戳。 */
 static inline uint32_t app_vision_now_ms(void)
 {
     return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
 }
+/* 将一个 RGB565 像素转换成 8 位灰度值。 */
 static inline uint8_t app_rgb565_to_gray(uint16_t pixel)
 {
     uint32_t r = (pixel >> 11) & 0x1F;
@@ -89,6 +92,7 @@ static inline uint8_t app_rgb565_to_gray(uint16_t pixel)
     b = (b << 3) | (b >> 2);
     return (uint8_t)((r * 77U + g * 150U + b * 29U) >> 8);
 }
+/* 按目标宽高比计算居中裁剪区域。 */
 static void app_vision_calc_center_crop(uint32_t src_width,
     uint32_t src_height,
     uint32_t dst_width,
@@ -132,6 +136,7 @@ static void app_vision_calc_center_crop(uint32_t src_width,
     if (crop_w) *crop_w = w;
     if (crop_h) *crop_h = h;
 }
+/* 为当前输入尺寸预计算灰度图采样坐标表。 */
 static void app_vision_prepare_sample_map(uint32_t width, uint32_t height)
 {
     if (s_sample_map_width == width && s_sample_map_height == height)
@@ -184,6 +189,7 @@ static void app_vision_prepare_sample_map(uint32_t width, uint32_t height)
 /* 共享帧和结果快照                                               */
 /* -------------------------------------------------------------------------- */
 
+/* 从提交队列取出一帧灰度图快照给检测任务使用。 */
 static app_vision_gray_slot_t *app_vision_take_snapshot(app_vision_frame_info_t *meta_out,
     uint32_t *overwrite_out)
 {
@@ -206,6 +212,7 @@ static app_vision_gray_slot_t *app_vision_take_snapshot(app_vision_frame_info_t 
 }
 
 /* 背压入口：如果还有一帧在排队，就跳过新帧，避免把 CPU 花在马上会被丢弃的灰度转换上。 */
+/* 判断当前是否还能接收一帧新图像，避免无意义转换。 */
 static bool app_vision_can_accept_frame(void)
 {
     bool ready = false;
@@ -216,6 +223,7 @@ static bool app_vision_can_accept_frame(void)
     return ready;
 }
 
+/* 记录一次因为检测任务来不及消费而跳过的帧。 */
 static void app_vision_mark_busy_drop(void)
 {
     taskENTER_CRITICAL(&s_vision_mux);
@@ -223,6 +231,7 @@ static void app_vision_mark_busy_drop(void)
     taskEXIT_CRITICAL(&s_vision_mux);
 }
 
+/* 在临界区内保存最新 AprilTag 检测结果。 */
 static void app_vision_store_result(const app_vision_result_t *result)
 {
 
@@ -231,6 +240,7 @@ static void app_vision_store_result(const app_vision_result_t *result)
 
     taskEXIT_CRITICAL(&s_vision_mux);
 }
+/* 读取最新检测结果快照，返回值表示当前结果是否有效。 */
 bool app_vision_get_latest_result(app_vision_result_t *out)
 {
     if (out == NULL)
@@ -249,6 +259,7 @@ bool app_vision_get_latest_result(app_vision_result_t *out)
 /* 检测结果处理                                                   */
 /* -------------------------------------------------------------------------- */
 
+/* 在没有新检测结果时更新等待帧提示。 */
 static void app_vision_set_wait_text(uint32_t heartbeat)
 {
     if (app_ai_capture_is_active())
@@ -259,6 +270,7 @@ static void app_vision_set_wait_text(uint32_t heartbeat)
     snprintf(buf, sizeof(buf), "tag: wait #%lu", (unsigned long)heartbeat);
     app_ui_set_vision_text(buf);
 }
+/* 把灰度裁剪图元数据填入检测结果。 */
 static void app_vision_fill_result_geometry(app_vision_result_t *result,
     const app_vision_gray_frame_info_t *info)
 {
@@ -275,6 +287,7 @@ static void app_vision_fill_result_geometry(app_vision_result_t *result,
     result->gray_width = info->gray_width;
     result->gray_height = info->gray_height;
 }
+/* 根据检测输出更新稳定计数、丢失计数、最新结果和 UI 文本。 */
 static void app_vision_update_result(const app_vision_gray_slot_t *slot,
     const app_apriltag_result_t *tag,
     uint32_t detect_ms,
@@ -401,6 +414,7 @@ static void app_vision_update_result(const app_vision_gray_slot_t *slot,
 /* 任务和公开接口                                                         */
 /* -------------------------------------------------------------------------- */
 
+/* 视觉后台任务，领取灰度帧并运行 AprilTag 检测。 */
 static void app_vision_task(void *arg)
 {
     (void)arg;
@@ -519,6 +533,7 @@ static void app_vision_task(void *arg)
         (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(VISION_POLL_PERIOD_MS));
     }
 }
+/* 初始化 AprilTag 检测器、三缓冲槽位和统计计数。 */
 esp_err_t app_vision_init(void)
 {
     if (s_vision_inited)
@@ -557,6 +572,7 @@ esp_err_t app_vision_init(void)
     s_vision_inited = true;
     return ESP_OK;
 }
+/* 创建视觉检测 FreeRTOS 任务，重复启动会直接成功返回。 */
 esp_err_t app_vision_start(void)
 {
     if (!s_vision_inited)
@@ -584,6 +600,7 @@ esp_err_t app_vision_start(void)
     ESP_LOGI(TAG, "vision task started");
     return ESP_OK;
 }
+/* 摄像头回调侧提交帧：转换为灰度采样图后交给后台检测任务。 */
 esp_err_t app_vision_submit_frame(const uint8_t *rgb565,
     uint32_t width,
     uint32_t height,

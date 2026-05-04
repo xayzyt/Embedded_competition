@@ -1,3 +1,4 @@
+/* 实现说明：采集、显示和视觉识别解耦，避免预览画面被耗时识别卡住。 */
 /*
  * app_camera.c - 摄像头采集、本地预览和视觉取样桥接模块
  *
@@ -83,6 +84,7 @@ static ppa_client_handle_t s_ppa_srm_handle = NULL;
 /* 缓存和 LVGL 辅助函数                                                      */
 /* -------------------------------------------------------------------------- */
 
+/* 按 cache line 对齐后执行 PSRAM 缓存同步。 */
 static esp_err_t app_camera_msync_aligned(void *addr, size_t size, int flags)
 {
     if (addr == NULL || size == 0)
@@ -96,18 +98,21 @@ static esp_err_t app_camera_msync_aligned(void *addr, size_t size, int flags)
 
     return esp_cache_msync((void *)start, end - start, flags);
 }
+/* 将内存内容同步到 CPU 可安全读取的状态。 */
 static inline esp_err_t app_camera_msync_m2c(const void *addr, size_t size)
 {
     return app_camera_msync_aligned((void *)addr, size,
         ESP_CACHE_MSYNC_FLAG_DIR_M2C |
         ESP_CACHE_MSYNC_FLAG_INVALIDATE);
 }
+/* 将 CPU 写入结果同步回外设/LVGL 可访问的状态。 */
 static inline esp_err_t app_camera_msync_c2m(void *addr, size_t size)
 {
     return app_camera_msync_aligned(addr, size,
         ESP_CACHE_MSYNC_FLAG_DIR_C2M |
         ESP_CACHE_MSYNC_FLAG_INVALIDATE);
 }
+/* 兼容 LVGL 8/9 获取当前活动屏幕对象。 */
 static lv_obj_t *app_get_active_screen(void)
 {
 #if LVGL_VERSION_MAJOR >= 9
@@ -121,6 +126,7 @@ static lv_obj_t *app_get_active_screen(void)
 /* 缓冲区生命周期                                                            */
 /* -------------------------------------------------------------------------- */
 
+/* 释放摄像头 USERPTR 帧缓冲。 */
 static void app_camera_free_camera_buffers(void)
 {
     for (int i = 0; i < CAMERA_NUM_BUFS; i++) {
@@ -133,6 +139,7 @@ static void app_camera_free_camera_buffers(void)
     }
     s_cam_buf_size = 0;
 }
+/* 释放预览 stage buffer 和 LVGL 画布缓冲。 */
 static void app_camera_free_display_buffers(void)
 {
     for (int i = 0; i < STAGE_NUM_BUFS; i++) {
@@ -154,6 +161,7 @@ static void app_camera_free_display_buffers(void)
     s_displayed_stage_index = -1;
     s_disp_buf_size = 0;
 }
+/* 在 PSRAM 中分配显示画布和三路 stage buffer。 */
 static esp_err_t app_camera_alloc_display_buffers(void)
 {
     esp_err_t ret = esp_cache_get_alignment(MALLOC_CAP_SPIRAM, &s_cache_line_size);
@@ -185,6 +193,7 @@ static esp_err_t app_camera_alloc_display_buffers(void)
     }
     return ESP_OK;
 }
+/* 根据摄像头帧大小分配 V4L2 USERPTR 缓冲。 */
 static esp_err_t app_camera_alloc_userptr_buffers(size_t frame_size)
 {
     if (s_cache_line_size == 0)
@@ -216,6 +225,7 @@ static esp_err_t app_camera_alloc_userptr_buffers(size_t frame_size)
 /* 画布和 PPA 初始化                                                        */
 /* -------------------------------------------------------------------------- */
 
+/* 创建 LVGL canvas，并绑定预览使用的 RGB565 缓冲。 */
 static esp_err_t app_camera_create_canvas(void)
 {
     if (s_camera_canvas != NULL)
@@ -249,6 +259,7 @@ static esp_err_t app_camera_create_canvas(void)
     return ESP_OK;
 }
 #if SOC_PPA_SUPPORTED
+/* 注册 PPA 缩放旋转客户端，用于硬件加速预览缩放。 */
 static void app_ppa_init(void)
 {
     if (s_ppa_srm_handle)
@@ -264,6 +275,7 @@ static void app_ppa_init(void)
         ESP_LOGE(TAG, "ppa_register_client failed: 0x%x", ret);
     }
 }
+/* 按源宽高比计算适配目标区域后的显示尺寸。 */
 static void calc_aspect_fit(uint32_t src_w, uint32_t src_h,
     uint32_t dst_w, uint32_t dst_h,
     uint32_t *out_w, uint32_t *out_h)
@@ -281,6 +293,7 @@ static void calc_aspect_fit(uint32_t src_w, uint32_t src_h,
         *out_w = (uint32_t)(dst_h * src_aspect);
     }
 }
+/* 清理预览画面的黑边区域，避免上一帧残影。 */
 static esp_err_t app_camera_clear_letterbox(uint8_t *out_buf,
     uint32_t out_width,
     uint32_t out_height)
@@ -347,6 +360,7 @@ static esp_err_t app_camera_clear_letterbox(uint8_t *out_buf,
 
     return ESP_OK;
 }
+/* 调用 PPA 将摄像头帧缩放、旋转并写入显示 stage buffer。 */
 static esp_err_t app_image_process_scale_crop(uint8_t *in_buf,
     uint32_t in_width,
     uint32_t in_height,
@@ -394,6 +408,7 @@ static esp_err_t app_image_process_scale_crop(uint8_t *in_buf,
     return ppa_do_scale_rotate_mirror(s_ppa_srm_handle, &srm_cfg);
 }
 
+/* 把 BSP 摄像头旋转角度转换为 PPA 使用的枚举。 */
 static ppa_srm_rotation_angle_t app_camera_ppa_rotation(void)
 {
     switch (BSP_CAMERA_ROTATION) {
@@ -405,6 +420,7 @@ static ppa_srm_rotation_angle_t app_camera_ppa_rotation(void)
     }
 }
 
+/* 结合旋转方向计算预览画面在屏幕中的适配尺寸。 */
 static void app_camera_calc_preview_fit(uint32_t camera_width,
     uint32_t camera_height,
     uint32_t *out_w,
@@ -425,6 +441,7 @@ static void app_camera_calc_preview_fit(uint32_t camera_width,
 /* Stage 缓冲交接                                                        */
 /* -------------------------------------------------------------------------- */
 
+/* 判断是否已有等待显示任务消费的 stage buffer。 */
 static bool app_camera_has_pending_stage(void)
 {
     bool has_pending = false;
@@ -435,6 +452,7 @@ static bool app_camera_has_pending_stage(void)
     taskEXIT_CRITICAL(&s_display_mux);
     return has_pending;
 }
+/* 从 stage buffer 池中领取一个空闲缓冲作为写入目标。 */
 static int app_camera_pick_writable_stage_buffer(void)
 {
     int idx = -1;
@@ -452,6 +470,7 @@ static int app_camera_pick_writable_stage_buffer(void)
     taskEXIT_CRITICAL(&s_display_mux);
     return idx;
 }
+/* 发布一帧已写好的 stage buffer，并唤醒显示任务。 */
 static void app_camera_publish_stage_buffer(int ready_index)
 {
 
@@ -470,6 +489,7 @@ static void app_camera_publish_stage_buffer(int ready_index)
         xTaskNotifyGive(s_display_task_handle);
     }
 }
+/* 放弃当前写入中的 stage buffer，并重新标记为空闲。 */
 static void app_camera_abandon_stage_buffer(int buf_index)
 {
     if (buf_index < 0 || buf_index >= STAGE_NUM_BUFS)
@@ -485,6 +505,7 @@ static void app_camera_abandon_stage_buffer(int buf_index)
 
     taskEXIT_CRITICAL(&s_display_mux);
 }
+/* 显示任务领取最新 ready 的 stage buffer。 */
 static int app_camera_take_ready_stage_buffer(void)
 {
     int idx = -1;
@@ -500,6 +521,7 @@ static int app_camera_take_ready_stage_buffer(void)
     taskEXIT_CRITICAL(&s_display_mux);
     return idx;
 }
+/* 释放不再需要的 stage buffer，并清理相关索引。 */
 static void app_camera_release_stage_buffer(int buf_index)
 {
     if (buf_index < 0 || buf_index >= STAGE_NUM_BUFS)
@@ -520,6 +542,7 @@ static void app_camera_release_stage_buffer(int buf_index)
 
     taskEXIT_CRITICAL(&s_display_mux);
 }
+/* 标记某个 stage buffer 已显示，并回收上一帧显示缓冲。 */
 static void app_camera_mark_displayed_stage_buffer(int buf_index)
 {
     if (buf_index < 0 || buf_index >= STAGE_NUM_BUFS)
@@ -543,6 +566,7 @@ static void app_camera_mark_displayed_stage_buffer(int buf_index)
 /* 显示任务和摄像头帧回调                                      */
 /* -------------------------------------------------------------------------- */
 
+/* 显示任务：把 ready stage buffer 绑定到 LVGL canvas 并刷新。 */
 static void app_camera_display_task(void *arg)
 {
     (void)arg;
@@ -593,6 +617,7 @@ static void app_camera_display_task(void *arg)
         }
     }
 }
+/* 摄像头帧回调：抽样送视觉识别，同时生成预览 stage buffer。 */
 static void app_camera_frame_cb(uint8_t *camera_buf,
     uint8_t camera_buf_index,
     uint32_t camera_buf_hes,
@@ -690,6 +715,7 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
     }
     app_camera_publish_stage_buffer(stage_index);
 }
+/* 创建预览显示任务，重复调用会直接成功返回。 */
 static esp_err_t app_camera_start_display_task(void)
 {
     if (s_display_task_handle)
@@ -711,6 +737,7 @@ static esp_err_t app_camera_start_display_task(void)
 /* 公开接口                                                                  */
 /* -------------------------------------------------------------------------- */
 
+/* 初始化摄像头预览流水线，完成缓冲、画布、任务和回调注册。 */
 esp_err_t app_camera_init(void)
 {
     if (s_camera_inited)
@@ -758,6 +785,7 @@ esp_err_t app_camera_init(void)
     return ESP_OK;
 #endif
 }
+/* 打开 V4L2 视频流并启动摄像头帧采集。 */
 esp_err_t app_camera_preview_start(void)
 {
     if (!s_camera_inited)

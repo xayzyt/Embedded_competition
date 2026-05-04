@@ -1,5 +1,10 @@
 #pragma once
 
+/*
+ * ESP32-P4 与 CH32 运动控制器之间的 UART 协议层。
+ * app_ctrl 通过本层发送命令，并接收解析后的状态帧。
+ */
+
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -144,22 +149,34 @@ typedef struct {
     uint16_t payload_len;                              /* 当前 payload 的有效长度。 */
 } app_ch32_line_t;
 
+/* CH32 消息解析完成后通知上层控制模块的回调类型。 */
 typedef void (*app_ch32_line_cb_t)(const app_ch32_line_t *msg, void *user_ctx);
 
+/* 启动 UART 收发任务，并注册解析后消息的回调。 */
 esp_err_t app_ch32_link_init(app_ch32_line_cb_t cb, void *user_ctx);
 
+/* 通过兼容字符命令发送 CH32 动作，并等待对应 ACK。 */
 esp_err_t app_ch32_link_send_cmd_and_wait_ack(char cmd, uint32_t timeout_ms);
+
+/* 主动发送 ready 探测命令，并等待 CH32 上报可用。 */
 esp_err_t app_ch32_link_probe_ready(uint32_t timeout_ms);
 
+/* 发送二进制协议命令帧，可选携带 payload 并返回序号。 */
 esp_err_t app_ch32_link_send_proto(app_ch32_proto_cmd_t cmd,
                                    const void *payload,
                                    uint8_t payload_len,
                                    uint8_t *out_seq);
 
+/* 查询最近 ready 状态，过期会自动失效。 */
 bool app_ch32_link_is_ready(void);
+
+/* 读取最近一次 CH32 状态帧里的称重值。 */
 bool app_ch32_link_last_weight(int32_t *out_weight_g);
 
+/* 将 CH32 阶段枚举转换成可读名称。 */
 const char *app_ch32_link_proto_stage_name(app_ch32_proto_stage_t stage);
+
+/* 将 CH32 错误码转换成可读名称。 */
 const char *app_ch32_link_proto_error_name(uint8_t err);
 
 #ifdef __cplusplus

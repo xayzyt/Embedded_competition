@@ -1,3 +1,4 @@
+/* 实现说明：同一个 UART 读取任务同时解析二进制协议帧和调试文本。 */
 /*
  * app_ch32_link.c - ESP32-P4 与 CH32V203 副控通信模块
  *
@@ -64,6 +65,7 @@ static app_ch32_link_ctx_t s_ctx = {0};
 /* 协议字节辅助函数                                                       */
 /* -------------------------------------------------------------------------- */
 
+/* 计算 CH32 协议帧使用的 CRC16-IBM 校验值。 */
 static uint16_t app_ch32_crc16_ibm(const uint8_t *data, size_t len)
 {
     uint16_t crc = 0xFFFFU;
@@ -82,6 +84,7 @@ static uint16_t app_ch32_crc16_ibm(const uint8_t *data, size_t len)
     }
     return crc;
 }
+/* 从小端字节序读取 int32_t。 */
 static int32_t app_ch32_read_i32_le(const uint8_t *p)
 {
     return (int32_t)((uint32_t)p[0] |
@@ -89,10 +92,12 @@ static int32_t app_ch32_read_i32_le(const uint8_t *p)
         ((uint32_t)p[2] << 16) |
         ((uint32_t)p[3] << 24));
 }
+/* 从小端字节序读取 uint16_t。 */
 static uint16_t app_ch32_read_u16_le(const uint8_t *p)
 {
     return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
 }
+/* 将旧版 ASCII 命令映射为新版二进制协议命令。 */
 static app_ch32_proto_cmd_t app_ch32_char_cmd_to_proto(char cmd)
 {
     switch (cmd) {
@@ -110,6 +115,7 @@ static app_ch32_proto_cmd_t app_ch32_char_cmd_to_proto(char cmd)
     }
 }
 
+/* 清空 ACK/NACK 等待状态，避免旧事件影响下一条命令。 */
 static void app_ch32_reset_ack_state(void)
 {
     /* 发送新命令前清空上一轮 ACK/NACK，避免旧事件误命中新命令。 */
@@ -124,6 +130,7 @@ static void app_ch32_reset_ack_state(void)
 /* 公开协议名称辅助函数                                                */
 /* -------------------------------------------------------------------------- */
 
+/* 将 CH32 执行阶段转换成日志可读名称。 */
 const char *app_ch32_link_proto_stage_name(app_ch32_proto_stage_t stage)
 {
     switch (stage) {
@@ -145,6 +152,7 @@ const char *app_ch32_link_proto_stage_name(app_ch32_proto_stage_t stage)
     default:                             return "UNKNOWN";
     }
 }
+/* 将 CH32 错误码转换成日志可读名称。 */
 const char *app_ch32_link_proto_error_name(uint8_t err)
 {
     switch ((app_ch32_proto_error_t)err) {
@@ -162,6 +170,7 @@ const char *app_ch32_link_proto_error_name(uint8_t err)
     default:                       return "UNKNOWN";
     }
 }
+/* 根据阶段和 flags 判断 CH32 是否可接受新动作。 */
 static bool app_ch32_proto_stage_indicates_ready(app_ch32_proto_stage_t stage, uint16_t flags)
 {
     if ((flags & APP_CH32_FLAG_READY) != 0U)
@@ -183,6 +192,7 @@ static bool app_ch32_proto_stage_indicates_ready(app_ch32_proto_stage_t stage, u
 /* 接收副作用和分发                                           */
 /* -------------------------------------------------------------------------- */
 
+/* 判断缓存的 ready 状态是否仍在有效时间窗口内。 */
 static bool app_ch32_ready_is_fresh(void)
 {
     if (!s_ctx.ready)
@@ -202,6 +212,7 @@ static bool app_ch32_ready_is_fresh(void)
     }
     return true;
 }
+/* 根据收到的协议帧更新 ready、称重和 ACK/NACK 同步状态。 */
 static void app_ch32_apply_common_side_effects(const app_ch32_line_t *msg)
 {
     if (msg == NULL)
@@ -245,6 +256,7 @@ static void app_ch32_apply_common_side_effects(const app_ch32_line_t *msg)
         xEventGroupSetBits(s_ctx.event_group, CH32_EVT_NACK);
     }
 }
+/* 应用接收副作用后，把解析好的消息分发给上层回调。 */
 static void app_ch32_dispatch_msg(const app_ch32_line_t *msg)
 {
     if (msg == NULL)
@@ -263,6 +275,7 @@ static void app_ch32_dispatch_msg(const app_ch32_line_t *msg)
 /* 协议帧解析                                                      */
 /* -------------------------------------------------------------------------- */
 
+/* 校验并解析一帧完整 CH32 二进制协议数据。 */
 static bool app_ch32_parse_proto_frame(const uint8_t *frame, size_t frame_len, app_ch32_line_t *out)
 {
     if ((frame == NULL) || (out == NULL))
@@ -375,6 +388,7 @@ static bool app_ch32_parse_proto_frame(const uint8_t *frame, size_t frame_len, a
 /* UART 接收任务                                                           */
 /* -------------------------------------------------------------------------- */
 
+/* UART 接收任务，按字节组帧并解析 CH32 协议帧。 */
 static void app_ch32_link_rx_task(void *arg)
 {
     uint8_t ch = 0;
@@ -451,6 +465,7 @@ static void app_ch32_link_rx_task(void *arg)
 /* UART 发送路径                                                              */
 /* -------------------------------------------------------------------------- */
 
+/* 配置 TX 引脚为空闲高电平，减少串口启动瞬间误触发。 */
 static esp_err_t app_ch32_link_prepare_tx_idle(void)
 {
     gpio_config_t io_conf = {
@@ -465,6 +480,7 @@ static esp_err_t app_ch32_link_prepare_tx_idle(void)
     return ESP_OK;
 }
 
+/* 组装并发送一帧 CH32 二进制协议命令。 */
 esp_err_t app_ch32_link_send_proto(app_ch32_proto_cmd_t cmd,
     const void *payload,
     uint8_t payload_len,
@@ -517,6 +533,7 @@ esp_err_t app_ch32_link_send_proto(app_ch32_proto_cmd_t cmd,
 /* ACK 等待辅助函数                                                            */
 /* -------------------------------------------------------------------------- */
 
+/* 等待指定命令和序号的 ACK/NACK，并过滤不匹配的旧事件。 */
 static esp_err_t app_ch32_link_wait_ack_for_cmd(app_ch32_proto_cmd_t cmd, uint8_t seq, uint32_t timeout_ms)
 {
     uint32_t elapsed_ms = 0;
@@ -588,6 +605,7 @@ static esp_err_t app_ch32_link_wait_ack_for_cmd(app_ch32_proto_cmd_t cmd, uint8_
 /* 公开接口                                                                  */
 /* -------------------------------------------------------------------------- */
 
+/* 初始化 UART、事件组和接收任务，并注册上层消息回调。 */
 esp_err_t app_ch32_link_init(app_ch32_line_cb_t cb, void *user_ctx)
 {
     ESP_RETURN_ON_FALSE(!s_ctx.inited, ESP_ERR_INVALID_STATE, TAG, "already initialized");
@@ -635,6 +653,7 @@ esp_err_t app_ch32_link_init(app_ch32_line_cb_t cb, void *user_ctx)
         APP_CH32_LINK_BAUD_RATE);
     return ESP_OK;
 }
+/* 发送兼容字符命令并等待对应协议 ACK。 */
 esp_err_t app_ch32_link_send_cmd_and_wait_ack(char cmd, uint32_t timeout_ms)
 {
     ESP_RETURN_ON_FALSE(s_ctx.inited, ESP_ERR_INVALID_STATE, TAG, "not initialized");
@@ -653,6 +672,7 @@ esp_err_t app_ch32_link_send_cmd_and_wait_ack(char cmd, uint32_t timeout_ms)
     ESP_RETURN_ON_ERROR(app_ch32_link_send_proto(proto_cmd, NULL, 0, &seq), TAG, "proto send failed");
     return app_ch32_link_wait_ack_for_cmd(proto_cmd, seq, timeout_ms);
 }
+/* 主动探测 CH32 ready 状态，超时则返回 ESP_ERR_TIMEOUT。 */
 esp_err_t app_ch32_link_probe_ready(uint32_t timeout_ms)
 {
     ESP_RETURN_ON_FALSE(s_ctx.inited, ESP_ERR_INVALID_STATE, TAG, "not initialized");
@@ -675,10 +695,12 @@ esp_err_t app_ch32_link_probe_ready(uint32_t timeout_ms)
         pdMS_TO_TICKS(timeout_ms));
     return ((bits & CH32_EVT_READY) != 0U) ? ESP_OK : ESP_ERR_TIMEOUT;
 }
+/* 查询 CH32 是否处于近期有效的 ready 状态。 */
 bool app_ch32_link_is_ready(void)
 {
     return app_ch32_ready_is_fresh();
 }
+/* 读取最近一次缓存的称重值。 */
 bool app_ch32_link_last_weight(int32_t *out_weight_g)
 {
     if ((!s_ctx.has_weight) || (out_weight_g == NULL))

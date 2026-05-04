@@ -1,3 +1,4 @@
+/* 实现说明：云端启动失败时允许本地视觉和控制继续运行。 */
 /*
  * app_cloud.c - Wi-Fi / MQTT 云端通信模块
  *
@@ -75,6 +76,7 @@ typedef struct {
 static app_cloud_runtime_t s_cloud = {0};
 static TaskHandle_t s_cloud_task = NULL;
 
+/* MQTT 事件处理函数需要先声明，创建客户端时会注册它。 */
 static void app_cloud_mqtt_event_handler(void *handler_args,
     esp_event_base_t base,
     int32_t event_id,
@@ -84,6 +86,7 @@ static void app_cloud_mqtt_event_handler(void *handler_args,
 /* JSON 小工具                                                          */
 /* -------------------------------------------------------------------------- */
 
+/* 从简单 JSON 文本中提取字符串字段。 */
 static bool app_cloud_json_get_string(const char *json,
     const char *key,
     char *out,
@@ -132,6 +135,7 @@ static bool app_cloud_json_get_string(const char *json,
     out[i] = '\0';
     return true;
 }
+/* 从简单 JSON 文本中提取 uint16 数字字段。 */
 static bool app_cloud_json_get_u16(const char *json,
     const char *key,
     uint16_t *out)
@@ -175,6 +179,7 @@ static bool app_cloud_json_get_u16(const char *json,
     *out = (uint16_t)value;
     return true;
 }
+/* 解析云端命令 payload，得到命令名、目标 ID 和 request_id。 */
 static esp_err_t app_cloud_parse_command_json(const char *payload, app_cloud_cmd_t *out)
 {
     if (payload == NULL || out == NULL)
@@ -197,6 +202,7 @@ static esp_err_t app_cloud_parse_command_json(const char *payload, app_cloud_cmd
 /* Wi-Fi / MQTT 初始化辅助函数                                                  */
 /* -------------------------------------------------------------------------- */
 
+/* 初始化 esp_netif，已初始化时视为成功。 */
 static esp_err_t app_cloud_init_netif_once(void)
 {
     esp_err_t ret = esp_netif_init();
@@ -206,6 +212,7 @@ static esp_err_t app_cloud_init_netif_once(void)
     }
     return ret;
 }
+/* 创建默认事件循环，已创建时视为成功。 */
 static esp_err_t app_cloud_init_event_loop_once(void)
 {
     esp_err_t ret = esp_event_loop_create_default();
@@ -215,6 +222,7 @@ static esp_err_t app_cloud_init_event_loop_once(void)
     }
     return ret;
 }
+/* 根据 topic 前缀和设备名生成命令、应答和状态 topic。 */
 static void app_cloud_build_topics(void)
 {
     snprintf(s_cloud.topic_cmd,
@@ -233,6 +241,7 @@ static void app_cloud_build_topics(void)
         CONFIG_SKY_MQTT_TOPIC_PREFIX,
         CONFIG_SKY_MQTT_DEVICE_NAME);
 }
+/* 打印当前 MQTT topic，方便联调订阅路径。 */
 static void app_cloud_log_topics_once(void)
 {
     ESP_LOGD(TAG,
@@ -241,6 +250,7 @@ static void app_cloud_log_topics_once(void)
         s_cloud.topic_ack,
         s_cloud.topic_state);
 }
+/* 检查 Wi-Fi 和 MQTT menuconfig 配置是否完整有效。 */
 static esp_err_t app_cloud_validate_config(void)
 {
     if (CONFIG_SKY_WIFI_SSID[0] == '\0')
@@ -285,6 +295,7 @@ static esp_err_t app_cloud_validate_config(void)
 /* 发布辅助函数                                                             */
 /* -------------------------------------------------------------------------- */
 
+/* 向指定 MQTT topic 发布原始 payload。 */
 static esp_err_t app_cloud_publish_raw(const char *topic,
     const char *payload,
     int qos,
@@ -309,6 +320,7 @@ static esp_err_t app_cloud_publish_raw(const char *topic,
     ESP_LOGD(TAG, "mqtt tx topic=%s msg_id=%d", topic, msg_id);
     return ESP_OK;
 }
+/* 发布云端命令处理结果 ACK。 */
 static esp_err_t app_cloud_publish_ack(const app_cloud_cmd_t *cmd,
     int code,
     const char *msg,
@@ -336,6 +348,7 @@ static esp_err_t app_cloud_publish_ack(const app_cloud_cmd_t *cmd,
         (unsigned)target_id);
     return app_cloud_publish_raw(s_cloud.topic_ack, json, CONFIG_SKY_MQTT_QOS, 0);
 }
+/* 将任务快照组装成 JSON 并发布到状态 topic。 */
 static void app_cloud_publish_task_snapshot_internal(const app_task_snapshot_t *snap)
 {
     if (snap == NULL)
@@ -388,6 +401,7 @@ static void app_cloud_publish_task_snapshot_internal(const app_task_snapshot_t *
 /* 任务和云端命令处理                                             */
 /* -------------------------------------------------------------------------- */
 
+/* app_task 状态变化回调，用于缓存并发布最新任务快照。 */
 static void app_cloud_on_task_event(app_task_event_t event,
     const app_task_snapshot_t *snap,
     void *user_ctx)
@@ -402,6 +416,7 @@ static void app_cloud_on_task_event(app_task_event_t event,
     s_cloud.have_last_snapshot = true;
     app_cloud_publish_task_snapshot_internal(snap);
 }
+/* 创建 MQTT 客户端实例并填入连接、认证和证书配置。 */
 static esp_err_t app_cloud_create_mqtt_client(void)
 {
     if (s_cloud.mqtt_client != NULL)
@@ -431,6 +446,7 @@ static esp_err_t app_cloud_create_mqtt_client(void)
     }
     return ESP_OK;
 }
+/* 销毁 MQTT 客户端并清理连接状态。 */
 static void app_cloud_destroy_mqtt_client(void)
 {
     if (s_cloud.mqtt_client != NULL)
@@ -441,6 +457,7 @@ static void app_cloud_destroy_mqtt_client(void)
     s_cloud.mqtt_started = false;
     s_cloud.mqtt_connected = false;
 }
+/* Wi-Fi 已连上时启动 MQTT 客户端。 */
 static void app_cloud_start_mqtt_if_needed(void)
 {
     if (s_cloud.mqtt_client == NULL && app_cloud_create_mqtt_client() != ESP_OK)
@@ -460,11 +477,13 @@ static void app_cloud_start_mqtt_if_needed(void)
     s_cloud.mqtt_started = true;
     ESP_LOGI(TAG, "EMQX mqtt client started");
 }
+/* 处理云端 set_target 命令。 */
 static esp_err_t app_cloud_receive_set_target(uint16_t target_id)
 {
     ESP_LOGI(TAG, "cloud rx: set_target=%u", (unsigned)target_id);
     return app_task_set_target_id(target_id, true);
 }
+/* 处理云端 start_task 命令，并记录 request_id。 */
 static esp_err_t app_cloud_receive_start_task(const app_cloud_cmd_t *cmd)
 {
     if (cmd == NULL)
@@ -487,12 +506,14 @@ static esp_err_t app_cloud_receive_start_task(const app_cloud_cmd_t *cmd)
     }
     return ret;
 }
+/* 处理云端 cancel 命令。 */
 static esp_err_t app_cloud_receive_cancel(void)
 {
     ESP_LOGI(TAG, "cloud rx: cancel");
     app_task_cancel("cancelled by cloud");
     return ESP_OK;
 }
+/* 解析并分发云端 MQTT 命令 payload。 */
 static esp_err_t app_cloud_handle_command(const char *payload, size_t payload_len)
 {
     char json[APP_CLOUD_CMD_PAYLOAD_LEN];
@@ -556,6 +577,7 @@ static esp_err_t app_cloud_handle_command(const char *payload, size_t payload_le
     return ESP_ERR_NOT_SUPPORTED;
 }
 
+/* 将 MQTT 事件中的非零结尾片段复制成 C 字符串。 */
 static int app_cloud_copy_event_slice(char *dst, size_t dst_size, const char *src, int src_len)
 {
     if ((dst == NULL) || (dst_size == 0U))
@@ -584,6 +606,7 @@ static int app_cloud_copy_event_slice(char *dst, size_t dst_size, const char *sr
 /* MQTT 和 Wi-Fi 事件回调                                              */
 /* -------------------------------------------------------------------------- */
 
+/* 处理 MQTT DATA 事件，筛选命令 topic 并解析命令。 */
 static void app_cloud_handle_mqtt_data_event(esp_mqtt_event_handle_t event)
 {
     if (event == NULL || event->topic == NULL || event->data == NULL)
@@ -606,6 +629,7 @@ static void app_cloud_handle_mqtt_data_event(esp_mqtt_event_handle_t event)
         (void)app_cloud_handle_command(payload, (size_t)data_len);
     }
 }
+/* 云端后台任务，等待 Wi-Fi 事件通知后启动 MQTT。 */
 static void app_cloud_task(void *arg)
 {
     (void)arg;
@@ -622,6 +646,7 @@ static void app_cloud_task(void *arg)
         }
     }
 }
+/* Wi-Fi/IP 事件回调，负责联网、重连和触发 MQTT 启动。 */
 static void app_cloud_wifi_event_handler(void *arg,
     esp_event_base_t event_base,
     int32_t event_id,
@@ -665,6 +690,7 @@ static void app_cloud_wifi_event_handler(void *arg,
             APP_CLOUD_WIFI_CONNECTED_BIT | APP_CLOUD_START_MQTT_BIT);
     }
 }
+/* MQTT 事件回调，维护连接状态、订阅命令并处理数据。 */
 static void app_cloud_mqtt_event_handler(void *handler_args,
     esp_event_base_t base,
     int32_t event_id,
@@ -720,6 +746,7 @@ static void app_cloud_mqtt_event_handler(void *handler_args,
 /* 公开接口                                                                  */
 /* -------------------------------------------------------------------------- */
 
+/* 初始化云端链路：配置网络、注册事件、创建任务并启动 Wi-Fi。 */
 esp_err_t app_cloud_init(void)
 {
     if (s_cloud.inited)

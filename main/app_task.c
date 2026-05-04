@@ -1,3 +1,4 @@
+/* 实现说明：任务状态的所有变化都集中从本模块流转，方便 UI 和云端同步。 */
 /*
  * app_task.c - 接驳任务状态管理模块
  *
@@ -47,10 +48,12 @@ static void *s_event_user_ctx = NULL;
 /* 状态辅助函数                                                               */
 /* -------------------------------------------------------------------------- */
 
+/* 获取当前系统毫秒时间，用作任务状态时间戳。 */
 static uint32_t app_task_now_ms(void)
 {
     return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
 }
+/* 在已持锁状态下切换任务状态，并更新说明文本。 */
 static void app_task_change_state_locked(app_task_state_t state, const char *note)
 {
     s_rt.state = state;
@@ -65,6 +68,7 @@ static void app_task_change_state_locked(app_task_state_t state, const char *not
     }
 }
 
+/* 在已持锁状态下把内部运行状态拷贝成外部快照。 */
 static void app_task_copy_snapshot_locked(app_task_snapshot_t *out)
 {
     out->inited = s_rt.inited;
@@ -78,6 +82,7 @@ static void app_task_copy_snapshot_locked(app_task_snapshot_t *out)
     strlcpy(out->note, s_rt.note, sizeof(out->note));
 }
 
+/* 向已注册回调广播一次任务事件和当前快照。 */
 static void app_task_emit_event(app_task_event_t event)
 {
     app_task_event_cb_t cb = NULL;
@@ -100,6 +105,7 @@ static void app_task_emit_event(app_task_event_t event)
 /* 持久化                                                                 */
 /* -------------------------------------------------------------------------- */
 
+/* 将目标 tag ID 写入 NVS，供下次启动恢复。 */
 static esp_err_t app_task_persist_target_id(uint16_t target_id)
 {
     nvs_handle_t handle;
@@ -116,6 +122,7 @@ static esp_err_t app_task_persist_target_id(uint16_t target_id)
     nvs_close(handle);
     return ret;
 }
+/* 从 NVS 读取目标 tag ID，失败时回退到默认值。 */
 static uint16_t app_task_load_target_id(uint16_t default_target_id)
 {
     nvs_handle_t handle;
@@ -138,6 +145,7 @@ static uint16_t app_task_load_target_id(uint16_t default_target_id)
 /* 公开接口                                                                  */
 /* -------------------------------------------------------------------------- */
 
+/* 注册任务状态变化回调，通常由云端模块用于发布状态。 */
 esp_err_t app_task_register_event_callback(app_task_event_cb_t cb, void *user_ctx)
 {
 
@@ -148,6 +156,7 @@ esp_err_t app_task_register_event_callback(app_task_event_cb_t cb, void *user_ct
     taskEXIT_CRITICAL(&s_mux);
     return ESP_OK;
 }
+/* 初始化任务模块，恢复目标 ID 并进入 CONFIGURED 状态。 */
 esp_err_t app_task_init(uint16_t default_target_id)
 {
 
@@ -174,6 +183,7 @@ esp_err_t app_task_init(uint16_t default_target_id)
     app_task_emit_event(APP_TASK_EVENT_INIT);
     return ESP_OK;
 }
+/* 更新目标 tag ID；如果当前没有活动任务，则回到 CONFIGURED 状态。 */
 esp_err_t app_task_set_target_id(uint16_t target_id, bool persist)
 {
     if (!s_rt.inited)
@@ -204,6 +214,7 @@ esp_err_t app_task_set_target_id(uint16_t target_id, bool persist)
     app_task_emit_event(APP_TASK_EVENT_TARGET_UPDATED);
     return ESP_OK;
 }
+/* 启动一单任务，进入等待目标靠近的 WAIT_APPROACH 状态。 */
 esp_err_t app_task_start_with_target(uint16_t target_id, const char *source)
 {
     if (!s_rt.inited)
@@ -224,10 +235,12 @@ esp_err_t app_task_start_with_target(uint16_t target_id, const char *source)
     app_task_emit_event(APP_TASK_EVENT_STATE_CHANGED);
     return ESP_OK;
 }
+/* 远程任务提交入口，本质上是带 remote/emqx 来源的任务启动。 */
 esp_err_t app_task_submit_remote_request(uint16_t target_id, const char *source)
 {
     return app_task_start_with_target(target_id, (source != NULL) ? source : "remote");
 }
+/* 视觉确认目标后，将任务从 WAIT_APPROACH 推进到 AUTH_PASSED。 */
 void app_task_mark_auth_passed(uint16_t matched_tag_id)
 {
     bool changed = false;
@@ -245,6 +258,7 @@ void app_task_mark_auth_passed(uint16_t matched_tag_id)
         app_task_emit_event(APP_TASK_EVENT_STATE_CHANGED);
     }
 }
+/* 接驳动作开始后，将任务推进到 DOCKING。 */
 void app_task_mark_docking_started(void)
 {
     bool changed = false;
@@ -261,6 +275,7 @@ void app_task_mark_docking_started(void)
         app_task_emit_event(APP_TASK_EVENT_STATE_CHANGED);
     }
 }
+/* 接驳流程完成后结束活动任务，并进入 COMPLETED。 */
 void app_task_mark_completed(const char *note)
 {
     taskENTER_CRITICAL(&s_mux);
@@ -269,6 +284,7 @@ void app_task_mark_completed(const char *note)
     taskEXIT_CRITICAL(&s_mux);
     app_task_emit_event(APP_TASK_EVENT_STATE_CHANGED);
 }
+/* 出现超时、拒绝或硬件错误时结束活动任务，并进入 FAULT。 */
 void app_task_mark_fault(const char *note)
 {
     taskENTER_CRITICAL(&s_mux);
@@ -277,6 +293,7 @@ void app_task_mark_fault(const char *note)
     taskEXIT_CRITICAL(&s_mux);
     app_task_emit_event(APP_TASK_EVENT_STATE_CHANGED);
 }
+/* 主动取消当前任务，并清除已匹配的 tag ID。 */
 void app_task_cancel(const char *note)
 {
     taskENTER_CRITICAL(&s_mux);
@@ -286,6 +303,7 @@ void app_task_cancel(const char *note)
     taskEXIT_CRITICAL(&s_mux);
     app_task_emit_event(APP_TASK_EVENT_STATE_CHANGED);
 }
+/* 读取任务快照；读取后会清除 target_dirty 标记。 */
 bool app_task_get_snapshot(app_task_snapshot_t *out)
 {
     if (out == NULL)
@@ -298,6 +316,7 @@ bool app_task_get_snapshot(app_task_snapshot_t *out)
     taskEXIT_CRITICAL(&s_mux);
     return true;
 }
+/* 将任务状态枚举转换成 MQTT/UI 友好的短文本。 */
 const char *app_task_state_to_text(app_task_state_t state)
 {
     switch (state) {
@@ -312,6 +331,7 @@ const char *app_task_state_to_text(app_task_state_t state)
     default:                           return "unknown";
     }
 }
+/* 将任务快照压缩成一行 UI 状态栏文本。 */
 void app_task_format_brief(const app_task_snapshot_t *snap, char *buf, size_t buf_len)
 {
     if (snap == NULL || buf == NULL || buf_len == 0U)

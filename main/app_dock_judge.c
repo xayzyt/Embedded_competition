@@ -1,3 +1,4 @@
+/* 实现说明：这里仅做视觉到控制之间的接驳条件判定，不直接驱动硬件。 */
 /*
  * app_dock_judge.c - 无人机接驳条件判定模块
  *
@@ -48,14 +49,17 @@ static bool s_inited = false;
 /* 数学和滤波辅助函数                                                  */
 /* -------------------------------------------------------------------------- */
 
+/* 返回 int32_t 绝对值，用于偏差评分。 */
 static inline int32_t app_abs_i32(int32_t v)
 {
     return (v >= 0) ? v : -v;
 }
+/* 对 uint8_t 计数做饱和递增，避免防抖计数溢出。 */
 static inline uint8_t app_sat_inc_u8(uint8_t v)
 {
     return (v == UINT8_MAX) ? UINT8_MAX : (uint8_t)(v + 1U);
 }
+/* 对整数采样做 EMA 滤波，平滑中心点和面积。 */
 static int32_t app_filter_ema_i32(int32_t prev, int32_t sample, uint8_t shift)
 {
     if (shift == 0U)
@@ -66,6 +70,7 @@ static int32_t app_filter_ema_i32(int32_t prev, int32_t sample, uint8_t shift)
     return prev + ((delta >= 0) ? ((delta + (1 << (shift - 1))) >> shift)
         : -(((-delta) + (1 << (shift - 1))) >> shift));
 }
+/* 对浮点采样做 EMA 滤波，平滑边长和角度。 */
 static float app_filter_ema_f32(float prev, float sample, uint8_t shift)
 {
     if (shift == 0U)
@@ -75,12 +80,14 @@ static float app_filter_ema_f32(float prev, float sample, uint8_t shift)
     const float alpha = 1.0f / (float)(1U << shift);
     return prev + (sample - prev) * alpha;
 }
+/* 将 int32_t 数值限制在指定区间内。 */
 static int32_t app_clip_i32(int32_t v, int32_t lo, int32_t hi)
 {
     if (v < lo) return lo;
     if (v > hi) return hi;
     return v;
 }
+/* 把当前视觉结果写入滤波器，目标 ID 变化时重置历史。 */
 static void app_dock_apply_filter(const app_vision_result_t *vision)
 {
     if (!s_rt.have_filter || (s_rt.last_tag_id != vision->tag_id))
@@ -122,6 +129,7 @@ static void app_dock_apply_filter(const app_vision_result_t *vision)
         vision->top_edge_angle_deg,
         s_cfg.ema_shift);
 }
+/* 根据 tag 实际尺寸、焦距和成像边长粗估距离。 */
 static int32_t app_dock_estimate_distance_mm(float edge_px)
 {
     if (edge_px <= 1.0f || s_cfg.focal_length_px <= 1.0f || s_cfg.tag_size_mm <= 0)
@@ -130,6 +138,7 @@ static int32_t app_dock_estimate_distance_mm(float edge_px)
     }
     return (int32_t)((s_cfg.focal_length_px * (float)s_cfg.tag_size_mm / edge_px) + 0.5f);
 }
+/* 综合中心偏差、稳定性、面积和距离计算悬停对准评分。 */
 static uint8_t app_dock_calc_hover_score(const app_dock_judge_result_t *out)
 {
     int32_t center_x_score = 0;
@@ -185,6 +194,7 @@ static uint8_t app_dock_calc_hover_score(const app_dock_judge_result_t *out)
     }
     return (uint8_t)app_clip_i32(score, 0, 100);
 }
+/* 填充判定结果中的基础视觉字段和滤波后字段。 */
 static void app_dock_fill_result_base(const app_vision_result_t *vision,
     app_dock_judge_result_t *out)
 {
@@ -217,6 +227,7 @@ static void app_dock_fill_result_base(const app_vision_result_t *vision,
 /* 公开接口                                                                  */
 /* -------------------------------------------------------------------------- */
 
+/* 填充默认接驳判定阈值，供 main 根据实际标定再覆盖。 */
 void app_dock_judge_get_default_config(app_dock_judge_config_t *out)
 {
     if (out == NULL)
@@ -246,6 +257,7 @@ void app_dock_judge_get_default_config(app_dock_judge_config_t *out)
     out->wrong_id_enter_frames = 2;
     out->lost_hold_frames = 3;
 }
+/* 保存配置并初始化内部滤波、防抖和状态机。 */
 esp_err_t app_dock_judge_init(const app_dock_judge_config_t *cfg)
 {
     if (cfg == NULL)
@@ -275,6 +287,7 @@ esp_err_t app_dock_judge_init(const app_dock_judge_config_t *cfg)
         (long)s_cfg.max_distance_mm);
     return ESP_OK;
 }
+/* 切换目标 tag ID，并清空旧目标留下的滤波和计数状态。 */
 esp_err_t app_dock_judge_set_target_id(uint16_t target_tag_id, bool enable_filter)
 {
     if (!s_inited)
@@ -294,11 +307,13 @@ esp_err_t app_dock_judge_set_target_id(uint16_t target_tag_id, bool enable_filte
     ESP_LOGI(TAG, "dock target updated: enable=%d target_id=%u", s_cfg.use_target_id, (unsigned)s_cfg.target_tag_id);
     return ESP_OK;
 }
+/* 重置运行态，使下一帧从搜索状态重新开始判断。 */
 void app_dock_judge_reset(void)
 {
     memset(&s_rt, 0, sizeof(s_rt));
     s_rt.last_state = APP_DOCK_STATE_SEARCHING;
 }
+/* 主判定入口：把单帧视觉结果转换成接驳状态、评分和各项门限结果。 */
 bool app_dock_judge_process(const app_vision_result_t *vision,
     app_dock_judge_result_t *out)
 {
@@ -474,6 +489,7 @@ bool app_dock_judge_process(const app_vision_result_t *vision,
 /* 格式化辅助函数                                                          */
 /* -------------------------------------------------------------------------- */
 
+/* 将接驳状态枚举转为日志和云端快照使用的短文本。 */
 const char *app_dock_judge_state_to_text(app_dock_state_t state)
 {
     switch (state) {
@@ -491,6 +507,7 @@ const char *app_dock_judge_state_to_text(app_dock_state_t state)
         return "unknown";
     }
 }
+/* 格式化一行适合 UI 状态栏显示的接驳状态。 */
 void app_dock_judge_format_status(const app_dock_judge_result_t *result,
     char *buf,
     size_t buf_len)
@@ -520,6 +537,7 @@ void app_dock_judge_format_status(const app_dock_judge_result_t *result,
         break;
     }
 }
+/* 格式化详细调试文本，方便观察偏差、距离、评分和门限命中情况。 */
 void app_dock_judge_format_detail(const app_dock_judge_result_t *result,
     char *buf,
     size_t buf_len)

@@ -1,5 +1,10 @@
 #pragma once
 
+/*
+ * 将原始 AprilTag 视觉结果转换为接驳可用性判定。
+ * 控制层只消费本模块输出，避免直接依赖视觉细节。
+ */
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -86,16 +91,31 @@ typedef struct {
     uint8_t invalid_hold_count;     /* 视觉无效时保持上一状态的帧数。 */
 } app_dock_judge_result_t;
 
+/* 填充接驳判定模块的默认阈值配置。 */
 void app_dock_judge_get_default_config(app_dock_judge_config_t *out);
+
+/* 使用指定配置初始化接驳判定模块。 */
 esp_err_t app_dock_judge_init(const app_dock_judge_config_t *cfg);
+
+/* 更新目标 tag ID，并决定是否启用 ID 过滤。 */
 esp_err_t app_dock_judge_set_target_id(uint16_t target_tag_id, bool enable_filter);
+
+/* 清空滤波器和防抖计数，回到搜索状态。 */
 void app_dock_judge_reset(void);
+
+/* 每帧输入视觉结果，输出当前接驳判定结果。 */
 bool app_dock_judge_process(const app_vision_result_t *vision,
                             app_dock_judge_result_t *out);
+
+/* 将接驳枚举状态转换成英文短文本。 */
 const char *app_dock_judge_state_to_text(app_dock_state_t state);
+
+/* 格式化面向 UI 状态栏的简短接驳状态。 */
 void app_dock_judge_format_status(const app_dock_judge_result_t *result,
                                   char *buf,
                                   size_t buf_len);
+
+/* 格式化包含偏差、距离、评分和判定 flags 的调试详情。 */
 void app_dock_judge_format_detail(const app_dock_judge_result_t *result,
                                   char *buf,
                                   size_t buf_len);
