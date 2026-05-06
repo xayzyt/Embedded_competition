@@ -125,18 +125,18 @@ typedef enum {
 
 /* 统一消息结构 */
 typedef struct {
-    app_ch32_line_type_t type;
-    char line[APP_CH32_LINK_LINE_MAX];
+    app_ch32_line_type_t type;                               /* 解析后的消息类型。 */
+    char line[APP_CH32_LINK_LINE_MAX];                       /* 可读摘要文本，用于日志和调试。 */
 
-    uint8_t proto_type;
-    uint8_t proto_cmd;
-    uint8_t proto_seq;
-    uint16_t proto_flags;
-    app_ch32_proto_stage_t proto_stage;
-    uint8_t proto_detail;        /* STATUS 帧中: 正常=0 / 错误=错误码 */
-    int32_t proto_weight_g;
-    uint8_t payload[APP_CH32_LINK_PROTO_MAX_PAYLOAD];
-    uint16_t payload_len;
+    uint8_t proto_type;                                      /* 协议帧 TYPE 字段原始值。 */
+    uint8_t proto_cmd;                                       /* 协议帧 CMD 字段原始值。 */
+    uint8_t proto_seq;                                       /* 协议帧 SEQ 字段原始值。 */
+    uint16_t proto_flags;                                    /* STATUS 帧 flags 位图，参见 APP_CH32_FLAG_*。 */
+    app_ch32_proto_stage_t proto_stage;                      /* STATUS 帧阶段枚举值。 */
+    uint8_t proto_detail;                                    /* STATUS 帧错误码 / NACK 附带错误码。 */
+    int32_t proto_weight_g;                                  /* STATUS 帧携带的称重值（克）。 */
+    uint8_t payload[APP_CH32_LINK_PROTO_MAX_PAYLOAD];        /* 原始 payload 数据。 */
+    uint16_t payload_len;                                    /* payload 实际字节数。 */
 } app_ch32_line_t;
 
 typedef void (*app_ch32_line_cb_t)(const app_ch32_line_t *msg, void *user_ctx);

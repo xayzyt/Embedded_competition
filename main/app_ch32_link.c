@@ -219,7 +219,7 @@ static void app_ch32_dispatch_msg(const app_ch32_line_t *msg)
 /* -------------------- 协议帧解析 -------------------- */
 
 /*
- * 解析一帧二进制协议帧。帧格式 (无 VER):
+ * 解析一帧二进制协议帧。帧格式 :
  *   [0]=SOF1 [1]=SOF2 [2]=TYPE [3]=CMD [4]=SEQ [5]=LEN
  *   [6..5+LEN]=PAYLOAD [6+LEN]=CRC_L [7+LEN]=CRC_H
  */

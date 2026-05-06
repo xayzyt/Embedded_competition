@@ -262,7 +262,6 @@ esp_err_t app_dock_judge_init(const app_dock_judge_config_t *cfg)
 {
     if (cfg == NULL)
     {
-
         return ESP_ERR_INVALID_ARG;
     }
     s_cfg = *cfg;

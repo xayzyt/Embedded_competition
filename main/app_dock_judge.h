@@ -38,7 +38,7 @@ typedef struct {
     int32_t min_bbox_h;             /* 允许接驳所需的最小外接框高度。 */
     uint16_t min_stable_count;      /* 允许接驳所需的最小稳定帧数。 */
 
-    /* 100 mm AprilTag 的粗距离估算参数（后续可标定） */
+    /* 60 mm AprilTag 的粗距离估算参数（后续可标定） */
     bool use_distance_gate;         /* 是否启用距离范围门限。 */
     int32_t tag_size_mm;            /* 实际 tag 边长，单位为毫米。 */
     float focal_length_px;          /* 用于粗距离估算的等效焦距。 */

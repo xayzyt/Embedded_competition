@@ -163,7 +163,6 @@ esp_err_t app_task_init(uint16_t default_target_id)
     taskENTER_CRITICAL(&s_mux);
     if (s_rt.inited)
     {
-
         taskEXIT_CRITICAL(&s_mux);
         return ESP_OK;
     }

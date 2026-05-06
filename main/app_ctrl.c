@@ -894,19 +894,28 @@ static void app_ctrl_task(void *arg)
     bool prev_dock_busy = false;
 
     while (1) {
+        /* 获取当前系统毫秒时间戳，供本轮所有超时判断使用。 */
         const uint32_t now_ms = app_ctrl_now_ms();
+
         app_vision_result_t vision = {0};
         app_dock_judge_result_t dock = {0};
         app_task_snapshot_t task = {0};
         app_ctrl_loop_state_t state = {0};
 
+        /* 感知层：读最新视觉检测结果。 */
         (void)app_vision_get_latest_result(&vision);
+        /* 判定层：将视觉结果输入接驳判定，输出对准状态。 */
         (void)app_dock_judge_process(&vision, &dock);
+        /* 读当前任务快照（状态、目标 ID 等）。 */
         (void)app_task_get_snapshot(&task);
 
+        /* 将 CH32 回调更新的共享状态拷贝到本轮局部变量，后续判断在锁外进行。 */
         app_ctrl_read_loop_state(&state);
+        /* 如果任务目标 ID 发生变化，同步给接驳判定模块。 */
         app_ctrl_apply_task_target_if_needed(&task, state.applied_target_id);
+        /* CH32 未 ready 时按固定间隔主动探测链路状态。 */
         app_ctrl_probe_ready_if_needed(now_ms, state.ch32_ready, state.last_probe_ms);
+        /* 处理接驳 busy 阶段超时，超时后按情况进入等待放货或故障。 */
         app_ctrl_handle_busy_timeout(now_ms,
             &task,
             &state.dock_busy,
@@ -914,6 +923,7 @@ static void app_ctrl_task(void *arg)
             &state.proto_stage,
             &state.proto_error,
             &state.busy_deadline_ms);
+        /* 在软错误场景下（如等待放货时的超时/重量异常）保持等待放货状态，避免误判故障。 */
         app_ctrl_hold_soft_cargo_wait_if_needed(&state.dock_busy,
             &state.cargo_wait_window_seen,
             &state.proto_stage,
@@ -921,10 +931,14 @@ static void app_ctrl_task(void *arg)
             &state.proto_error,
             &state.busy_deadline_ms);
 
+        /* 当前是否达到"可以接驳"的判定等级。 */
         const bool ready_level = (dock.state == APP_DOCK_STATE_READY_TO_DOCK);
+        /* 防重复触发冷却窗口是否仍在有效期内。 */
         const bool retrigger_blocked = app_ctrl_deadline_active(state.retrigger_deadline_ms, now_ms);
 
+        /* 视觉首次达到 ready 时，将任务推进到认证通过。 */
         app_ctrl_mark_auth_if_ready(&task, &dock, ready_level);
+        /* ready 上升沿 + CH32 可用时，自动下发 START_DOCK 命令。 */
         app_ctrl_try_auto_dock(now_ms,
             &dock,
             &task,
@@ -934,14 +948,17 @@ static void app_ctrl_task(void *arg)
             ready_level,
             &state.dock_busy,
             &state.cargo_wait_window_seen);
+        /* 根据 dock_busy 的边沿变化同步任务的 docking、完成或故障状态。 */
         app_ctrl_update_task_for_busy_transition(prev_dock_busy,
             state.dock_busy,
             state.proto_error,
             &task);
 
+        /* 保存本轮状态供下一轮做边沿检测。 */
         prev_ready_level = ready_level;
         prev_dock_busy = state.dock_busy;
 
+        /* 汇总视觉、CH32、任务状态，刷新 UI 文本和 HUD。 */
         app_ctrl_publish_ui(now_ms,
             &vision,
             &dock,
@@ -956,6 +973,7 @@ static void app_ctrl_task(void *arg)
             state.notice_deadline_ms,
             state.notice);
 
+        /* 控制循环休眠 60ms 后进入下一轮。 */
         vTaskDelay(pdMS_TO_TICKS(CTRL_POLL_MS));
     }
 }
