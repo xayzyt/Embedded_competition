@@ -1,8 +1,14 @@
 #pragma once
 
 /*
- * ESP32-P4 与 CH32 运动控制器之间的 UART 协议层。
- * app_ctrl 通过本层发送命令，并接收解析后的状态帧。
+ * ESP32-P4 与 CH32 之间的 UART 协议层 (精简版)。
+ *
+ * 帧格式:
+ *   SOF1 SOF2 TYPE CMD SEQ LEN [PAYLOAD] CRC16
+ * CRC16-IBM 覆盖 SOF1 到 PAYLOAD 末尾。
+ *
+ * 已砍掉: VER 版本号、老协议 ASCII、单步调试命令
+ * TYPE 合并: STATUS 统一承载 状态/事件/错误/心跳
  */
 
 #include <stdbool.h>
@@ -14,85 +20,58 @@
 extern "C" {
 #endif
 
-/* =========================
- * CH32 与 ESP32-P4 UART 通信链路
- *
- * 新协议帧：
- *   SOF1 SOF2 VER TYPE CMD SEQ LEN PAYLOAD... CRC16_LO CRC16_HI
- *   0x55 0xAA 0x01 ...
- * CRC16-IBM 覆盖 SOF1 到 payload 末尾，不包含最后两个 CRC 字节。
- * ========================= */
-
+/* -------------------- 硬件引脚 -------------------- */
 #ifndef APP_CH32_LINK_UART_PORT
 #define APP_CH32_LINK_UART_PORT           (1)
 #endif
-
 #ifndef APP_CH32_LINK_TX_GPIO
 #define APP_CH32_LINK_TX_GPIO             (21)
 #endif
-
 #ifndef APP_CH32_LINK_RX_GPIO
 #define APP_CH32_LINK_RX_GPIO             (22)
 #endif
-
 #ifndef APP_CH32_LINK_BAUD_RATE
 #define APP_CH32_LINK_BAUD_RATE           (115200)
 #endif
-
 #ifndef APP_CH32_LINK_RX_BUF_SIZE
 #define APP_CH32_LINK_RX_BUF_SIZE         (1024)
 #endif
-
 #ifndef APP_CH32_LINK_LINE_MAX
 #define APP_CH32_LINK_LINE_MAX            (128)
 #endif
-
 #ifndef APP_CH32_LINK_PROTO_MAX_PAYLOAD
 #define APP_CH32_LINK_PROTO_MAX_PAYLOAD   (48)
 #endif
-
 #ifndef APP_CH32_LINK_ACK_POLL_MS
 #define APP_CH32_LINK_ACK_POLL_MS         (50U)
 #endif
 
+/* -------------------- 协议常量 -------------------- */
 #define APP_CH32_PROTO_SOF1               (0x55U)
 #define APP_CH32_PROTO_SOF2               (0xAAU)
-#define APP_CH32_PROTO_VER                (0x01U)
+#define APP_CH32_PROTO_OVERHEAD           (8U)   /* SOF1+SOF2+TYPE+CMD+SEQ+LEN+CRC16 */
+#define APP_CH32_PROTO_MIN_FRAME          (APP_CH32_PROTO_OVERHEAD)
 
-typedef enum {
-    APP_CH32_LINE_UNKNOWN = 0,
-    APP_CH32_LINE_PROTO_ACK,
-    APP_CH32_LINE_PROTO_NACK,
-    APP_CH32_LINE_PROTO_STATUS,
-    APP_CH32_LINE_PROTO_EVENT,
-    APP_CH32_LINE_PROTO_ERROR,
-    APP_CH32_LINE_PROTO_HEARTBEAT,
-} app_ch32_line_type_t;
-
+/* 帧类型 */
 typedef enum {
     APP_CH32_PROTO_TYPE_CMD       = 0x10,
     APP_CH32_PROTO_TYPE_ACK       = 0x11,
     APP_CH32_PROTO_TYPE_NACK      = 0x12,
-    APP_CH32_PROTO_TYPE_STATUS    = 0x20,
-    APP_CH32_PROTO_TYPE_EVENT     = 0x21,
-    APP_CH32_PROTO_TYPE_ERROR     = 0x22,
-    APP_CH32_PROTO_TYPE_HEARTBEAT = 0x23,
+    APP_CH32_PROTO_TYPE_STATUS    = 0x20,  /* 合并: 状态/事件/错误/心跳 */
 } app_ch32_proto_type_t;
 
+/* 命令码 (比赛只需这些) */
 typedef enum {
     APP_CH32_PROTO_CMD_NONE          = 0x00,
     APP_CH32_PROTO_CMD_PROBE_READY   = 0x01,
     APP_CH32_PROTO_CMD_START_DOCK    = 0x02,
-    APP_CH32_PROTO_CMD_OPEN_DOOR     = 0x03,
-    APP_CH32_PROTO_CMD_CLOSE_DOOR    = 0x04,
-    APP_CH32_PROTO_CMD_EXTEND_TRAY   = 0x05,
-    APP_CH32_PROTO_CMD_RETRACT_TRAY  = 0x06,
     APP_CH32_PROTO_CMD_QUERY_STATUS  = 0x07,
     APP_CH32_PROTO_CMD_READ_WEIGHT   = 0x08,
     APP_CH32_PROTO_CMD_ABORT         = 0x09,
     APP_CH32_PROTO_CMD_RESET_FAULT   = 0x0A,
 } app_ch32_proto_cmd_t;
 
+/* 阶段 */
 typedef enum {
     APP_CH32_STAGE_UNKNOWN         = 0,
     APP_CH32_STAGE_IDLE            = 1,
@@ -111,6 +90,7 @@ typedef enum {
     APP_CH32_STAGE_FAULT           = 14,
 } app_ch32_proto_stage_t;
 
+/* 错误码 */
 typedef enum {
     APP_CH32_ERR_NONE         = 0,
     APP_CH32_ERR_TIMEOUT      = 1,
@@ -125,6 +105,7 @@ typedef enum {
     APP_CH32_ERR_INTERNAL     = 10,
 } app_ch32_proto_error_t;
 
+/* Flags 位图 */
 #define APP_CH32_FLAG_READY                (1U << 0)
 #define APP_CH32_FLAG_BUSY                 (1U << 1)
 #define APP_CH32_FLAG_LIMIT_DOOR_OPEN      (1U << 2)
@@ -134,49 +115,52 @@ typedef enum {
 #define APP_CH32_FLAG_CARGO_PRESENT        (1U << 6)
 #define APP_CH32_FLAG_LOCKED               (1U << 7)
 
-typedef struct {
-    app_ch32_line_type_t type;                         /* 当前消息类型：文本、ACK、NACK、状态或错误。 */
-    char line[APP_CH32_LINK_LINE_MAX];                 /* 便于日志和上层显示的文本化消息内容。 */
+/* 解析后的消息类型 (精简) */
+typedef enum {
+    APP_CH32_LINE_UNKNOWN = 0,
+    APP_CH32_LINE_PROTO_ACK,
+    APP_CH32_LINE_PROTO_NACK,
+    APP_CH32_LINE_PROTO_STATUS,  /* 合并: status/event/error/heartbeat */
+} app_ch32_line_type_t;
 
-    uint8_t proto_type;                                /* 原始协议帧 TYPE 字节。 */
-    uint8_t proto_cmd;                                 /* 原始协议帧 CMD 字节。 */
-    uint8_t proto_seq;                                 /* 原始协议帧 SEQ 字节。 */
-    uint16_t proto_flags;                              /* 状态帧中的 flags 位集合。 */
-    app_ch32_proto_stage_t proto_stage;                /* 状态帧中的执行阶段。 */
-    uint8_t proto_detail;                              /* 错误帧或状态帧中的细节码。 */
-    int32_t proto_weight_g;                            /* 状态帧携带的称重值，单位为克。 */
-    uint8_t payload[APP_CH32_LINK_PROTO_MAX_PAYLOAD];  /* 协议帧原始 payload 缓冲。 */
-    uint16_t payload_len;                              /* 当前 payload 的有效长度。 */
+/* 统一消息结构 */
+typedef struct {
+    app_ch32_line_type_t type;
+    char line[APP_CH32_LINK_LINE_MAX];
+
+    uint8_t proto_type;
+    uint8_t proto_cmd;
+    uint8_t proto_seq;
+    uint16_t proto_flags;
+    app_ch32_proto_stage_t proto_stage;
+    uint8_t proto_detail;        /* STATUS 帧中: 正常=0 / 错误=错误码 */
+    int32_t proto_weight_g;
+    uint8_t payload[APP_CH32_LINK_PROTO_MAX_PAYLOAD];
+    uint16_t payload_len;
 } app_ch32_line_t;
 
-/* CH32 消息解析完成后通知上层控制模块的回调类型。 */
 typedef void (*app_ch32_line_cb_t)(const app_ch32_line_t *msg, void *user_ctx);
 
-/* 启动 UART 收发任务，并注册解析后消息的回调。 */
+/* -------------------- 公开接口 -------------------- */
+
 esp_err_t app_ch32_link_init(app_ch32_line_cb_t cb, void *user_ctx);
 
-/* 通过兼容字符命令发送 CH32 动作，并等待对应 ACK。 */
+/* 发送命令并等待 ACK */
 esp_err_t app_ch32_link_send_cmd_and_wait_ack(char cmd, uint32_t timeout_ms);
 
-/* 主动发送 ready 探测命令，并等待 CH32 上报可用。 */
+/* 主动探测 ready */
 esp_err_t app_ch32_link_probe_ready(uint32_t timeout_ms);
 
-/* 发送二进制协议命令帧，可选携带 payload 并返回序号。 */
+/* 发送二进制协议帧 */
 esp_err_t app_ch32_link_send_proto(app_ch32_proto_cmd_t cmd,
                                    const void *payload,
                                    uint8_t payload_len,
                                    uint8_t *out_seq);
 
-/* 查询最近 ready 状态，过期会自动失效。 */
 bool app_ch32_link_is_ready(void);
-
-/* 读取最近一次 CH32 状态帧里的称重值。 */
 bool app_ch32_link_last_weight(int32_t *out_weight_g);
 
-/* 将 CH32 阶段枚举转换成可读名称。 */
 const char *app_ch32_link_proto_stage_name(app_ch32_proto_stage_t stage);
-
-/* 将 CH32 错误码转换成可读名称。 */
 const char *app_ch32_link_proto_error_name(uint8_t err);
 
 #ifdef __cplusplus

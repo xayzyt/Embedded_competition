@@ -423,10 +423,7 @@ static void app_ctrl_apply_proto_msg_locked(const app_ch32_line_t *msg)
         s_rt.has_weight = true;
         s_rt.last_proto_flags = msg->proto_flags;
     }
-    if ((msg->type == APP_CH32_LINE_PROTO_STATUS) ||
-        (msg->type == APP_CH32_LINE_PROTO_EVENT) ||
-        (msg->type == APP_CH32_LINE_PROTO_ERROR) ||
-        (msg->type == APP_CH32_LINE_PROTO_HEARTBEAT))
+    if (msg->type == APP_CH32_LINE_PROTO_STATUS)
     {
         if (msg->payload_len >= 8U)
         {
@@ -442,7 +439,7 @@ static void app_ctrl_apply_proto_msg_locked(const app_ch32_line_t *msg)
             s_rt.last_proto_stage = msg->proto_stage;
             app_ctrl_set_notice_locked(app_ctrl_proto_stage_status_text(msg->proto_stage), CTRL_NOTICE_SHOW_MS);
         }
-        if ((msg->type == APP_CH32_LINE_PROTO_ERROR) || (msg->proto_stage == APP_CH32_STAGE_FAULT))
+        if ((msg->proto_detail != APP_CH32_ERR_NONE) || (msg->proto_stage == APP_CH32_STAGE_FAULT))
         {
             if (app_ctrl_is_soft_waiting_cargo_error(prev_proto_stage,
                 prev_proto_flags,
