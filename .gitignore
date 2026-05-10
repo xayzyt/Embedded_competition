@@ -59,7 +59,11 @@ dist/
 # Virtual environment folders
 venv/
 .venv/
+.venv-ai/
 env/
+
+# AI model files (large, external libraries)
+ai_models/
 
 # Language Servers
 .clangd/
