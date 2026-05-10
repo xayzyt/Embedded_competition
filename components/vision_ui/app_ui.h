@@ -7,8 +7,8 @@
 
 #include <stdbool.h>
 
+#include "app_dock_types.h"
 #include "app_vision.h"
-#include "app_dock_judge.h"
 
 /* 创建常驻 HUD 控件和交互按钮。 */
 bool app_ui_create(void);

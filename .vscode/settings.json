@@ -1,6 +1,7 @@
 {
   "C_Cpp.intelliSenseEngine": "default",
   "idf.espIdfPathWin": "c:\\beifen\\ESP32_P4_EV\\v5.5.3\\esp-idf",
+  "idf.buildPath": "${workspaceFolder}\\build",
   "idf.pythonInstallPath": "c:\\beifen\\ESP32_P4_EV\\.espressif\\tools\\idf-python\\3.11.2\\python.exe",
   "idf.openOcdConfigs": [
     "board/esp32p4-builtin.cfg"
@@ -14,7 +15,7 @@
   "clangd.arguments": [
     "--background-index",
     "--query-driver=**",
-    "--compile-commands-dir=c:\\beifen\\ESP32_P4_EV\\test\\build"
+    "--compile-commands-dir=c:\\beifen\\ESP32_P4_EV\\Embedded_competition\\build"
   ],
   "idf.flashType": "JTAG"
 }
