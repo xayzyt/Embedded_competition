@@ -15,6 +15,7 @@
 #include "app_ui.h"
 #include <stdio.h>
 #include <inttypes.h>
+#include <string.h>
 #include "lvgl.h"
 #include "esp_log.h"
 #include "bsp/esp-bsp.h"
@@ -266,6 +267,11 @@ static void app_ui_set_label_text_unlocked(lv_obj_t *label, const char *text)
 {
     if ((label != NULL) && (text != NULL))
     {
+        const char *old_text = lv_label_get_text(label);
+        if ((old_text != NULL) && (strcmp(old_text, text) == 0))
+        {
+            return;
+        }
         lv_label_set_text(label, text);
     }
 }
@@ -905,7 +911,7 @@ void app_ui_set_dock_text(const char *text)
     bsp_display_unlock();
 }
 /* 根据最新视觉和接驳判定结果刷新 HUD 叠加元素。 */
-void app_ui_update_hud(const app_vision_result_t *vision,
+static void app_ui_update_hud_unlocked(const app_vision_result_t *vision,
     const app_dock_judge_result_t *dock)
 {
 
@@ -914,10 +920,6 @@ void app_ui_update_hud(const app_vision_result_t *vision,
         return;
     }
 
-    if (!bsp_display_lock(0))
-    {
-        return;
-    }
     bool hold_box = false;
     bool show_box = false;
     int32_t box_x = 0;
@@ -960,6 +962,32 @@ void app_ui_update_hud(const app_vision_result_t *vision,
     }
     app_ui_update_lock_bar(dock);
     app_ui_update_auth_banner(dock->state);
+}
 
+void app_ui_update_hud(const app_vision_result_t *vision,
+    const app_dock_judge_result_t *dock)
+{
+    if (!bsp_display_lock(0))
+    {
+        return;
+    }
+    app_ui_update_hud_unlocked(vision, dock);
+    bsp_display_unlock();
+}
+
+void app_ui_update_control_state(const char *status,
+    const char *vision_text,
+    const char *dock_text,
+    const app_vision_result_t *vision,
+    const app_dock_judge_result_t *dock)
+{
+    if (!bsp_display_lock(0))
+    {
+        return;
+    }
+    app_ui_set_label_text_unlocked(s_status, status);
+    app_ui_set_vision_text_unlocked(vision_text);
+    app_ui_set_label_text_unlocked(s_dock, dock_text);
+    app_ui_update_hud_unlocked(vision, dock);
     bsp_display_unlock();
 }

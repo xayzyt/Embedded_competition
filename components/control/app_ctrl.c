@@ -720,7 +720,9 @@ static void app_ctrl_try_auto_dock(uint32_t now_ms,
     {
         return;
     }
-    if (!(task->active && !*dock_busy && !retrigger_blocked && !prev_ready_level && ready_level))
+    const bool ready_rising = !prev_ready_level && ready_level;
+    const bool auth_ready_retry = (task->state == APP_TASK_STATE_AUTH_PASSED) && ready_level;
+    if (!(task->active && !*dock_busy && !retrigger_blocked && (ready_rising || auth_ready_retry)))
     {
         return;
     }
@@ -876,10 +878,7 @@ static void app_ctrl_publish_ui(uint32_t now_ms,
         strlcpy(status, notice, sizeof(status));
     }
 
-    app_ui_set_status(status);
-    app_ui_set_vision_text(task_brief);
-    app_ui_set_dock_text(detail);
-    app_ui_update_hud(vision, dock);
+    app_ui_update_control_state(status, task_brief, detail, vision, dock);
 }
 
 /* -------------------------------------------------------------------------- */

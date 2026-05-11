@@ -256,6 +256,7 @@ void app_task_mark_auth_passed(uint16_t matched_tag_id)
     taskEXIT_CRITICAL(&s_mux);
     if (changed)
     {
+        ESP_LOGI(TAG, "auth passed, matched_tag_id=%u", (unsigned)matched_tag_id);
         app_task_emit_event(APP_TASK_EVENT_STATE_CHANGED);
     }
 }

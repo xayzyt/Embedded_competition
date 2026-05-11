@@ -79,6 +79,12 @@ typedef struct {
     uint32_t tick_ms;              /* 帧到达时的系统毫秒时间戳。 */
 } app_vision_gray_frame_info_t;
 
+typedef struct {
+    uint32_t submitted;
+    uint32_t busy_drop;
+    uint32_t overwrite;
+} app_vision_stats_t;
+
 /* 初始化 AprilTag 检测器和视觉任务内部缓冲区。 */
 esp_err_t app_vision_init(void);
 
@@ -93,6 +99,8 @@ esp_err_t app_vision_submit_frame(const uint8_t *rgb565,
 
 /* 读取最近一次稳定的检测结果。 */
 bool app_vision_get_latest_result(app_vision_result_t *out);
+
+void app_vision_get_stats(app_vision_stats_t *out);
 
 #ifdef __cplusplus
 }

@@ -64,6 +64,7 @@ static bool s_confirmed = false;
 static uint8_t s_hit_count = 0;
 static uint32_t s_submit_seq = 0;
 static uint32_t s_infer_count = 0;
+static uint32_t s_drop_count = 0;
 static uint32_t s_last_status_ms = 0;
 static app_drone_ai_result_t s_latest = {};
 
@@ -614,7 +615,11 @@ static void app_drone_ai_task(void *arg)
                 app_drone_ai_update_result(slot->seq, infer_ms, nodrone_score, drone_score);
 
                 const uint32_t now_ms = app_drone_ai_now_ms();
-                const uint32_t infer_count = ++s_infer_count;
+                uint32_t infer_count = 0;
+                taskENTER_CRITICAL(&s_ai_mux);
+                s_infer_count++;
+                infer_count = s_infer_count;
+                taskEXIT_CRITICAL(&s_ai_mux);
                 const bool candidate_hit = (drone_score >= DRONE_AI_THRESHOLD);
                 if (candidate_hit || (now_ms - s_last_status_ms) >= DRONE_AI_STATUS_INTERVAL_MS)
                 {
@@ -687,6 +692,7 @@ esp_err_t app_drone_ai_init(void)
     s_confirmed = false;
     s_hit_count = 0;
     s_infer_count = 0;
+    s_drop_count = 0;
     s_last_status_ms = 0;
     memset(&s_latest, 0, sizeof(s_latest));
     taskEXIT_CRITICAL(&s_ai_mux);
@@ -737,9 +743,20 @@ esp_err_t app_drone_ai_submit_frame(const uint8_t *rgb565,
         return ESP_ERR_INVALID_SIZE;
     }
 
+    taskENTER_CRITICAL(&s_ai_mux);
+    const bool already_confirmed = s_confirmed;
+    taskEXIT_CRITICAL(&s_ai_mux);
+    if (already_confirmed)
+    {
+        return ESP_OK;
+    }
+
     app_drone_ai_slot_t *slot = NULL;
     if (xQueueReceive(s_free_queue, &slot, 0) != pdTRUE || slot == NULL)
     {
+        taskENTER_CRITICAL(&s_ai_mux);
+        s_drop_count++;
+        taskEXIT_CRITICAL(&s_ai_mux);
         return ESP_OK;
     }
 
@@ -756,6 +773,9 @@ esp_err_t app_drone_ai_submit_frame(const uint8_t *rgb565,
     if (xQueueSend(s_infer_queue, &slot, 0) != pdTRUE)
     {
         (void)xQueueSend(s_free_queue, &slot, 0);
+        taskENTER_CRITICAL(&s_ai_mux);
+        s_drop_count++;
+        taskEXIT_CRITICAL(&s_ai_mux);
     }
     return ESP_OK;
 }
@@ -876,7 +896,7 @@ void app_drone_ai_format_status(char *buf, size_t buf_len)
     const float score = (latest.label == APP_DRONE_AI_CLASS_DRONE) ? latest.drone_score : latest.nodrone_score;
     if (latest.confirmed)
     {
-        snprintf(buf, buf_len, "ai: %s %.2f ok", label, (double)score);
+        snprintf(buf, buf_len, "ai: confirmed -> tag");
     }
     else
     {
@@ -888,4 +908,19 @@ void app_drone_ai_format_status(char *buf, size_t buf_len)
                  (unsigned)latest.hit_count,
                  (unsigned)DRONE_AI_CONFIRM_HITS);
     }
+}
+
+void app_drone_ai_get_stats(app_drone_ai_stats_t *out)
+{
+    if (out == NULL)
+    {
+        return;
+    }
+
+    taskENTER_CRITICAL(&s_ai_mux);
+    out->submitted = s_submit_seq;
+    out->inferred = s_infer_count;
+    out->dropped = s_drop_count;
+    out->confirmed = s_confirmed;
+    taskEXIT_CRITICAL(&s_ai_mux);
 }

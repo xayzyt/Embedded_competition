@@ -26,6 +26,13 @@ typedef struct {
     uint32_t infer_ms;
 } app_drone_ai_result_t;
 
+typedef struct {
+    uint32_t submitted;
+    uint32_t inferred;
+    uint32_t dropped;
+    bool confirmed;
+} app_drone_ai_stats_t;
+
 esp_err_t app_drone_ai_init(void);
 
 esp_err_t app_drone_ai_submit_frame(const uint8_t *rgb565,
@@ -44,6 +51,8 @@ bool app_drone_ai_is_drone_confirmed(void);
 void app_drone_ai_reset_gate(void);
 
 void app_drone_ai_format_status(char *buf, size_t buf_len);
+
+void app_drone_ai_get_stats(app_drone_ai_stats_t *out);
 
 #ifdef __cplusplus
 }

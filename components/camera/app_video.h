@@ -40,6 +40,12 @@ typedef void (*app_video_frame_operation_cb_t)(uint8_t *camera_buf,
 /* 打开并配置摄像头设备格式，返回视频设备 fd。 */
 int app_video_open(char *dev, video_fmt_t init_fmt);
 
+/* Prefer a concrete frame size, falling back to the sensor default if rejected. */
+int app_video_open_preferred(char *dev,
+                             video_fmt_t init_fmt,
+                             uint32_t preferred_width,
+                             uint32_t preferred_height);
+
 /* 设置适合 AprilTag 识别的曝光和增益参数。 */
 esp_err_t app_video_apply_recognition_profile(int video_fd, uint32_t exposure_us, uint8_t gain_percent);
 

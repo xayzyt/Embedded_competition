@@ -269,6 +269,20 @@ bool app_vision_get_latest_result(app_vision_result_t *out)
     return out->valid;
 }
 
+void app_vision_get_stats(app_vision_stats_t *out)
+{
+    if (out == NULL)
+    {
+        return;
+    }
+
+    taskENTER_CRITICAL(&s_vision_mux);
+    out->submitted = s_submit_seq;
+    out->busy_drop = s_submit_busy_drop;
+    out->overwrite = s_submit_overwrite;
+    taskEXIT_CRITICAL(&s_vision_mux);
+}
+
 /* -------------------------------------------------------------------------- */
 /* 检测结果处理                                                   */
 /* -------------------------------------------------------------------------- */

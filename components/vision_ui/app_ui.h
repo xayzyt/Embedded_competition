@@ -37,3 +37,10 @@ void app_ui_set_capture_text(const char *text);
 /* 根据视觉和接驳判定结果刷新跟踪框、准星、锁定条和认证横幅。 */
 void app_ui_update_hud(const app_vision_result_t *vision,
                        const app_dock_judge_result_t *dock);
+
+/* Update control-loop text and HUD in one LVGL lock. */
+void app_ui_update_control_state(const char *status,
+                                 const char *vision_text,
+                                 const char *dock_text,
+                                 const app_vision_result_t *vision,
+                                 const app_dock_judge_result_t *dock);

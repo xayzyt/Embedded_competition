@@ -15,6 +15,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
 #include "freertos/task.h"
+#include <stdbool.h>
 #include <inttypes.h>
 #include <string.h>
 #include <fcntl.h>
@@ -192,11 +193,16 @@ esp_err_t app_video_apply_recognition_profile(int video_fd, uint32_t exposure_us
 /* -------------------------------------------------------------------------- */
 
 /* 打开视频设备并设置目标像素格式，同时记录实际帧尺寸。 */
-int app_video_open(char *dev, video_fmt_t init_fmt)
+static int app_video_open_configured(char *dev,
+    video_fmt_t init_fmt,
+    uint32_t preferred_width,
+    uint32_t preferred_height,
+    bool allow_fallback)
 {
     struct v4l2_format default_format = {0};
     struct v4l2_capability capability = {0};
     const int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    const bool has_preferred_size = (preferred_width != 0U) && (preferred_height != 0U);
     int fd = open(dev, O_RDWR);
     if (fd < 0)
     {
@@ -233,17 +239,31 @@ int app_video_open(char *dev, video_fmt_t init_fmt)
             default_format.fmt.pix.bytesperline,
             default_format.fmt.pix.sizeimage);
     }
-    if (default_format.fmt.pix.pixelformat != init_fmt)
+    const bool need_set_format =
+        (default_format.fmt.pix.pixelformat != init_fmt) ||
+        (has_preferred_size &&
+            ((default_format.fmt.pix.width != preferred_width) ||
+             (default_format.fmt.pix.height != preferred_height)));
+    if (need_set_format)
     {
         struct v4l2_format request_format = {
             .type = type,
-            .fmt.pix.width = default_format.fmt.pix.width,
-            .fmt.pix.height = default_format.fmt.pix.height,
+            .fmt.pix.width = has_preferred_size ? preferred_width : default_format.fmt.pix.width,
+            .fmt.pix.height = has_preferred_size ? preferred_height : default_format.fmt.pix.height,
             .fmt.pix.pixelformat = init_fmt,
         };
 
         if (ioctl(fd, VIDIOC_S_FMT, &request_format) != 0)
         {
+            if (has_preferred_size && allow_fallback)
+            {
+                ESP_LOGW(TAG,
+                    "preferred fmt %" PRIu32 "x%" PRIu32 " rejected, fallback to sensor default",
+                    preferred_width,
+                    preferred_height);
+                close(fd);
+                return app_video_open_configured(dev, init_fmt, 0, 0, false);
+            }
             ESP_LOGE(TAG, "VIDIOC_S_FMT failed");
             goto err;
         }
@@ -284,6 +304,17 @@ int app_video_open(char *dev, video_fmt_t init_fmt)
             actual_format.fmt.pix.bytesperline,
             actual_format.fmt.pix.sizeimage);
     }
+    if (has_preferred_size &&
+        ((actual_format.fmt.pix.width != preferred_width) ||
+         (actual_format.fmt.pix.height != preferred_height)))
+    {
+        ESP_LOGW(TAG,
+            "preferred camera size %" PRIu32 "x%" PRIu32 " not accepted, using %" PRIu32 "x%" PRIu32,
+            preferred_width,
+            preferred_height,
+            actual_format.fmt.pix.width,
+            actual_format.fmt.pix.height);
+    }
     s_video.camera_buf_hes = actual_format.fmt.pix.width;
     s_video.camera_buf_ves = actual_format.fmt.pix.height;
     uint32_t bytes_per_pixel = 2;
@@ -303,6 +334,19 @@ int app_video_open(char *dev, video_fmt_t init_fmt)
     err:
     close(fd);
     return -1;
+}
+
+int app_video_open(char *dev, video_fmt_t init_fmt)
+{
+    return app_video_open_configured(dev, init_fmt, 0, 0, false);
+}
+
+int app_video_open_preferred(char *dev,
+    video_fmt_t init_fmt,
+    uint32_t preferred_width,
+    uint32_t preferred_height)
+{
+    return app_video_open_configured(dev, init_fmt, preferred_width, preferred_height, true);
 }
 /* 请求并注册 V4L2 帧缓冲，支持上层传入 USERPTR 缓冲。 */
 esp_err_t app_video_set_bufs(int video_fd, uint32_t fb_num, const void **fb)
