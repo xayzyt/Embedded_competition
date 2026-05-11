@@ -49,8 +49,9 @@
 #define DISPLAY_TASK_STACK_SIZE  (6 * 1024)
 #define DISPLAY_TASK_PRIORITY    7
 #define DISPLAY_LOCK_TIMEOUT_MS  30
-#define VISION_SAMPLE_INTERVAL   4
-#define DRONE_AI_SAMPLE_INTERVAL 16
+#define DISPLAY_CREATE_LOCK_TIMEOUT_MS 200
+#define VISION_SAMPLE_INTERVAL   2
+#define DRONE_AI_SAMPLE_INTERVAL 8
 #define CAMERA_DIAG_INTERVAL_MS  2000U
 #define PREVIEW_PREFERRED_WIDTH  1024U
 #define PREVIEW_PREFERRED_HEIGHT 600U
@@ -86,6 +87,7 @@ static volatile int s_displayed_stage_index = -1;
 static volatile int s_pending_stage_index = -1;
 static uint32_t s_vision_sample_skip = 0;
 static uint32_t s_drone_ai_sample_skip = 0;
+static bool s_apriltag_gate_was_open = false;
 static uint32_t s_frame_count = 0;
 static volatile uint32_t s_display_count = 0;
 static bool s_ppa_error_logged = false;
@@ -280,7 +282,7 @@ static esp_err_t app_camera_create_canvas(void)
         return ESP_OK;
     }
 
-    if (!bsp_display_lock(0))
+    if (!bsp_display_lock(DISPLAY_CREATE_LOCK_TIMEOUT_MS))
     {
         return ESP_FAIL;
     }
@@ -852,6 +854,7 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
     bool camera_synced_for_cpu = false;
     bool capture_active = app_ai_capture_is_active();
     bool ai_gate_active = app_camera_ai_gate_active();
+    bool apriltag_gate_open = app_camera_apriltag_gate_open();
     bool ai_due = false;
     bool vision_due = false;
     if (!ai_gate_active)
@@ -863,9 +866,16 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
         s_drone_ai_sample_skip = 0;
         ai_due = true;
     }
-    if (capture_active || !app_camera_apriltag_gate_open())
+    if (capture_active || !apriltag_gate_open)
     {
         s_vision_sample_skip = 0;
+        s_apriltag_gate_was_open = false;
+    }
+    else if (!s_apriltag_gate_was_open)
+    {
+        s_vision_sample_skip = 0;
+        s_apriltag_gate_was_open = true;
+        vision_due = true;
     }
     else if (++s_vision_sample_skip >= VISION_SAMPLE_INTERVAL)
     {
@@ -1127,6 +1137,9 @@ esp_err_t app_camera_preview_start(void)
     s_ai_submit_count = 0;
     s_vision_submit_count = 0;
     s_capture_submit_count = 0;
+    s_vision_sample_skip = 0;
+    s_drone_ai_sample_skip = 0;
+    s_apriltag_gate_was_open = false;
     s_diag_last_ms = 0;
     ret = app_video_stream_task_start(s_video_fd, 0);
     if (ret != ESP_OK)

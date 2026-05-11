@@ -24,11 +24,11 @@ static const char *TAG = "main";
 
 /* 接驳判定参数集中放在这里，后续调参时不用到处找。 */
 #define APP_TARGET_TAG_ID            (1U)
-#define APP_TAG_SIZE_MM              (100)
-#define APP_DISTANCE_GATE_ENABLE     (1)
+#define APP_TAG_SIZE_MM              (60)
+#define APP_DISTANCE_GATE_ENABLE     (0)
 #define APP_FOCAL_LENGTH_PX          (314.0f)
-#define APP_MIN_DISTANCE_MM          (260)
-#define APP_MAX_DISTANCE_MM          (420)
+#define APP_MIN_DISTANCE_MM          (120)
+#define APP_MAX_DISTANCE_MM          (700)
 
 /* -------------------------------------------------------------------------- */
 /* 启动步骤                                                                  */
@@ -64,7 +64,11 @@ static bool app_start_display_ui(void)
     }
 
     /* 先绘制首帧再开背光，避免上电时屏幕先闪白。 */
-    app_ui_show_loading("Display ready");
+    if (!app_ui_show_loading("Display ready"))
+    {
+        ESP_LOGE(TAG, "loading UI create failed");
+        return false;
+    }
     app_display_backlight_on();
     app_ui_set_status("dock: booting");
     app_ui_set_vision_text("vision: init");
@@ -164,9 +168,11 @@ static void app_start_camera_pipeline(void)
     app_ui_set_loading_text("Opening preview");
     ESP_ERROR_CHECK(app_camera_preview_start());
     app_ui_set_loading_text("Waiting camera frame");
-    if (!app_camera_wait_first_frame(1500))
+    if (!app_camera_wait_first_frame(5000))
     {
         ESP_LOGW(TAG, "first camera frame did not reach LVGL before loading timeout");
+        app_ui_set_loading_text("Waiting camera signal");
+        (void)app_camera_wait_first_frame(UINT32_MAX);
     }
     app_ui_hide_loading();
 }
@@ -181,7 +187,7 @@ static void app_show_ready_status(const app_dock_judge_config_t *dock_cfg)
         app_ui_set_status("task: configured / dist gate on");
     } else
     {
-        app_ui_set_status("task: configured / z calib");
+        app_ui_set_status("task: configured / demo loose");
     }
 
     snprintf(vision_text,

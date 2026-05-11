@@ -40,6 +40,8 @@
 #define VISION_LOST_RESET_FRAMES       2U
 #define VISION_STABLE_DECAY_ON_LOST    1U
 #define VISION_FRAME_JUMP_LOG_MS       1000U
+#define VISION_TAG_LOG_INTERVAL_MS     1000U
+#define VISION_MISS_LOG_INTERVAL_MS    2000U
 static const char *TAG = "app_vision";
 
 /* -------------------------------------------------------------------------- */
@@ -74,6 +76,10 @@ static uint32_t s_sample_crop_x = 0;
 static uint32_t s_sample_crop_y = 0;
 static uint32_t s_sample_crop_w = 0;
 static uint32_t s_sample_crop_h = 0;
+static uint32_t s_last_tag_info_log_ms = 0;
+static uint32_t s_last_tag_info_seq = 0;
+static uint16_t s_last_tag_info_id = UINT16_MAX;
+static uint32_t s_last_miss_info_log_ms = 0;
 
 static void app_vision_log_heap(const char *stage)
 {
@@ -381,6 +387,31 @@ static void app_vision_update_result(const app_vision_gray_slot_t *slot,
         {
             app_ui_set_vision_text(buf);
         }
+        const uint32_t now_ms = app_vision_now_ms();
+        if ((result.frame_seq != s_last_tag_info_seq) &&
+            ((result.tag_id != s_last_tag_info_id) ||
+             (result.stable_count == 1U) ||
+             ((uint32_t)(now_ms - s_last_tag_info_log_ms) >= VISION_TAG_LOG_INTERVAL_MS)))
+        {
+            ESP_LOGI(TAG,
+                "tag hit seq=%lu id=%u hm=%u st=%u edge=%.1f area=%ld center=(%ld,%ld) bbox=%ldx%ld detect=%lums gray=%lux%lu",
+                (unsigned long)result.frame_seq,
+                (unsigned)result.tag_id,
+                (unsigned)result.hamming,
+                (unsigned)result.stable_count,
+                (double)result.edge_px_avg,
+                (long)result.area,
+                (long)result.center_x,
+                (long)result.center_y,
+                (long)result.bbox_w,
+                (long)result.bbox_h,
+                (unsigned long)result.detect_ms,
+                (unsigned long)result.gray_width,
+                (unsigned long)result.gray_height);
+            s_last_tag_info_log_ms = now_ms;
+            s_last_tag_info_seq = result.frame_seq;
+            s_last_tag_info_id = result.tag_id;
+        }
         ESP_LOGD(TAG,
             "tag seq=%lu id=%u hm=%u rot=%u th=%u border=%u area=%ld center=(%ld,%ld) bbox=(%ld,%ld,%ld,%ld) edge=%.1f ang=%.1f stable=%u detect=%lums crop=(%lu,%lu,%lu,%lu)",
             (unsigned long)result.frame_seq,
@@ -435,6 +466,19 @@ static void app_vision_update_result(const app_vision_gray_slot_t *slot,
     if (!app_ai_capture_is_active())
     {
         app_ui_set_vision_text(buf);
+    }
+    const uint32_t now_ms = app_vision_now_ms();
+    if ((uint32_t)(now_ms - s_last_miss_info_log_ms) >= VISION_MISS_LOG_INTERVAL_MS)
+    {
+        ESP_LOGI(TAG,
+            "tag miss seq=%lu lost=%u st=%u detect=%lums gray=%lux%lu",
+            (unsigned long)result.frame_seq,
+            (unsigned)*lost_count,
+            (unsigned)*stable_count,
+            (unsigned long)detect_ms,
+            (unsigned long)result.gray_width,
+            (unsigned long)result.gray_height);
+        s_last_miss_info_log_ms = now_ms;
     }
 }
 
@@ -594,6 +638,10 @@ esp_err_t app_vision_init(void)
     s_sample_crop_y = 0;
     s_sample_crop_w = 0;
     s_sample_crop_h = 0;
+    s_last_tag_info_log_ms = 0;
+    s_last_tag_info_seq = 0;
+    s_last_tag_info_id = UINT16_MAX;
+    s_last_miss_info_log_ms = 0;
 
     taskEXIT_CRITICAL(&s_vision_mux);
     ESP_LOGI(TAG, "vision init done, gray=%dx%d", VISION_GRAY_WIDTH, VISION_GRAY_HEIGHT);

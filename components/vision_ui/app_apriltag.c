@@ -25,10 +25,11 @@
 #define AT_MAX_WIDTH            360
 #define AT_MAX_HEIGHT           280
 #define AT_MAX_PIXELS           (AT_MAX_WIDTH * AT_MAX_HEIGHT)
-#define AT_MIN_AREA             160
-#define AT_MIN_SIDE             20
+#define AT_MIN_AREA             80
+#define AT_MIN_SIDE             12
 #define AT_MAX_CANDIDATES       10
 #define AT_MAX_HAMMING          4
+#define AT_ENABLE_DEBUG_DECODE_VARIANTS 1
 #define AT_GRID_SIZE            8
 #define AT_DATA_GRID            6
 #define AT_RING_CELLS           28
@@ -1477,12 +1478,23 @@ static bool at_decode_with_quad(const uint8_t *gray,
     uint8_t bits_rot[AT_DATA_GRID][AT_DATA_GRID];
     uint8_t bits_tmp[AT_DATA_GRID][AT_DATA_GRID];
     uint8_t bits_tf[AT_DATA_GRID][AT_DATA_GRID];
+    const int transform_count = AT_ENABLE_DEBUG_DECODE_VARIANTS ? (int)AT_BITS_TRANSFORM_COUNT : 1;
+    const int pack_count = AT_ENABLE_DEBUG_DECODE_VARIANTS ? (int)AT_PACK_MODE_COUNT : 1;
     memcpy(bits_rot, bits0, sizeof(bits_rot));
     for (uint8_t rot = 0; rot < 4U; rot++) {
-        for (int tf = 0; tf < (int)AT_BITS_TRANSFORM_COUNT; tf++) {
-            at_transform_bits(bits_rot, (at_bits_transform_t)tf, bits_tf);
-            for (int pack = 0; pack < (int)AT_PACK_MODE_COUNT; pack++) {
-                uint64_t code = at_build_code_variant(bits_tf, (at_pack_mode_t)pack);
+        for (int tf = 0; tf < transform_count; tf++) {
+            if (AT_ENABLE_DEBUG_DECODE_VARIANTS)
+            {
+                at_transform_bits(bits_rot, (at_bits_transform_t)tf, bits_tf);
+            }
+            else
+            {
+                memcpy(bits_tf, bits_rot, sizeof(bits_tf));
+            }
+            for (int pack = 0; pack < pack_count; pack++) {
+                uint64_t code = AT_ENABLE_DEBUG_DECODE_VARIANTS ?
+                                at_build_code_variant(bits_tf, (at_pack_mode_t)pack) :
+                                at_build_code_family(bits_tf, false);
                 uint16_t local_id = 0;
                 uint32_t local_h = UINT32_MAX;
                 at_match_code(code, &local_id, &local_h);

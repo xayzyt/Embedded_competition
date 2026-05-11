@@ -39,6 +39,8 @@ typedef struct {
     int32_t filtered_bbox_h;            /* 滤波后的外接框高度。 */
     float filtered_edge_px;             /* 滤波后的 tag 边长像素估计。 */
     float filtered_angle_deg;           /* 滤波后的 tag 顶边角度。 */
+    bool have_processed_frame;          /* 是否已经处理过一个视觉帧。 */
+    uint32_t last_processed_frame_seq;  /* 上一次修改计数的 frame_seq。 */
     app_dock_state_t last_state;        /* 上一次输出的接驳判定状态。 */
 } app_dock_judge_runtime_t;
 static app_dock_judge_config_t s_cfg = {0};
@@ -86,6 +88,23 @@ static int32_t app_clip_i32(int32_t v, int32_t lo, int32_t hi)
     if (v < lo) return lo;
     if (v > hi) return hi;
     return v;
+}
+
+static bool app_dock_is_repeated_frame(const app_vision_result_t *vision)
+{
+    return (vision != NULL) &&
+           s_rt.have_processed_frame &&
+           (s_rt.last_processed_frame_seq == vision->frame_seq);
+}
+
+static void app_dock_mark_frame_processed(const app_vision_result_t *vision)
+{
+    if (vision == NULL)
+    {
+        return;
+    }
+    s_rt.have_processed_frame = true;
+    s_rt.last_processed_frame_seq = vision->frame_seq;
 }
 /* 把当前视觉结果写入滤波器，目标 ID 变化时重置历史。 */
 static void app_dock_apply_filter(const app_vision_result_t *vision)
@@ -239,23 +258,23 @@ void app_dock_judge_get_default_config(app_dock_judge_config_t *out)
     out->target_tag_id = 1;
     out->center_x_ref = 160;
     out->center_y_ref = 120;
-    out->center_x_tol = 28;
-    out->center_y_tol = 18;
-    out->min_area = 2400;
-    out->min_bbox_w = 58;
-    out->min_bbox_h = 72;
-    out->min_stable_count = 5;
-    out->use_distance_gate = true;
-    out->tag_size_mm = 100;
-    out->focal_length_px = 330.0f;
-    out->min_distance_mm = 220;
-    out->max_distance_mm = 650;
+    out->center_x_tol = 100;
+    out->center_y_tol = 75;
+    out->min_area = 500;
+    out->min_bbox_w = 24;
+    out->min_bbox_h = 24;
+    out->min_stable_count = 2;
+    out->use_distance_gate = false;
+    out->tag_size_mm = 60;
+    out->focal_length_px = 314.0f;
+    out->min_distance_mm = 120;
+    out->max_distance_mm = 700;
     out->ema_shift = 2;
-    out->ready_enter_frames = 2;
-    out->ready_exit_bad_frames = 3;
+    out->ready_enter_frames = 1;
+    out->ready_exit_bad_frames = 6;
     out->aligned_enter_frames = 1;
     out->wrong_id_enter_frames = 2;
-    out->lost_hold_frames = 3;
+    out->lost_hold_frames = 6;
 }
 /* 保存配置并初始化内部滤波、防抖和状态机。 */
 esp_err_t app_dock_judge_init(const app_dock_judge_config_t *cfg)
@@ -302,6 +321,8 @@ esp_err_t app_dock_judge_set_target_id(uint16_t target_tag_id, bool enable_filte
     s_rt.aligned_pass_count = 0;
     s_rt.wrong_id_count = 0;
     s_rt.invalid_hold_count = 0;
+    s_rt.have_processed_frame = false;
+    s_rt.last_processed_frame_seq = 0;
     s_rt.last_state = APP_DOCK_STATE_SEARCHING;
     ESP_LOGI(TAG, "dock target updated: enable=%d target_id=%u", s_cfg.use_target_id, (unsigned)s_cfg.target_tag_id);
     return ESP_OK;
@@ -321,16 +342,21 @@ bool app_dock_judge_process(const app_vision_result_t *vision,
         return false;
     }
     memset(out, 0, sizeof(*out));
+    const bool repeated_frame = app_dock_is_repeated_frame(vision);
     if (!vision->valid)
     {
-        if (s_rt.invalid_hold_count < s_cfg.lost_hold_frames)
+        if (!repeated_frame && s_rt.invalid_hold_count < s_cfg.lost_hold_frames)
         {
             s_rt.invalid_hold_count++;
         }
-        s_rt.ready_bad_count = app_sat_inc_u8(s_rt.ready_bad_count);
-        s_rt.ready_pass_count = 0;
-        s_rt.aligned_pass_count = 0;
-        s_rt.wrong_id_count = 0;
+        if (!repeated_frame)
+        {
+            s_rt.ready_bad_count = app_sat_inc_u8(s_rt.ready_bad_count);
+            s_rt.ready_pass_count = 0;
+            s_rt.aligned_pass_count = 0;
+            s_rt.wrong_id_count = 0;
+            app_dock_mark_frame_processed(vision);
+        }
         out->vision_valid = false;
         out->frame_seq = vision->frame_seq;
         out->lost_count = vision->lost_count;
@@ -352,13 +378,20 @@ bool app_dock_judge_process(const app_vision_result_t *vision,
             out->hover_score = 0;
             return true;
         }
-        s_rt.have_filter = false;
-        s_rt.last_tag_id = 0;
-        s_rt.last_state = APP_DOCK_STATE_SEARCHING;
+        if (!repeated_frame)
+        {
+            s_rt.have_filter = false;
+            s_rt.last_tag_id = 0;
+            s_rt.last_state = APP_DOCK_STATE_SEARCHING;
+        }
         return true;
     }
-    s_rt.invalid_hold_count = 0;
-    app_dock_apply_filter(vision);
+    if (!repeated_frame)
+    {
+        s_rt.invalid_hold_count = 0;
+        app_dock_apply_filter(vision);
+        app_dock_mark_frame_processed(vision);
+    }
     app_dock_fill_result_base(vision, out);
     out->target_id_ok = (!s_cfg.use_target_id) || (vision->tag_id == s_cfg.target_tag_id);
     out->centered_ok = (app_abs_i32(out->dx) <= s_cfg.center_x_tol) &&
@@ -385,17 +418,20 @@ bool app_dock_judge_process(const app_vision_result_t *vision,
     }
     if (!out->target_id_ok)
     {
-        s_rt.wrong_id_count = app_sat_inc_u8(s_rt.wrong_id_count);
-        s_rt.ready_pass_count = 0;
-        s_rt.ready_bad_count = 0;
-        s_rt.aligned_pass_count = 0;
-        if (s_rt.wrong_id_count >= s_cfg.wrong_id_enter_frames)
+        if (!repeated_frame)
         {
-            s_rt.last_state = APP_DOCK_STATE_WRONG_ID;
-        }
-        else
-        {
-            s_rt.last_state = APP_DOCK_STATE_TRACKING;
+            s_rt.wrong_id_count = app_sat_inc_u8(s_rt.wrong_id_count);
+            s_rt.ready_pass_count = 0;
+            s_rt.ready_bad_count = 0;
+            s_rt.aligned_pass_count = 0;
+            if (s_rt.wrong_id_count >= s_cfg.wrong_id_enter_frames)
+            {
+                s_rt.last_state = APP_DOCK_STATE_WRONG_ID;
+            }
+            else
+            {
+                s_rt.last_state = APP_DOCK_STATE_TRACKING;
+            }
         }
         out->state = s_rt.last_state;
         out->hover_score = app_dock_calc_hover_score(out);
@@ -411,70 +447,73 @@ bool app_dock_judge_process(const app_vision_result_t *vision,
     (!s_cfg.use_distance_gate || out->distance_ok);
     const bool aligned_cond = out->centered_ok &&
     (out->near_ok || out->stable_ok);
-    if (ready_cond)
+    if (!repeated_frame)
     {
-        s_rt.ready_pass_count = app_sat_inc_u8(s_rt.ready_pass_count);
-        s_rt.ready_bad_count = 0;
-    }
-    else
-    {
-        s_rt.ready_pass_count = 0;
-        s_rt.ready_bad_count = app_sat_inc_u8(s_rt.ready_bad_count);
-    }
-    if (aligned_cond)
-    {
-        s_rt.aligned_pass_count = app_sat_inc_u8(s_rt.aligned_pass_count);
-    }
-    else
-    {
-        s_rt.aligned_pass_count = 0;
-    }
-    switch (s_rt.last_state) {
-    case APP_DOCK_STATE_READY_TO_DOCK:
-        if (ready_cond || (s_rt.ready_bad_count < s_cfg.ready_exit_bad_frames))
+        if (ready_cond)
         {
-            s_rt.last_state = APP_DOCK_STATE_READY_TO_DOCK;
-        }
-        else if (aligned_cond)
-        {
-            s_rt.last_state = APP_DOCK_STATE_ALIGNED;
+            s_rt.ready_pass_count = app_sat_inc_u8(s_rt.ready_pass_count);
+            s_rt.ready_bad_count = 0;
         }
         else
         {
-            s_rt.last_state = APP_DOCK_STATE_TRACKING;
+            s_rt.ready_pass_count = 0;
+            s_rt.ready_bad_count = app_sat_inc_u8(s_rt.ready_bad_count);
         }
-        break;
-    case APP_DOCK_STATE_ALIGNED:
-        if (ready_cond && (s_rt.ready_pass_count >= s_cfg.ready_enter_frames))
+        if (aligned_cond)
         {
-            s_rt.last_state = APP_DOCK_STATE_READY_TO_DOCK;
-        }
-        else if (aligned_cond || (s_rt.ready_bad_count < s_cfg.ready_exit_bad_frames))
-        {
-            s_rt.last_state = APP_DOCK_STATE_ALIGNED;
+            s_rt.aligned_pass_count = app_sat_inc_u8(s_rt.aligned_pass_count);
         }
         else
         {
-            s_rt.last_state = APP_DOCK_STATE_TRACKING;
+            s_rt.aligned_pass_count = 0;
         }
-        break;
-    case APP_DOCK_STATE_TRACKING:
-    case APP_DOCK_STATE_SEARCHING:
-    case APP_DOCK_STATE_WRONG_ID:
-    default:
-        if (ready_cond && (s_rt.ready_pass_count >= s_cfg.ready_enter_frames))
-        {
-            s_rt.last_state = APP_DOCK_STATE_READY_TO_DOCK;
+        switch (s_rt.last_state) {
+        case APP_DOCK_STATE_READY_TO_DOCK:
+            if (ready_cond || (s_rt.ready_bad_count < s_cfg.ready_exit_bad_frames))
+            {
+                s_rt.last_state = APP_DOCK_STATE_READY_TO_DOCK;
+            }
+            else if (aligned_cond)
+            {
+                s_rt.last_state = APP_DOCK_STATE_ALIGNED;
+            }
+            else
+            {
+                s_rt.last_state = APP_DOCK_STATE_TRACKING;
+            }
+            break;
+        case APP_DOCK_STATE_ALIGNED:
+            if (ready_cond && (s_rt.ready_pass_count >= s_cfg.ready_enter_frames))
+            {
+                s_rt.last_state = APP_DOCK_STATE_READY_TO_DOCK;
+            }
+            else if (aligned_cond || (s_rt.ready_bad_count < s_cfg.ready_exit_bad_frames))
+            {
+                s_rt.last_state = APP_DOCK_STATE_ALIGNED;
+            }
+            else
+            {
+                s_rt.last_state = APP_DOCK_STATE_TRACKING;
+            }
+            break;
+        case APP_DOCK_STATE_TRACKING:
+        case APP_DOCK_STATE_SEARCHING:
+        case APP_DOCK_STATE_WRONG_ID:
+        default:
+            if (ready_cond && (s_rt.ready_pass_count >= s_cfg.ready_enter_frames))
+            {
+                s_rt.last_state = APP_DOCK_STATE_READY_TO_DOCK;
+            }
+            else if (aligned_cond && (s_rt.aligned_pass_count >= s_cfg.aligned_enter_frames))
+            {
+                s_rt.last_state = APP_DOCK_STATE_ALIGNED;
+            }
+            else
+            {
+                s_rt.last_state = APP_DOCK_STATE_TRACKING;
+            }
+            break;
         }
-        else if (aligned_cond && (s_rt.aligned_pass_count >= s_cfg.aligned_enter_frames))
-        {
-            s_rt.last_state = APP_DOCK_STATE_ALIGNED;
-        }
-        else
-        {
-            s_rt.last_state = APP_DOCK_STATE_TRACKING;
-        }
-        break;
     }
     out->state = s_rt.last_state;
     out->hover_score = app_dock_calc_hover_score(out);

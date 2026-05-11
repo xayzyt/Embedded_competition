@@ -31,8 +31,10 @@
 
 #define HUD_SRC_W               320
 #define HUD_SRC_H               240
-#define HUD_LOCK_SEG_COUNT      5
+#define HUD_LOCK_SEG_COUNT      2
 #define HUD_AUTH_SHOW_MS        1200
+#define UI_LOCK_SHORT_MS        30
+#define UI_LOCK_BOOT_MS         300
 static const char *TAG = "app_ui";
 
 /* -------------------------------------------------------------------------- */
@@ -618,7 +620,7 @@ static void app_ui_set_track_box(bool show,
 bool app_ui_create(void)
 {
 
-    if (!bsp_display_lock(0))
+    if (!bsp_display_lock(UI_LOCK_BOOT_MS))
     {
         return false;
     }
@@ -765,7 +767,7 @@ bool app_ui_create(void)
 /* 创建并显示启动加载层，用于遮住慢启动阶段的白屏。 */
 bool app_ui_show_loading(const char *text)
 {
-    if (!bsp_display_lock(0))
+    if (!bsp_display_lock(UI_LOCK_BOOT_MS))
     {
         return false;
     }
@@ -815,7 +817,7 @@ void app_ui_set_loading_text(const char *text)
         return;
     }
 
-    if (!bsp_display_lock(0))
+    if (!bsp_display_lock(UI_LOCK_BOOT_MS))
     {
         return;
     }
@@ -833,7 +835,7 @@ void app_ui_hide_loading(void)
         return;
     }
 
-    if (!bsp_display_lock(0))
+    if (!bsp_display_lock(UI_LOCK_BOOT_MS))
     {
         return;
     }
@@ -853,7 +855,7 @@ void app_ui_set_status(const char *text)
         return;
     }
 
-    if (!bsp_display_lock(0))
+    if (!bsp_display_lock(UI_LOCK_SHORT_MS))
     {
         return;
     }
@@ -870,7 +872,7 @@ void app_ui_set_vision_text(const char *text)
         return;
     }
 
-    if (!bsp_display_lock(0))
+    if (!bsp_display_lock(UI_LOCK_SHORT_MS))
     {
         return;
     }
@@ -886,7 +888,7 @@ void app_ui_set_capture_text(const char *text)
     {
         return;
     }
-    if (!bsp_display_lock(0))
+    if (!bsp_display_lock(UI_LOCK_SHORT_MS))
     {
         return;
     }
@@ -902,7 +904,7 @@ void app_ui_set_dock_text(const char *text)
         return;
     }
 
-    if (!bsp_display_lock(0))
+    if (!bsp_display_lock(UI_LOCK_SHORT_MS))
     {
         return;
     }
@@ -967,7 +969,7 @@ static void app_ui_update_hud_unlocked(const app_vision_result_t *vision,
 void app_ui_update_hud(const app_vision_result_t *vision,
     const app_dock_judge_result_t *dock)
 {
-    if (!bsp_display_lock(0))
+    if (!bsp_display_lock(UI_LOCK_SHORT_MS))
     {
         return;
     }
@@ -981,7 +983,7 @@ void app_ui_update_control_state(const char *status,
     const app_vision_result_t *vision,
     const app_dock_judge_result_t *dock)
 {
-    if (!bsp_display_lock(0))
+    if (!bsp_display_lock(UI_LOCK_SHORT_MS))
     {
         return;
     }
