@@ -15,9 +15,12 @@
 #include <stdio.h>
 #include <string.h>
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/task.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "sdkconfig.h"
 #include "app_apriltag.h"
 #include "app_ai_capture.h"
 #include "app_ui.h"
@@ -71,6 +74,17 @@ static uint32_t s_sample_crop_x = 0;
 static uint32_t s_sample_crop_y = 0;
 static uint32_t s_sample_crop_w = 0;
 static uint32_t s_sample_crop_h = 0;
+
+static void app_vision_log_heap(const char *stage)
+{
+    ESP_LOGI(TAG,
+        "%s heap: int8_free=%lu int8_largest=%lu psram_free=%lu psram_largest=%lu",
+        stage,
+        (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+        (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+        (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+        (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+}
 
 /* -------------------------------------------------------------------------- */
 /* 时间、颜色和采样映射辅助函数                                         */
@@ -584,6 +598,29 @@ esp_err_t app_vision_start(void)
         return ESP_OK;
     }
 
+    app_vision_log_heap("before vision task start");
+
+#if defined(CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY) && CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY
+    BaseType_t ret = xTaskCreatePinnedToCoreWithCaps(app_vision_task,
+        "app_vision",
+        VISION_TASK_STACK_SIZE,
+        NULL,
+        VISION_TASK_PRIORITY,
+        &s_vision_task,
+        VISION_TASK_CORE_ID,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (ret != pdPASS)
+    {
+        ESP_LOGW(TAG, "create vision task with PSRAM stack failed, try internal stack");
+        ret = xTaskCreatePinnedToCore(app_vision_task,
+            "app_vision",
+            VISION_TASK_STACK_SIZE,
+            NULL,
+            VISION_TASK_PRIORITY,
+            &s_vision_task,
+            VISION_TASK_CORE_ID);
+    }
+#else
     BaseType_t ret = xTaskCreatePinnedToCore(app_vision_task,
         "app_vision",
         VISION_TASK_STACK_SIZE,
@@ -591,9 +628,11 @@ esp_err_t app_vision_start(void)
         VISION_TASK_PRIORITY,
         &s_vision_task,
         VISION_TASK_CORE_ID);
+#endif
     if (ret != pdPASS)
     {
         ESP_LOGE(TAG, "create vision task failed");
+        app_vision_log_heap("vision task create failed");
         s_vision_task = NULL;
         return ESP_FAIL;
     }

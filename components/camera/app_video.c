@@ -13,6 +13,7 @@
  */
 
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/task.h"
 #include <inttypes.h>
 #include <string.h>
@@ -23,6 +24,7 @@
 #include <sys/errno.h>
 #include <unistd.h>
 #include "esp_err.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "linux/videodev2.h"
 #include "esp_video_init.h"
@@ -274,7 +276,7 @@ int app_video_open(char *dev, video_fmt_t init_fmt)
     }
     {
         char pix[5];
-        ESP_LOGD(TAG,
+        ESP_LOGI(TAG,
             "actual fmt:  %" PRIu32 "x%" PRIu32 ", pix=%s, bytesperline=%" PRIu32 ", sizeimage=%" PRIu32,
             actual_format.fmt.pix.width,
             actual_format.fmt.pix.height,
@@ -399,7 +401,7 @@ static inline esp_err_t video_receive_video_frame(int video_fd)
     }
     if (!s_video.first_frame_logged)
     {
-        ESP_LOGD(TAG, "first frame: index=%" PRIu32 ", bytesused=%" PRIu32 ", length=%" PRIu32,
+        ESP_LOGI(TAG, "first frame: index=%" PRIu32 ", bytesused=%" PRIu32 ", length=%" PRIu32,
             s_video.v4l2_buf.index,
             s_video.v4l2_buf.bytesused,
             s_video.v4l2_buf.length);
@@ -519,6 +521,27 @@ esp_err_t app_video_stream_task_start(int video_fd, int core_id)
     }
     s_video.video_fd_task_arg = video_fd;
 
+#if defined(CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY) && CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY
+    BaseType_t ret = xTaskCreatePinnedToCoreWithCaps(video_stream_task,
+        "video_stream",
+        VIDEO_TASK_STACK_SIZE,
+        &s_video.video_fd_task_arg,
+        VIDEO_TASK_PRIORITY,
+        &s_video.video_stream_task_handle,
+        core_id,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (ret != pdPASS)
+    {
+        ESP_LOGW(TAG, "create video stream task with PSRAM stack failed, try internal stack");
+        ret = xTaskCreatePinnedToCore(video_stream_task,
+            "video_stream",
+            VIDEO_TASK_STACK_SIZE,
+            &s_video.video_fd_task_arg,
+            VIDEO_TASK_PRIORITY,
+            &s_video.video_stream_task_handle,
+            core_id);
+    }
+#else
     BaseType_t ret = xTaskCreatePinnedToCore(video_stream_task,
         "video_stream",
         VIDEO_TASK_STACK_SIZE,
@@ -526,6 +549,7 @@ esp_err_t app_video_stream_task_start(int video_fd, int core_id)
         VIDEO_TASK_PRIORITY,
         &s_video.video_stream_task_handle,
         core_id);
+#endif
     if (ret != pdPASS)
     {
         video_stream_stop(video_fd);

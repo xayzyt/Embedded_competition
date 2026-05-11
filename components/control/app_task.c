@@ -19,6 +19,7 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "nvs.h"
+#include "app_drone_ai.h"
 
 static const char *TAG = "app_task";
 static const char *NVS_NS = "sky_task";
@@ -231,6 +232,7 @@ esp_err_t app_task_start_with_target(uint16_t target_id, const char *source)
 
     taskEXIT_CRITICAL(&s_mux);
     ESP_LOGI(TAG, "task started, target_id=%u source=%s", (unsigned)target_id, (source != NULL) ? source : "local");
+    app_drone_ai_reset_gate();
     app_task_emit_event(APP_TASK_EVENT_STATE_CHANGED);
     return ESP_OK;
 }
@@ -281,6 +283,7 @@ void app_task_mark_completed(const char *note)
     s_rt.active = false;
     app_task_change_state_locked(APP_TASK_STATE_COMPLETED, note != NULL ? note : "task completed");
     taskEXIT_CRITICAL(&s_mux);
+    app_drone_ai_reset_gate();
     app_task_emit_event(APP_TASK_EVENT_STATE_CHANGED);
 }
 /* 出现超时、拒绝或硬件错误时结束活动任务，并进入 FAULT。 */
@@ -290,6 +293,7 @@ void app_task_mark_fault(const char *note)
     s_rt.active = false;
     app_task_change_state_locked(APP_TASK_STATE_FAULT, note != NULL ? note : "task fault");
     taskEXIT_CRITICAL(&s_mux);
+    app_drone_ai_reset_gate();
     app_task_emit_event(APP_TASK_EVENT_STATE_CHANGED);
 }
 /* 主动取消当前任务，并清除已匹配的 tag ID。 */
@@ -300,6 +304,7 @@ void app_task_cancel(const char *note)
     s_rt.matched_tag_id = 0;
     app_task_change_state_locked(APP_TASK_STATE_CANCELLED, note != NULL ? note : "task cancelled");
     taskEXIT_CRITICAL(&s_mux);
+    app_drone_ai_reset_gate();
     app_task_emit_event(APP_TASK_EVENT_STATE_CHANGED);
 }
 /* 读取任务快照；读取后会清除 target_dirty 标记。 */
@@ -315,6 +320,20 @@ bool app_task_get_snapshot(app_task_snapshot_t *out)
     taskEXIT_CRITICAL(&s_mux);
     return true;
 }
+
+/* 读取任务快照但不消费 target_dirty，给摄像头等旁路门控使用。 */
+bool app_task_peek_snapshot(app_task_snapshot_t *out)
+{
+    if (out == NULL)
+    {
+        return false;
+    }
+    taskENTER_CRITICAL(&s_mux);
+    app_task_copy_snapshot_locked(out);
+    taskEXIT_CRITICAL(&s_mux);
+    return true;
+}
+
 /* 将任务状态枚举转换成 MQTT/UI 友好的短文本。 */
 const char *app_task_state_to_text(app_task_state_t state)
 {

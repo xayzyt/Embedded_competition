@@ -79,6 +79,9 @@ void app_task_cancel(const char *note);
 /* 读取当前任务快照，供控制、UI 和云端使用。 */
 bool app_task_get_snapshot(app_task_snapshot_t *out);
 
+/* 读取当前任务快照，但不清除 target_dirty 标记。 */
+bool app_task_peek_snapshot(app_task_snapshot_t *out);
+
 /* 将任务状态枚举转换成短字符串。 */
 const char *app_task_state_to_text(app_task_state_t state);
 

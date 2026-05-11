@@ -28,6 +28,7 @@
 #include "esp_crt_bundle.h"
 #include "esp_err.h"
 #include "esp_event.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
@@ -81,6 +82,17 @@ static void app_cloud_mqtt_event_handler(void *handler_args,
     esp_event_base_t base,
     int32_t event_id,
     void *event_data);
+
+static void app_cloud_log_heap(const char *stage)
+{
+    ESP_LOGI(TAG,
+        "%s heap: int_free=%lu int_largest=%lu psram_free=%lu psram_largest=%lu",
+        stage,
+        (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+        (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+        (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+        (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+}
 
 /* -------------------------------------------------------------------------- */
 /* JSON 小工具                                                          */
@@ -458,24 +470,37 @@ static void app_cloud_destroy_mqtt_client(void)
     s_cloud.mqtt_connected = false;
 }
 /* Wi-Fi 已连上时启动 MQTT 客户端。 */
-static void app_cloud_start_mqtt_if_needed(void)
+static esp_err_t app_cloud_start_mqtt_if_needed(void)
 {
     if (s_cloud.mqtt_client == NULL && app_cloud_create_mqtt_client() != ESP_OK)
     {
-        return;
+        return ESP_FAIL;
     }
     if (s_cloud.mqtt_client == NULL || s_cloud.mqtt_started)
     {
-        return;
+        return ESP_OK;
     }
-    ESP_ERROR_CHECK(esp_mqtt_client_register_event(s_cloud.mqtt_client,
+    esp_err_t ret = esp_mqtt_client_register_event(s_cloud.mqtt_client,
         ESP_EVENT_ANY_ID,
         app_cloud_mqtt_event_handler,
-        NULL));
+        NULL);
+    if (ret != ESP_OK)
+    {
+        ESP_LOGW(TAG, "register mqtt event failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
 
-    ESP_ERROR_CHECK(esp_mqtt_client_start(s_cloud.mqtt_client));
+    app_cloud_log_heap("before mqtt start");
+    ret = esp_mqtt_client_start(s_cloud.mqtt_client);
+    if (ret != ESP_OK)
+    {
+        ESP_LOGW(TAG, "mqtt client start failed: %s", esp_err_to_name(ret));
+        app_cloud_destroy_mqtt_client();
+        return ret;
+    }
     s_cloud.mqtt_started = true;
     ESP_LOGI(TAG, "EMQX mqtt client started");
+    return ESP_OK;
 }
 /* 处理云端 set_target 命令。 */
 static esp_err_t app_cloud_receive_set_target(uint16_t target_id)
@@ -642,7 +667,13 @@ static void app_cloud_task(void *arg)
         if ((bits & APP_CLOUD_START_MQTT_BIT) != 0)
         {
             ESP_LOGD(TAG, "cloud task: start mqtt");
-            app_cloud_start_mqtt_if_needed();
+            esp_err_t ret = app_cloud_start_mqtt_if_needed();
+            if (ret != ESP_OK)
+            {
+                ESP_LOGW(TAG, "defer mqtt start retry: %s", esp_err_to_name(ret));
+                vTaskDelay(pdMS_TO_TICKS(2000));
+                xEventGroupSetBits(s_cloud.event_group, APP_CLOUD_START_MQTT_BIT);
+            }
         }
     }
 }
@@ -822,6 +853,7 @@ esp_err_t app_cloud_init(void)
 
     ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "wifi start failed");
     ESP_RETURN_ON_ERROR(esp_wifi_set_ps(WIFI_PS_NONE), TAG, "wifi set ps failed");
+    ESP_LOGI(TAG, "wifi started, mqtt waits for ip");
     app_cloud_log_topics_once();
     s_cloud.inited = true;
     ESP_LOGI(TAG, "EMQX init done (official host Wi-Fi path via ESP32-C6)");

@@ -7,6 +7,7 @@
 
 #include "esp_err.h"
 #include <stdbool.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -17,6 +18,9 @@ esp_err_t app_camera_init(void);
 
 /* 打开摄像头视频流，开始向 LVGL 和 app_vision 推送帧。 */
 esp_err_t app_camera_preview_start(void);
+
+/* Wait until the first preview frame is actually bound to the LVGL canvas. */
+bool app_camera_wait_first_frame(uint32_t timeout_ms);
 
 #ifdef __cplusplus
 }

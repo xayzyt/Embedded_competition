@@ -25,6 +25,7 @@
 #include "esp_log.h"
 #include "app_ch32_link.h"
 #include "app_dock_judge.h"
+#include "app_drone_ai.h"
 #include "app_task.h"
 #include "app_ui.h"
 #include "app_vision.h"
@@ -356,6 +357,7 @@ static void app_ctrl_compose_guidance(const app_dock_judge_result_t *dock,
 static void app_ctrl_compose_task_status(const app_task_snapshot_t *task,
     const app_dock_judge_result_t *dock,
     bool ch32_ready,
+    bool apriltag_enabled,
     char *buf,
     size_t buf_len)
 {
@@ -372,7 +374,14 @@ static void app_ctrl_compose_task_status(const app_task_snapshot_t *task,
         break;
     case APP_TASK_STATE_WAIT_APPROACH: {
             char guide[72] = {0};
-            app_ctrl_compose_guidance(dock, guide, sizeof(guide));
+            if (apriltag_enabled)
+            {
+                app_ctrl_compose_guidance(dock, guide, sizeof(guide));
+            }
+            else
+            {
+                app_drone_ai_format_status(guide, sizeof(guide));
+            }
             snprintf(buf, buf_len, "task: wait id=%u / %s", (unsigned)task->target_id, guide);
             break;
         }
@@ -827,6 +836,7 @@ static void app_ctrl_publish_ui(uint32_t now_ms,
     app_ch32_proto_stage_t proto_stage,
     uint8_t proto_error,
     bool retrigger_blocked,
+    bool apriltag_enabled,
     uint32_t notice_deadline_ms,
     const char *notice)
 {
@@ -835,8 +845,14 @@ static void app_ctrl_publish_ui(uint32_t now_ms,
     char task_brief[96] = {0};
 
     app_task_format_brief(task, task_brief, sizeof(task_brief));
-    app_ctrl_compose_task_status(task, dock, ch32_ready, status, sizeof(status));
+    app_ctrl_compose_task_status(task, dock, ch32_ready, apriltag_enabled, status, sizeof(status));
     app_ctrl_compose_detail(dock, has_weight, weight_g, proto_stage, detail, sizeof(detail));
+    if (task != NULL && task->active && task->state == APP_TASK_STATE_WAIT_APPROACH && !apriltag_enabled)
+    {
+        char ai_status[64] = {0};
+        app_drone_ai_format_status(ai_status, sizeof(ai_status));
+        snprintf(detail, sizeof(detail), "dock dbg: apriltag gated / %s", ai_status);
+    }
 
     if (dock_busy)
     {
@@ -892,6 +908,8 @@ static void app_ctrl_task(void *arg)
     (void)arg;
     bool prev_ready_level = false;
     bool prev_dock_busy = false;
+    bool prev_apriltag_enabled = false;
+    uint32_t gate_open_vision_seq = 0;
 
     while (1) {
         /* 获取当前系统毫秒时间戳，供本轮所有超时判断使用。 */
@@ -908,6 +926,32 @@ static void app_ctrl_task(void *arg)
         (void)app_dock_judge_process(&vision, &dock);
         /* 读当前任务快照（状态、目标 ID 等）。 */
         (void)app_task_get_snapshot(&task);
+        const bool apriltag_enabled = task.active &&
+                                      (task.state == APP_TASK_STATE_WAIT_APPROACH) &&
+                                      app_drone_ai_is_drone_confirmed();
+        if (!apriltag_enabled)
+        {
+            gate_open_vision_seq = vision.frame_seq;
+            memset(&vision, 0, sizeof(vision));
+            app_dock_judge_reset();
+            (void)app_dock_judge_process(&vision, &dock);
+            prev_ready_level = false;
+        }
+        else if (!prev_apriltag_enabled)
+        {
+            gate_open_vision_seq = vision.frame_seq;
+            memset(&vision, 0, sizeof(vision));
+            app_dock_judge_reset();
+            (void)app_dock_judge_process(&vision, &dock);
+            prev_ready_level = false;
+        }
+        else if (vision.frame_seq <= gate_open_vision_seq)
+        {
+            memset(&vision, 0, sizeof(vision));
+            app_dock_judge_reset();
+            (void)app_dock_judge_process(&vision, &dock);
+            prev_ready_level = false;
+        }
 
         /* 将 CH32 回调更新的共享状态拷贝到本轮局部变量，后续判断在锁外进行。 */
         app_ctrl_read_loop_state(&state);
@@ -957,6 +1001,7 @@ static void app_ctrl_task(void *arg)
         /* 保存本轮状态供下一轮做边沿检测。 */
         prev_ready_level = ready_level;
         prev_dock_busy = state.dock_busy;
+        prev_apriltag_enabled = apriltag_enabled;
 
         /* 汇总视觉、CH32、任务状态，刷新 UI 文本和 HUD。 */
         app_ctrl_publish_ui(now_ms,
@@ -970,6 +1015,7 @@ static void app_ctrl_task(void *arg)
             state.proto_stage,
             state.proto_error,
             retrigger_blocked,
+            apriltag_enabled,
             state.notice_deadline_ms,
             state.notice);
 

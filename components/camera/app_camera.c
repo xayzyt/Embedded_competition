@@ -19,6 +19,7 @@
 #include <string.h>
 #include <unistd.h>
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/task.h"
 #include "sdkconfig.h"
 #include "esp_err.h"
@@ -31,6 +32,8 @@
 #include "bsp/display.h"
 #include "app_video.h"
 #include "app_ai_capture.h"
+#include "app_drone_ai.h"
+#include "app_task.h"
 #include "app_vision.h"
 #if SOC_PPA_SUPPORTED
 #include "driver/ppa.h"
@@ -45,9 +48,13 @@
 #define ALIGN_UP(num, align)     (((num) + ((align) - 1)) & ~((align) - 1))
 #define DISPLAY_TASK_STACK_SIZE  (6 * 1024)
 #define DISPLAY_TASK_PRIORITY    7
+#define DISPLAY_LOCK_TIMEOUT_MS  30
 #define VISION_SAMPLE_INTERVAL   4
+#define DRONE_AI_SAMPLE_INTERVAL 16
 #define RECOGNITION_CAMERA_EXPOSURE_US      4000U
 #define RECOGNITION_CAMERA_GAIN_PERCENT     35U
+#define CAMERA_BUF_CAPS          (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT | MALLOC_CAP_CACHE_ALIGNED)
+#define DISPLAY_BUF_CAPS         (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT | MALLOC_CAP_DMA)
 static const char *TAG = "app_camera";
 
 /* -------------------------------------------------------------------------- */
@@ -75,6 +82,10 @@ typedef enum {
 static volatile int s_displayed_stage_index = -1;
 static volatile int s_pending_stage_index = -1;
 static uint32_t s_vision_sample_skip = 0;
+static uint32_t s_drone_ai_sample_skip = 0;
+static uint32_t s_frame_count = 0;
+static volatile uint32_t s_display_count = 0;
+static bool s_ppa_error_logged = false;
 static disp_buf_state_t s_stage_state[STAGE_NUM_BUFS] = {0};
 #if SOC_PPA_SUPPORTED
 static ppa_client_handle_t s_ppa_srm_handle = NULL;
@@ -112,6 +123,19 @@ static inline esp_err_t app_camera_msync_c2m(void *addr, size_t size)
         ESP_CACHE_MSYNC_FLAG_DIR_C2M |
         ESP_CACHE_MSYNC_FLAG_INVALIDATE);
 }
+
+static void *app_camera_aligned_calloc(size_t size, uint32_t caps, const char *name)
+{
+    void *ptr = heap_caps_aligned_calloc(s_cache_line_size, 1, size, caps);
+    if (ptr == NULL && (caps & MALLOC_CAP_DMA))
+    {
+        uint32_t fallback_caps = (caps & ~MALLOC_CAP_DMA) | MALLOC_CAP_CACHE_ALIGNED;
+        ESP_LOGW(TAG, "alloc %s with DMA caps failed, retry cache-aligned PSRAM", name);
+        ptr = heap_caps_aligned_calloc(s_cache_line_size, 1, size, fallback_caps);
+    }
+    return ptr;
+}
+
 /* 兼容 LVGL 8/9 获取当前活动屏幕对象。 */
 static lv_obj_t *app_get_active_screen(void)
 {
@@ -172,7 +196,7 @@ static esp_err_t app_camera_alloc_display_buffers(void)
     }
     s_disp_buf_size = ALIGN_UP(BSP_LCD_H_RES * BSP_LCD_V_RES * 2, s_cache_line_size);
 
-    s_ui_canvas_buf = heap_caps_aligned_calloc(s_cache_line_size, 1, s_disp_buf_size, MALLOC_CAP_SPIRAM);
+    s_ui_canvas_buf = app_camera_aligned_calloc(s_disp_buf_size, DISPLAY_BUF_CAPS, "ui canvas");
     if (s_ui_canvas_buf == NULL)
     {
         ESP_LOGE(TAG, "alloc ui canvas buffer failed");
@@ -181,7 +205,7 @@ static esp_err_t app_camera_alloc_display_buffers(void)
     }
     for (int i = 0; i < STAGE_NUM_BUFS; i++) {
 
-        s_stage_buf[i] = heap_caps_aligned_calloc(s_cache_line_size, 1, s_disp_buf_size, MALLOC_CAP_SPIRAM);
+        s_stage_buf[i] = app_camera_aligned_calloc(s_disp_buf_size, DISPLAY_BUF_CAPS, "stage buffer");
         if (s_stage_buf[i] == NULL)
         {
             ESP_LOGE(TAG, "alloc stage buffer %d failed", i);
@@ -208,7 +232,7 @@ static esp_err_t app_camera_alloc_userptr_buffers(size_t frame_size)
     s_cam_buf_size = ALIGN_UP(frame_size, s_cache_line_size);
     for (int i = 0; i < CAMERA_NUM_BUFS; i++) {
 
-        s_cam_buf[i] = heap_caps_aligned_calloc(s_cache_line_size, 1, s_cam_buf_size, MALLOC_CAP_SPIRAM);
+        s_cam_buf[i] = app_camera_aligned_calloc(s_cam_buf_size, CAMERA_BUF_CAPS, "camera buffer");
         if (s_cam_buf[i] == NULL)
         {
             ESP_LOGE(TAG, "alloc USERPTR camera buffer %d failed", i);
@@ -217,7 +241,7 @@ static esp_err_t app_camera_alloc_userptr_buffers(size_t frame_size)
             return ESP_ERR_NO_MEM;
         }
     }
-    ESP_LOGD(TAG, "USERPTR camera buffers ready: %d x %u bytes", CAMERA_NUM_BUFS, (unsigned)s_cam_buf_size);
+    ESP_LOGI(TAG, "USERPTR camera buffers ready: %d x %u bytes", CAMERA_NUM_BUFS, (unsigned)s_cam_buf_size);
     return ESP_OK;
 }
 
@@ -408,6 +432,53 @@ static esp_err_t app_image_process_scale_crop(uint8_t *in_buf,
     return ppa_do_scale_rotate_mirror(s_ppa_srm_handle, &srm_cfg);
 }
 
+static esp_err_t app_image_process_scale_cpu(const uint8_t *in_buf,
+    uint32_t in_width,
+    uint32_t in_height,
+    uint8_t *out_buf,
+    uint32_t out_width,
+    uint32_t out_height)
+{
+    if (in_buf == NULL || out_buf == NULL || in_width == 0 || in_height == 0 ||
+        out_width == 0 || out_height == 0 ||
+        out_width > BSP_LCD_H_RES || out_height > BSP_LCD_V_RES)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    esp_err_t clear_ret = app_camera_clear_letterbox(out_buf, out_width, out_height);
+    if (clear_ret != ESP_OK)
+    {
+        return clear_ret;
+    }
+
+    const uint16_t *src = (const uint16_t *)in_buf;
+    uint16_t *dst = (uint16_t *)out_buf;
+    const uint32_t x_off = (BSP_LCD_H_RES - out_width) / 2U;
+    const uint32_t y_off = (BSP_LCD_V_RES - out_height) / 2U;
+
+    for (uint32_t y = 0; y < out_height; y++) {
+        uint32_t src_y = (uint32_t)(((uint64_t)y * in_height) / out_height);
+        if (src_y >= in_height)
+        {
+            src_y = in_height - 1U;
+        }
+        const uint16_t *src_row = src + (size_t)src_y * in_width;
+        uint16_t *dst_row = dst + (size_t)(y + y_off) * BSP_LCD_H_RES + x_off;
+
+        for (uint32_t x = 0; x < out_width; x++) {
+            uint32_t src_x = (uint32_t)(((uint64_t)x * in_width) / out_width);
+            if (src_x >= in_width)
+            {
+                src_x = in_width - 1U;
+            }
+            dst_row[x] = src_row[src_x];
+        }
+    }
+
+    return ESP_OK;
+}
+
 /* 把 BSP 摄像头旋转角度转换为 PPA 使用的枚举。 */
 static ppa_srm_rotation_angle_t app_camera_ppa_rotation(void)
 {
@@ -543,6 +614,11 @@ static void app_camera_release_stage_buffer(int buf_index)
     taskEXIT_CRITICAL(&s_display_mux);
 }
 /* 标记某个 stage buffer 已显示，并回收上一帧显示缓冲。 */
+/* -------------------------------------------------------------------------- */
+/* 显示任务和摄像头帧回调                                      */
+/* -------------------------------------------------------------------------- */
+
+/* 显示任务：把 ready stage buffer 绑定到 LVGL canvas 并刷新。 */
 static void app_camera_mark_displayed_stage_buffer(int buf_index)
 {
     if (buf_index < 0 || buf_index >= STAGE_NUM_BUFS)
@@ -562,11 +638,6 @@ static void app_camera_mark_displayed_stage_buffer(int buf_index)
     taskEXIT_CRITICAL(&s_display_mux);
 }
 
-/* -------------------------------------------------------------------------- */
-/* 显示任务和摄像头帧回调                                      */
-/* -------------------------------------------------------------------------- */
-
-/* 显示任务：把 ready stage buffer 绑定到 LVGL canvas 并刷新。 */
 static void app_camera_display_task(void *arg)
 {
     (void)arg;
@@ -585,7 +656,7 @@ static void app_camera_display_task(void *arg)
             }
 
             bool displayed = false;
-            if (bsp_display_lock(0))
+            if (bsp_display_lock(DISPLAY_LOCK_TIMEOUT_MS))
             {
 #if LVGL_VERSION_MAJOR >= 9
                 lv_canvas_set_buffer(s_camera_canvas,
@@ -601,13 +672,17 @@ static void app_camera_display_task(void *arg)
                     LV_IMG_CF_TRUE_COLOR);
 #endif
                 lv_obj_invalidate(s_camera_canvas);
-                lv_refr_now(NULL);
                 displayed = true;
 
                 bsp_display_unlock();
             }
             if (displayed)
             {
+                s_display_count++;
+                if (s_display_count == 1U)
+                {
+                    ESP_LOGI(TAG, "first camera frame handed to LVGL canvas");
+                }
                 app_camera_mark_displayed_stage_buffer(buf_index);
             }
             else
@@ -618,6 +693,19 @@ static void app_camera_display_task(void *arg)
     }
 }
 /* 摄像头帧回调：抽样送视觉识别，同时生成预览 stage buffer。 */
+static bool app_camera_apriltag_gate_open(void)
+{
+    app_task_snapshot_t task = {0};
+
+    if (!app_task_peek_snapshot(&task))
+    {
+        return false;
+    }
+    return task.active &&
+           (task.state == APP_TASK_STATE_WAIT_APPROACH) &&
+           app_drone_ai_is_drone_confirmed();
+}
+
 static void app_camera_frame_cb(uint8_t *camera_buf,
     uint8_t camera_buf_index,
     uint32_t camera_buf_hes,
@@ -630,11 +718,26 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
     {
         return;
     }
+    s_frame_count++;
+    if (s_frame_count == 1U)
+    {
+        ESP_LOGI(TAG,
+            "first camera frame received: %lux%lu len=%lu",
+            (unsigned long)camera_buf_hes,
+            (unsigned long)camera_buf_ves,
+            (unsigned long)camera_buf_len);
+    }
 
     bool camera_synced_for_cpu = false;
     bool capture_active = app_ai_capture_is_active();
+    bool ai_due = false;
     bool vision_due = false;
-    if (capture_active)
+    if (++s_drone_ai_sample_skip >= DRONE_AI_SAMPLE_INTERVAL)
+    {
+        s_drone_ai_sample_skip = 0;
+        ai_due = true;
+    }
+    if (capture_active || !app_camera_apriltag_gate_open())
     {
         s_vision_sample_skip = 0;
     }
@@ -644,11 +747,18 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
         vision_due = true;
     }
     bool capture_due = app_ai_capture_should_capture_frame();
-    if (vision_due || capture_due)
+    if (ai_due || vision_due || capture_due)
     {
         if (app_camera_msync_m2c(camera_buf, camera_buf_len) == ESP_OK)
         {
             camera_synced_for_cpu = true;
+            if (ai_due)
+            {
+                (void)app_drone_ai_submit_frame(camera_buf,
+                    camera_buf_hes,
+                    camera_buf_ves,
+                    camera_buf_len);
+            }
             if (vision_due)
             {
                 (void)app_vision_submit_frame(camera_buf,
@@ -682,19 +792,42 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
 #if SOC_PPA_SUPPORTED
     if (s_ppa_srm_handle)
     {
+        esp_err_t ppa_ret;
         ppa_srm_rotation_angle_t rotation = app_camera_ppa_rotation();
         app_camera_calc_preview_fit(camera_buf_hes, camera_buf_ves, &out_w, &out_h);
-        if (app_image_process_scale_crop(camera_buf,
+        ppa_ret = app_image_process_scale_crop(camera_buf,
             camera_buf_hes,
             camera_buf_ves,
             out_buf,
             out_w,
             out_h,
             s_disp_buf_size,
-            rotation) != ESP_OK)
+            rotation);
+        if (ppa_ret != ESP_OK)
         {
-            app_camera_abandon_stage_buffer(stage_index);
-            return;
+            if (!s_ppa_error_logged)
+            {
+                s_ppa_error_logged = true;
+                ESP_LOGW(TAG,
+                    "PPA preview path failed once (%s), falling back to CPU scale",
+                    esp_err_to_name(ppa_ret));
+            }
+            if (!camera_synced_for_cpu && app_camera_msync_m2c(camera_buf, camera_buf_len) != ESP_OK)
+            {
+                app_camera_abandon_stage_buffer(stage_index);
+                return;
+            }
+            if (app_image_process_scale_cpu(camera_buf,
+                    camera_buf_hes,
+                    camera_buf_ves,
+                    out_buf,
+                    out_w,
+                    out_h) != ESP_OK)
+            {
+                app_camera_abandon_stage_buffer(stage_index);
+                return;
+            }
+            stage_written_by_cpu = true;
         }
     } else
 #endif
@@ -723,6 +856,27 @@ static esp_err_t app_camera_start_display_task(void)
         return ESP_OK;
     }
 
+#if defined(CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY) && CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY
+    BaseType_t ret = xTaskCreatePinnedToCoreWithCaps(app_camera_display_task,
+        "cam_display",
+        DISPLAY_TASK_STACK_SIZE,
+        NULL,
+        DISPLAY_TASK_PRIORITY,
+        &s_display_task_handle,
+        1,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (ret != pdPASS)
+    {
+        ESP_LOGW(TAG, "create display task with PSRAM stack failed, try internal stack");
+        ret = xTaskCreatePinnedToCore(app_camera_display_task,
+            "cam_display",
+            DISPLAY_TASK_STACK_SIZE,
+            NULL,
+            DISPLAY_TASK_PRIORITY,
+            &s_display_task_handle,
+            1);
+    }
+#else
     BaseType_t ret = xTaskCreatePinnedToCore(app_camera_display_task,
         "cam_display",
         DISPLAY_TASK_STACK_SIZE,
@@ -730,6 +884,7 @@ static esp_err_t app_camera_start_display_task(void)
         DISPLAY_TASK_PRIORITY,
         &s_display_task_handle,
         1);
+#endif
     return (ret == pdPASS) ? ESP_OK : ESP_FAIL;
 }
 
@@ -827,6 +982,7 @@ esp_err_t app_camera_preview_start(void)
         s_video_fd = -1;
         return ret;
     }
+    s_display_count = 0;
     ret = app_video_stream_task_start(s_video_fd, 0);
     if (ret != ESP_OK)
     {
@@ -839,4 +995,24 @@ esp_err_t app_camera_preview_start(void)
     s_preview_running = true;
     ESP_LOGI(TAG, "camera preview started");
     return ESP_OK;
+}
+
+bool app_camera_wait_first_frame(uint32_t timeout_ms)
+{
+    const uint32_t start_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+
+    while (s_display_count == 0U) {
+        if (!s_preview_running)
+        {
+            return false;
+        }
+        if (timeout_ms != UINT32_MAX &&
+            ((uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS) - start_ms) >= timeout_ms)
+        {
+            return false;
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+
+    return true;
 }

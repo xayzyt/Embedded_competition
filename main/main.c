@@ -1,4 +1,5 @@
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include "esp_err.h"
 #include "esp_log.h"
@@ -9,6 +10,7 @@
 #include "app_cloud.h"
 #include "app_ctrl.h"
 #include "app_dock_judge.h"
+#include "app_drone_ai.h"
 #include "app_task.h"
 #include "app_ui.h"
 #include "app_vision.h"
@@ -119,6 +121,8 @@ static void app_init_runtime_modules(const app_dock_judge_config_t *dock_cfg)
     ESP_ERROR_CHECK(app_dock_judge_init(dock_cfg));
     app_ui_set_loading_text("Loading task state");
     ESP_ERROR_CHECK(app_task_init(APP_TARGET_TAG_ID));
+    app_ui_set_loading_text("Loading drone AI");
+    ESP_ERROR_CHECK(app_drone_ai_init());
 
     app_ui_set_loading_text("Connecting cloud");
     cloud_ret = app_cloud_init();
@@ -140,13 +144,30 @@ static void app_init_runtime_modules(const app_dock_judge_config_t *dock_cfg)
 /* 启动摄像头预览和视觉流，成功后隐藏启动加载页。 */
 static void app_start_camera_pipeline(void)
 {
+    esp_err_t ai_ready_ret;
+
     /* 预览帧开始流动后，摄像头画布会替换启动加载层。 */
+    app_ui_set_loading_text("Loading drone AI model");
+    ai_ready_ret = app_drone_ai_wait_ready(8000);
+    if (ai_ready_ret != ESP_OK)
+    {
+        ESP_LOGW(TAG,
+                 "drone AI model not ready yet (%s), start preview first",
+                 esp_err_to_name(ai_ready_ret));
+        app_ui_set_capture_text("ai: load timeout");
+        app_ui_set_loading_text("Starting camera without AI");
+    }
     app_ui_set_loading_text("Starting camera");
     ESP_ERROR_CHECK(app_camera_init());
     app_ui_set_loading_text("Starting vision stream");
     ESP_ERROR_CHECK(app_vision_start());
     app_ui_set_loading_text("Opening preview");
     ESP_ERROR_CHECK(app_camera_preview_start());
+    app_ui_set_loading_text("Waiting camera frame");
+    if (!app_camera_wait_first_frame(1500))
+    {
+        ESP_LOGW(TAG, "first camera frame did not reach LVGL before loading timeout");
+    }
     app_ui_hide_loading();
 }
 
