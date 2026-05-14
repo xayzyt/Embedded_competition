@@ -19,6 +19,9 @@ bool app_ui_show_loading(const char *text);
 /* 更新启动加载层的状态文本。 */
 void app_ui_set_loading_text(const char *text);
 
+/* 更新启动加载层进度条（0-100）。 */
+void app_ui_set_loading_progress(int32_t percent);
+
 /* 隐藏并删除启动加载层。 */
 void app_ui_hide_loading(void);
 

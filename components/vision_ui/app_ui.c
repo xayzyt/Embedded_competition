@@ -25,6 +25,9 @@
 #define BSP_CAMERA_ROTATION 0
 #endif
 
+LV_FONT_DECLARE(font_loading_cn)
+LV_FONT_DECLARE(font_title_en)
+
 /* -------------------------------------------------------------------------- */
 /* HUD 布局                                                                  */
 /* -------------------------------------------------------------------------- */
@@ -59,6 +62,7 @@ static lv_obj_t *s_mode_label = NULL;
 static lv_obj_t *s_capture = NULL;
 static lv_obj_t *s_loading_layer = NULL;
 static lv_obj_t *s_loading_detail = NULL;
+static lv_obj_t *s_loading_bar = NULL;
 static bool s_have_last_box = false;
 static int32_t s_last_box_x = 0;
 static int32_t s_last_box_y = 0;
@@ -198,7 +202,9 @@ static void app_ui_style_auth_label(lv_obj_t *obj)
 static void app_ui_style_loading_layer(lv_obj_t *obj)
 {
     lv_obj_set_size(obj, BSP_LCD_H_RES, BSP_LCD_V_RES);
-    lv_obj_set_style_bg_color(obj, lv_color_hex(0x071412), 0);
+    lv_obj_set_style_bg_color(obj, lv_color_hex(0x0A1A3E), 0);
+    lv_obj_set_style_bg_grad_color(obj, lv_color_hex(0x06B6D4), 0);
+    lv_obj_set_style_bg_grad_dir(obj, LV_GRAD_DIR_VER, 0);
     lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(obj, 0, 0);
     lv_obj_set_style_radius(obj, 0, 0);
@@ -209,16 +215,18 @@ static void app_ui_style_loading_layer(lv_obj_t *obj)
 /* 设置启动加载页标题样式。 */
 static void app_ui_style_loading_title(lv_obj_t *obj)
 {
-    lv_obj_set_style_text_color(obj, lv_color_hex(0xE9FFF8), 0);
+    lv_obj_set_style_text_color(obj, lv_color_hex(0xFFFFFF), 0);
     lv_obj_set_style_text_align(obj, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(obj, &font_title_en, 0);
 }
 
 /* 设置启动加载页详情文本样式。 */
 static void app_ui_style_loading_detail(lv_obj_t *obj)
 {
     lv_obj_set_width(obj, 420);
-    lv_obj_set_style_text_color(obj, lv_color_hex(0x8FC7B7), 0);
+    lv_obj_set_style_text_color(obj, lv_color_hex(0xFFFFFF), 0);
     lv_obj_set_style_text_align(obj, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(obj, &font_loading_cn, 0);
 }
 
 /* 在已持有 LVGL 锁时更新加载页详情文本。 */
@@ -779,23 +787,50 @@ bool app_ui_show_loading(const char *text)
         app_ui_style_loading_layer(s_loading_layer);
         lv_obj_align(s_loading_layer, LV_ALIGN_CENTER, 0, 0);
 
-        lv_obj_t *spinner = lv_spinner_create(s_loading_layer);
-        lv_obj_set_size(spinner, 72, 72);
-        lv_obj_set_style_arc_color(spinner, lv_color_hex(0x1F5B4D), 0);
-        lv_obj_set_style_arc_color(spinner, lv_color_hex(0x31E08A), LV_PART_INDICATOR);
-        lv_obj_set_style_arc_width(spinner, 6, 0);
-        lv_obj_set_style_arc_width(spinner, 6, LV_PART_INDICATOR);
-        lv_obj_align(spinner, LV_ALIGN_CENTER, 0, -72);
-
         lv_obj_t *title = lv_label_create(s_loading_layer);
         app_ui_style_loading_title(title);
         lv_label_set_text(title, "SkyAnchor");
-        lv_obj_align(title, LV_ALIGN_CENTER, 0, 8);
+        lv_obj_align(title, LV_ALIGN_CENTER, 0, -40);
 
         s_loading_detail = lv_label_create(s_loading_layer);
         app_ui_style_loading_detail(s_loading_detail);
-        lv_label_set_text(s_loading_detail, (text != NULL) ? text : "Booting");
-        lv_obj_align(s_loading_detail, LV_ALIGN_CENTER, 0, 46);
+        lv_label_set_text(s_loading_detail, (text != NULL) ? text : "正在启动");
+        lv_obj_align(s_loading_detail, LV_ALIGN_CENTER, 0, 10);
+
+        s_loading_bar = lv_bar_create(s_loading_layer);
+        lv_obj_set_size(s_loading_bar, 280, 6);
+        lv_obj_set_style_bg_color(s_loading_bar, lv_color_hex(0x1A3A5C), 0);
+        lv_obj_set_style_bg_opa(s_loading_bar, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(s_loading_bar, 3, 0);
+        lv_obj_set_style_bg_color(s_loading_bar, lv_color_hex(0x06FAEF), LV_PART_INDICATOR);
+        lv_obj_set_style_bg_opa(s_loading_bar, LV_OPA_COVER, LV_PART_INDICATOR);
+        lv_obj_set_style_radius(s_loading_bar, 3, LV_PART_INDICATOR);
+        lv_bar_set_range(s_loading_bar, 0, 100);
+        lv_bar_set_value(s_loading_bar, 0, LV_ANIM_OFF);
+        lv_obj_align(s_loading_bar, LV_ALIGN_CENTER, 0, 46);
+
+        lv_obj_t *contest = lv_label_create(s_loading_layer);
+        lv_obj_set_style_text_color(contest, lv_color_hex(0x88CCDD), 0);
+        lv_obj_set_style_text_align(contest, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_font(contest, &font_loading_cn, 0);
+        lv_label_set_text(contest, "第九届（2026）全国大学生嵌入式芯片与系统设计竞赛");
+        lv_obj_align(contest, LV_ALIGN_BOTTOM_MID, 0, -36);
+
+        lv_obj_t *sep = lv_obj_create(s_loading_layer);
+        lv_obj_set_size(sep, 200, 1);
+        lv_obj_set_style_bg_color(sep, lv_color_hex(0x88CCDD), 0);
+        lv_obj_set_style_bg_opa(sep, LV_OPA_40, 0);
+        lv_obj_set_style_border_width(sep, 0, 0);
+        lv_obj_set_style_radius(sep, 0, 0);
+        lv_obj_set_style_pad_all(sep, 0, 0);
+        lv_obj_align(sep, LV_ALIGN_BOTTOM_MID, 0, -28);
+
+        lv_obj_t *team = lv_label_create(s_loading_layer);
+        lv_obj_set_style_text_color(team, lv_color_hex(0x88CCDD), 0);
+        lv_obj_set_style_text_align(team, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_font(team, &font_loading_cn, 0);
+        lv_label_set_text(team, "地线引力队");
+        lv_obj_align(team, LV_ALIGN_BOTTOM_MID, 0, -8);
     }
     else
     {
@@ -827,6 +862,23 @@ void app_ui_set_loading_text(const char *text)
     bsp_display_unlock();
 }
 
+/* 加锁更新启动加载层进度条。 */
+void app_ui_set_loading_progress(int32_t percent)
+{
+    if (s_loading_bar == NULL)
+    {
+        return;
+    }
+
+    if (!bsp_display_lock(UI_LOCK_BOOT_MS))
+    {
+        return;
+    }
+    lv_bar_set_value(s_loading_bar, percent, LV_ANIM_ON);
+    lv_refr_now(NULL);
+    bsp_display_unlock();
+}
+
 /* 加锁删除启动加载层并恢复 HUD 显示。 */
 void app_ui_hide_loading(void)
 {
@@ -842,6 +894,7 @@ void app_ui_hide_loading(void)
     lv_obj_delete(s_loading_layer);
     s_loading_layer = NULL;
     s_loading_detail = NULL;
+    s_loading_bar = NULL;
     lv_refr_now(NULL);
     bsp_display_unlock();
 }
