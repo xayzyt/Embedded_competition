@@ -1,6 +1,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "esp_err.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
@@ -210,6 +212,82 @@ static void app_show_ready_status(const app_dock_judge_config_t *dock_cfg)
     app_ui_set_vision_text(vision_text);
 }
 
+/* -------------------------------------------------------------------------- */
+/* 主界面状态刷新与任务事件回调                                                */
+/* -------------------------------------------------------------------------- */
+
+static bool s_camera_started = false;
+
+static void app_camera_start_task(void *arg)
+{
+    (void)arg;
+    app_start_camera_pipeline();
+    app_ui_set_status("task: active");
+    vTaskDelete(NULL);
+}
+
+static void app_start_camera_if_needed(void)
+{
+    if (s_camera_started)
+    {
+        return;
+    }
+    s_camera_started = true;
+    xTaskCreate(app_camera_start_task, "cam_start", 4096, NULL, 5, NULL);
+}
+
+static void app_on_task_event(app_task_event_t event,
+                              const app_task_snapshot_t *snap,
+                              void *user_ctx)
+{
+    (void)user_ctx;
+    if (event != APP_TASK_EVENT_STATE_CHANGED || snap == NULL)
+    {
+        return;
+    }
+
+    switch (snap->state) {
+    case APP_TASK_STATE_WAIT_APPROACH:
+        app_camera_resume();
+        app_ui_hide_main_screen();
+        app_start_camera_if_needed();
+        break;
+    case APP_TASK_STATE_COMPLETED:
+        app_camera_pause();
+        app_ui_show_main_screen();
+        app_ui_main_screen_show_pickup(true);
+        break;
+    case APP_TASK_STATE_FAULT:
+    case APP_TASK_STATE_CANCELLED:
+        app_camera_pause();
+        app_ui_show_main_screen();
+        app_ui_main_screen_show_pickup(false);
+        break;
+    default:
+        break;
+    }
+}
+
+static void app_pickup_cb(void)
+{
+    app_ch32_link_send_cmd_and_wait_ack('D', 2000);
+    app_ui_main_screen_show_pickup(false);
+    app_ui_main_screen_set_task_text("等待任务");
+}
+
+static void app_main_screen_status_task(void *arg)
+{
+    (void)arg;
+    for (;;)
+    {
+        bool wifi = app_cloud_is_wifi_connected();
+        bool mqtt = app_cloud_is_mqtt_connected();
+        bool ch32 = app_ch32_link_is_ready();
+        app_ui_main_screen_update_status(wifi, mqtt, ch32);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
 /* ESP-IDF 应用入口，按依赖顺序拉起整套接驳系统。 */
 void app_main(void)
 {
@@ -224,8 +302,13 @@ void app_main(void)
 
     app_log_dock_config(&dock_cfg);
     app_init_runtime_modules(&dock_cfg);
-    app_start_camera_pipeline();
-    app_show_ready_status(&dock_cfg);
 
-    ESP_LOGI(TAG, "system ready");
+    app_ui_set_pickup_callback(app_pickup_cb);
+    app_ui_show_main_screen();
+    app_ui_hide_loading();
+    app_task_register_event_callback(app_on_task_event, NULL);
+
+    xTaskCreate(app_main_screen_status_task, "main_status", 2048, NULL, 3, NULL);
+
+    ESP_LOGI(TAG, "system ready - main screen displayed");
 }

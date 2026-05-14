@@ -63,6 +63,13 @@ static lv_obj_t *s_capture = NULL;
 static lv_obj_t *s_loading_layer = NULL;
 static lv_obj_t *s_loading_detail = NULL;
 static lv_obj_t *s_loading_bar = NULL;
+static lv_obj_t *s_main_layer = NULL;
+static lv_obj_t *s_main_wifi_ind = NULL;
+static lv_obj_t *s_main_mqtt_ind = NULL;
+static lv_obj_t *s_main_ch32_ind = NULL;
+static lv_obj_t *s_main_task_label = NULL;
+static lv_obj_t *s_main_pickup_btn = NULL;
+static app_ui_pickup_cb_t s_pickup_cb = NULL;
 static bool s_have_last_box = false;
 static int32_t s_last_box_x = 0;
 static int32_t s_last_box_y = 0;
@@ -787,6 +794,14 @@ bool app_ui_show_loading(const char *text)
         app_ui_style_loading_layer(s_loading_layer);
         lv_obj_align(s_loading_layer, LV_ALIGN_CENTER, 0, 0);
 
+        lv_obj_t *project_name = lv_label_create(s_loading_layer);
+        lv_obj_set_style_text_color(project_name, lv_color_hex(0xFFFFFF), 0);
+        lv_obj_set_style_text_font(project_name, &font_loading_cn, 0);
+        lv_obj_set_style_text_align(project_name, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_opa(project_name, LV_OPA_70, 0);
+        lv_label_set_text(project_name, "基于ESP32-P4双芯协同的低空接驳微港与端侧鉴权闭环系统");
+        lv_obj_align(project_name, LV_ALIGN_TOP_MID, 0, 20);
+
         lv_obj_t *title = lv_label_create(s_loading_layer);
         app_ui_style_loading_title(title);
         lv_label_set_text(title, "SkyAnchor");
@@ -896,6 +911,241 @@ void app_ui_hide_loading(void)
     s_loading_detail = NULL;
     s_loading_bar = NULL;
     lv_refr_now(NULL);
+    bsp_display_unlock();
+}
+
+/* -------------------------------------------------------------------------- */
+/* 主界面（仪表盘）                                                           */
+/* -------------------------------------------------------------------------- */
+
+void app_ui_set_pickup_callback(app_ui_pickup_cb_t cb)
+{
+    s_pickup_cb = cb;
+}
+
+static void app_ui_pickup_event_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED)
+    {
+        return;
+    }
+    if (s_pickup_cb != NULL)
+    {
+        s_pickup_cb();
+    }
+}
+
+static lv_obj_t *app_ui_create_status_dot(lv_obj_t *parent, const char *label_text, int x_offset)
+{
+    lv_obj_t *lbl = lv_label_create(parent);
+    lv_obj_set_style_text_color(lbl, lv_color_hex(0x606266), 0);
+    lv_obj_set_style_text_font(lbl, &font_loading_cn, 0);
+    lv_label_set_text(lbl, label_text);
+    lv_obj_align(lbl, LV_ALIGN_TOP_RIGHT, x_offset, 15);
+
+    lv_obj_t *ind = lv_obj_create(parent);
+    lv_obj_set_size(ind, 10, 10);
+    lv_obj_set_style_radius(ind, 5, 0);
+    lv_obj_set_style_border_width(ind, 0, 0);
+    lv_obj_set_style_bg_color(ind, lv_color_hex(0xEF4444), 0);
+    lv_obj_set_style_bg_opa(ind, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_all(ind, 0, 0);
+    lv_obj_align_to(ind, lbl, LV_ALIGN_OUT_BOTTOM_MID, 0, 4);
+
+    return ind;
+}
+
+LV_IMAGE_DECLARE(logo);
+
+bool app_ui_show_main_screen(void)
+{
+    if (!bsp_display_lock(UI_LOCK_BOOT_MS))
+    {
+        return false;
+    }
+
+    lv_obj_t *scr = app_get_active_screen();
+
+    if (s_main_layer == NULL)
+    {
+        s_main_layer = lv_obj_create(scr);
+        lv_obj_set_size(s_main_layer, BSP_LCD_H_RES, BSP_LCD_V_RES);
+        lv_obj_set_style_bg_color(s_main_layer, lv_color_hex(0xF5F7FA), 0);
+        lv_obj_set_style_bg_opa(s_main_layer, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(s_main_layer, 0, 0);
+        lv_obj_set_style_radius(s_main_layer, 0, 0);
+        lv_obj_set_style_pad_all(s_main_layer, 0, 0);
+        lv_obj_clear_flag(s_main_layer, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_align(s_main_layer, LV_ALIGN_CENTER, 0, 0);
+
+        /* 顶栏分隔线 */
+        lv_obj_t *topbar_line = lv_obj_create(s_main_layer);
+        lv_obj_set_size(topbar_line, BSP_LCD_H_RES, 1);
+        lv_obj_set_style_bg_color(topbar_line, lv_color_hex(0xE4E7ED), 0);
+        lv_obj_set_style_bg_opa(topbar_line, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(topbar_line, 0, 0);
+        lv_obj_set_style_radius(topbar_line, 0, 0);
+        lv_obj_set_style_pad_all(topbar_line, 0, 0);
+        lv_obj_align(topbar_line, LV_ALIGN_TOP_LEFT, 0, 60);
+
+        /* Logo 左上角 */
+        lv_obj_t *img = lv_image_create(s_main_layer);
+        lv_image_set_src(img, &logo);
+        lv_image_set_scale(img, 200);
+        lv_obj_align(img, LV_ALIGN_TOP_LEFT, 10, 4);
+
+        /* 作品名称 顶栏 */
+        lv_obj_t *proj_name = lv_label_create(s_main_layer);
+        lv_obj_set_style_text_color(proj_name, lv_color_hex(0x303133), 0);
+        lv_obj_set_style_text_font(proj_name, &font_loading_cn, 0);
+        lv_label_set_text(proj_name, "基于ESP32-P4双芯协同的低空接驳微港与端侧鉴权闭环系统");
+        lv_obj_align(proj_name, LV_ALIGN_TOP_MID, 0, 20);
+
+        /* 状态指示器 右上角 */
+        s_main_ch32_ind = app_ui_create_status_dot(s_main_layer, "CH32", -16);
+        s_main_mqtt_ind = app_ui_create_status_dot(s_main_layer, "云端", -90);
+        s_main_wifi_ind = app_ui_create_status_dot(s_main_layer, "WiFi", -160);
+
+        /* 中间大标题 */
+        lv_obj_t *title = lv_label_create(s_main_layer);
+        lv_obj_set_style_text_color(title, lv_color_hex(0x1A1A2E), 0);
+        lv_obj_set_style_text_font(title, &font_title_en, 0);
+        lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_text(title, "SkyAnchor");
+        lv_obj_align(title, LV_ALIGN_CENTER, 0, -40);
+
+        /* 任务状态 */
+        s_main_task_label = lv_label_create(s_main_layer);
+        lv_obj_set_style_text_color(s_main_task_label, lv_color_hex(0x409EFF), 0);
+        lv_obj_set_style_text_font(s_main_task_label, &font_loading_cn, 0);
+        lv_obj_set_style_text_align(s_main_task_label, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_text(s_main_task_label, "等待任务");
+        lv_obj_align(s_main_task_label, LV_ALIGN_CENTER, 0, 40);
+
+        /* 取货按钮 */
+        s_main_pickup_btn = app_ui_button_create(s_main_layer);
+        lv_obj_set_size(s_main_pickup_btn, 160, 50);
+        lv_obj_set_style_bg_color(s_main_pickup_btn, lv_color_hex(0x10B981), 0);
+        lv_obj_set_style_bg_opa(s_main_pickup_btn, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(s_main_pickup_btn, 8, 0);
+        lv_obj_align(s_main_pickup_btn, LV_ALIGN_CENTER, 0, 110);
+        lv_obj_add_event_cb(s_main_pickup_btn, app_ui_pickup_event_cb, LV_EVENT_CLICKED, NULL);
+        lv_obj_add_flag(s_main_pickup_btn, LV_OBJ_FLAG_HIDDEN);
+
+        lv_obj_t *btn_label = lv_label_create(s_main_pickup_btn);
+        lv_obj_set_style_text_color(btn_label, lv_color_hex(0xFFFFFF), 0);
+        lv_obj_set_style_text_font(btn_label, &font_loading_cn, 0);
+        lv_label_set_text(btn_label, "取货");
+        lv_obj_center(btn_label);
+
+        /* 底部信息 */
+        lv_obj_t *team = lv_label_create(s_main_layer);
+        lv_obj_set_style_text_color(team, lv_color_hex(0x909399), 0);
+        lv_obj_set_style_text_font(team, &font_loading_cn, 0);
+        lv_obj_set_style_text_align(team, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_text(team, "地线引力队");
+        lv_obj_align(team, LV_ALIGN_BOTTOM_MID, 0, -30);
+
+        lv_obj_t *contest = lv_label_create(s_main_layer);
+        lv_obj_set_style_text_color(contest, lv_color_hex(0x909399), 0);
+        lv_obj_set_style_text_font(contest, &font_loading_cn, 0);
+        lv_obj_set_style_text_align(contest, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_text(contest, "第九届（2026）全国大学生嵌入式芯片与系统设计竞赛");
+        lv_obj_align(contest, LV_ALIGN_BOTTOM_MID, 0, -8);
+    }
+    else
+    {
+        lv_obj_clear_flag(s_main_layer, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    lv_obj_move_foreground(s_main_layer);
+    lv_refr_now(NULL);
+    bsp_display_unlock();
+    return true;
+}
+
+void app_ui_hide_main_screen(void)
+{
+    if (s_main_layer == NULL)
+    {
+        return;
+    }
+    if (!bsp_display_lock(UI_LOCK_BOOT_MS))
+    {
+        return;
+    }
+    lv_obj_add_flag(s_main_layer, LV_OBJ_FLAG_HIDDEN);
+    lv_refr_now(NULL);
+    bsp_display_unlock();
+}
+
+void app_ui_main_screen_show_pickup(bool show)
+{
+    if (s_main_pickup_btn == NULL)
+    {
+        return;
+    }
+    if (!bsp_display_lock(UI_LOCK_SHORT_MS))
+    {
+        return;
+    }
+    if (show)
+    {
+        lv_obj_clear_flag(s_main_pickup_btn, LV_OBJ_FLAG_HIDDEN);
+        if (s_main_task_label != NULL)
+        {
+            lv_label_set_text(s_main_task_label, "任务完成");
+        }
+    }
+    else
+    {
+        lv_obj_add_flag(s_main_pickup_btn, LV_OBJ_FLAG_HIDDEN);
+        if (s_main_task_label != NULL)
+        {
+            lv_label_set_text(s_main_task_label, "等待任务");
+        }
+    }
+    bsp_display_unlock();
+}
+
+void app_ui_main_screen_update_status(bool wifi_ok, bool mqtt_ok, bool ch32_ok)
+{
+    if (s_main_layer == NULL)
+    {
+        return;
+    }
+    if (!bsp_display_lock(UI_LOCK_SHORT_MS))
+    {
+        return;
+    }
+    lv_color_t green = lv_color_hex(0x67C23A);
+    lv_color_t red = lv_color_hex(0xEF4444);
+    if (s_main_wifi_ind != NULL)
+    {
+        lv_obj_set_style_bg_color(s_main_wifi_ind, wifi_ok ? green : red, 0);
+    }
+    if (s_main_mqtt_ind != NULL)
+    {
+        lv_obj_set_style_bg_color(s_main_mqtt_ind, mqtt_ok ? green : red, 0);
+    }
+    if (s_main_ch32_ind != NULL)
+    {
+        lv_obj_set_style_bg_color(s_main_ch32_ind, ch32_ok ? green : red, 0);
+    }
+    bsp_display_unlock();
+}
+
+void app_ui_main_screen_set_task_text(const char *text)
+{
+    if (s_main_task_label == NULL || text == NULL)
+    {
+        return;
+    }
+    if (!bsp_display_lock(UI_LOCK_SHORT_MS))
+    {
+        return;
+    }
+    lv_label_set_text(s_main_task_label, text);
     bsp_display_unlock();
 }
 

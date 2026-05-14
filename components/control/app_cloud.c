@@ -859,3 +859,17 @@ esp_err_t app_cloud_init(void)
     ESP_LOGI(TAG, "EMQX init done (official host Wi-Fi path via ESP32-C6)");
     return ESP_OK;
 }
+
+bool app_cloud_is_wifi_connected(void)
+{
+    if (!s_cloud.inited || s_cloud.event_group == NULL)
+    {
+        return false;
+    }
+    return (xEventGroupGetBits(s_cloud.event_group) & APP_CLOUD_WIFI_CONNECTED_BIT) != 0;
+}
+
+bool app_cloud_is_mqtt_connected(void)
+{
+    return s_cloud.inited && s_cloud.mqtt_connected;
+}

@@ -419,7 +419,6 @@ static uint8_t run_delivery_flow(void)
     /* 正常检测到货物 → 收口 */
     if(close_to_safe_locked(1U) == 0U) return 0U;
 
-    InnerDoor_Open();
     send_stage(ESP32_COMM_STAGE_COMPLETE, ESP32_COMM_ERR_NONE);
     return 1U;
 }
@@ -495,6 +494,12 @@ static void handle_proto_command(const ESP32_Comm_Packet_t *pkt)
             s_locked = 0U;
             s_action_rsp_valid = 0U;
             send_stage(ESP32_COMM_STAGE_READY, ESP32_COMM_ERR_NONE);
+            break;
+
+        case ESP32_COMM_PROTO_CMD_OPEN_INNER_DOOR:
+            ESP32_Comm_SendProtoAck(pkt->proto_cmd, pkt->proto_seq);
+            InnerDoor_Open();
+            send_stage(s_current_stage, ESP32_COMM_ERR_NONE);
             break;
 
         default:

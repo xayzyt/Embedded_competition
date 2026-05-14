@@ -67,6 +67,7 @@ static const char *TAG = "app_camera";
 
 static bool s_camera_inited = false;
 static bool s_preview_running = false;
+static bool s_camera_paused = false;
 static int s_video_fd = -1;
 static lv_obj_t *s_camera_canvas = NULL;
 static size_t s_cache_line_size = 0;
@@ -840,6 +841,10 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
     {
         return;
     }
+    if (s_camera_paused)
+    {
+        return;
+    }
     s_frame_count++;
     if (s_frame_count == 1U)
     {
@@ -1173,4 +1178,14 @@ bool app_camera_wait_first_frame(uint32_t timeout_ms)
     }
 
     return true;
+}
+
+void app_camera_pause(void)
+{
+    s_camera_paused = true;
+}
+
+void app_camera_resume(void)
+{
+    s_camera_paused = false;
 }

@@ -47,3 +47,26 @@ void app_ui_update_control_state(const char *status,
                                  const char *dock_text,
                                  const app_vision_result_t *vision,
                                  const app_dock_judge_result_t *dock);
+
+/* -------------------------------------------------------------------------- */
+/* 主界面（仪表盘）                                                           */
+/* -------------------------------------------------------------------------- */
+
+/* 创建并显示主屏幕。 */
+bool app_ui_show_main_screen(void);
+
+/* 隐藏主屏幕（切换到摄像头 HUD）。 */
+void app_ui_hide_main_screen(void);
+
+/* 在主屏幕上显示或隐藏"取货"按钮。 */
+void app_ui_main_screen_show_pickup(bool show);
+
+/* 更新主屏幕状态指示器。 */
+void app_ui_main_screen_update_status(bool wifi_ok, bool mqtt_ok, bool ch32_ok);
+
+/* 设置主屏幕任务状态文本。 */
+void app_ui_main_screen_set_task_text(const char *text);
+
+/* 注册"取货"按钮回调（由 main 设置，避免 UI 层依赖 control）。 */
+typedef void (*app_ui_pickup_cb_t)(void);
+void app_ui_set_pickup_callback(app_ui_pickup_cb_t cb);

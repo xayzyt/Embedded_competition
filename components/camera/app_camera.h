@@ -22,6 +22,12 @@ esp_err_t app_camera_preview_start(void);
 /* Wait until the first preview frame is actually bound to the LVGL canvas. */
 bool app_camera_wait_first_frame(uint32_t timeout_ms);
 
+/* 暂停帧处理（不关闭硬件，但停止 CPU 消耗）。 */
+void app_camera_pause(void);
+
+/* 恢复帧处理。 */
+void app_camera_resume(void);
+
 #ifdef __cplusplus
 }
 #endif

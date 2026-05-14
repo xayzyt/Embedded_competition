@@ -5,7 +5,7 @@
 		},
 		{
 			"name": "control_motor",
-			"path": "C:\\beifen\\ESP32_P4_EV\\Embedded_competition\\Embedded_competition_CH32"
+			"path": "C:\\beifen\\ESP32_P4_EV\\Embedded_competition\\CH32"
 		}
 	],
 	"settings": {

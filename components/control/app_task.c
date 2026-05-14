@@ -42,8 +42,11 @@ typedef struct {
 } app_task_runtime_t;
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 static app_task_runtime_t s_rt = {0};
-static app_task_event_cb_t s_event_cb = NULL;
-static void *s_event_user_ctx = NULL;
+#define APP_TASK_MAX_EVENT_CBS 4
+static struct {
+    app_task_event_cb_t cb;
+    void *user_ctx;
+} s_event_cbs[APP_TASK_MAX_EVENT_CBS] = {0};
 
 /* -------------------------------------------------------------------------- */
 /* 状态辅助函数                                                               */
@@ -86,19 +89,18 @@ static void app_task_copy_snapshot_locked(app_task_snapshot_t *out)
 /* 向已注册回调广播一次任务事件和当前快照。 */
 static void app_task_emit_event(app_task_event_t event)
 {
-    app_task_event_cb_t cb = NULL;
-    void *user_ctx = NULL;
     app_task_snapshot_t snap = {0};
 
     taskENTER_CRITICAL(&s_mux);
-    cb = s_event_cb;
-    user_ctx = s_event_user_ctx;
     app_task_copy_snapshot_locked(&snap);
     taskEXIT_CRITICAL(&s_mux);
 
-    if (cb != NULL)
+    for (int i = 0; i < APP_TASK_MAX_EVENT_CBS; i++)
     {
-        cb(event, &snap, user_ctx);
+        if (s_event_cbs[i].cb != NULL)
+        {
+            s_event_cbs[i].cb(event, &snap, s_event_cbs[i].user_ctx);
+        }
     }
 }
 
@@ -149,13 +151,19 @@ static uint16_t app_task_load_target_id(uint16_t default_target_id)
 /* 注册任务状态变化回调，通常由云端模块用于发布状态。 */
 esp_err_t app_task_register_event_callback(app_task_event_cb_t cb, void *user_ctx)
 {
-
     taskENTER_CRITICAL(&s_mux);
-    s_event_cb = cb;
-    s_event_user_ctx = user_ctx;
-
+    for (int i = 0; i < APP_TASK_MAX_EVENT_CBS; i++)
+    {
+        if (s_event_cbs[i].cb == NULL)
+        {
+            s_event_cbs[i].cb = cb;
+            s_event_cbs[i].user_ctx = user_ctx;
+            taskEXIT_CRITICAL(&s_mux);
+            return ESP_OK;
+        }
+    }
     taskEXIT_CRITICAL(&s_mux);
-    return ESP_OK;
+    return ESP_ERR_NO_MEM;
 }
 /* 初始化任务模块，恢复目标 ID 并进入 CONFIGURED 状态。 */
 esp_err_t app_task_init(uint16_t default_target_id)

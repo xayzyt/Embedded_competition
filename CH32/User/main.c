@@ -13,7 +13,6 @@ int main(void)
 
     while(1)
     {
-        
         CH32_App_RunOnce();
     }
 }
