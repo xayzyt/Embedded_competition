@@ -233,7 +233,14 @@ static void app_start_camera_if_needed(void)
         return;
     }
     s_camera_started = true;
-    xTaskCreate(app_camera_start_task, "cam_start", 4096, NULL, 5, NULL);
+    BaseType_t ok = xTaskCreate(app_camera_start_task, "cam_start", 4096, NULL, 5, NULL);
+    if (ok != pdPASS)
+    {
+        s_camera_started = false;
+        ESP_LOGE(TAG, "create camera start task failed");
+        app_ui_set_status("task: camera start failed");
+        app_ui_show_main_screen();
+    }
 }
 
 static void app_on_task_event(app_task_event_t event,
@@ -270,9 +277,17 @@ static void app_on_task_event(app_task_event_t event,
 
 static void app_pickup_cb(void)
 {
-    app_ch32_link_send_cmd_and_wait_ack('D', 2000);
+    esp_err_t ret = app_ch32_link_send_cmd_and_wait_ack('D', 2000);
+    if (ret != ESP_OK)
+    {
+        ESP_LOGW(TAG, "open inner door failed: %s", esp_err_to_name(ret));
+        app_ui_main_screen_show_pickup(true);
+        app_ui_main_screen_set_task_text("pickup failed / retry");
+        return;
+    }
+
     app_ui_main_screen_show_pickup(false);
-    app_ui_main_screen_set_task_text("等待任务");
+    app_ui_main_screen_set_task_text("waiting task");
 }
 
 static void app_main_screen_status_task(void *arg)
@@ -306,9 +321,25 @@ void app_main(void)
     app_ui_set_pickup_callback(app_pickup_cb);
     app_ui_show_main_screen();
     app_ui_hide_loading();
-    app_task_register_event_callback(app_on_task_event, NULL);
+    app_show_ready_status(&dock_cfg);
 
-    xTaskCreate(app_main_screen_status_task, "main_status", 2048, NULL, 3, NULL);
+    esp_err_t cb_ret = app_task_register_event_callback(app_on_task_event, NULL);
+    if (cb_ret != ESP_OK)
+    {
+        ESP_LOGE(TAG, "register task event callback failed: %s", esp_err_to_name(cb_ret));
+        app_ui_set_status("task: event callback failed");
+    }
+
+    BaseType_t status_task_ok = xTaskCreate(app_main_screen_status_task,
+        "main_status",
+        2048,
+        NULL,
+        3,
+        NULL);
+    if (status_task_ok != pdPASS)
+    {
+        ESP_LOGE(TAG, "create main status task failed");
+    }
 
     ESP_LOGI(TAG, "system ready - main screen displayed");
 }

@@ -14,12 +14,12 @@
  */
 
 #include "app_cloud.h"
-#include <ctype.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include "cJSON.h"
 #include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
@@ -49,6 +49,10 @@ static const char *TAG = "app_cloud";
 #define APP_CLOUD_TOPIC_BUF_LEN        192
 #define APP_CLOUD_JSON_BUF_LEN         512
 #define APP_CLOUD_CMD_PAYLOAD_LEN      256
+#define APP_CLOUD_FALLBACK_DNS_A       223
+#define APP_CLOUD_FALLBACK_DNS_B       5
+#define APP_CLOUD_FALLBACK_DNS_C       5
+#define APP_CLOUD_FALLBACK_DNS_D       5
 
 /* -------------------------------------------------------------------------- */
 /* 运行状态                                                               */
@@ -82,6 +86,10 @@ static void app_cloud_mqtt_event_handler(void *handler_args,
     esp_event_base_t base,
     int32_t event_id,
     void *event_data);
+static esp_err_t app_cloud_publish_raw(const char *topic,
+    const char *payload,
+    int qos,
+    int retain);
 
 static void app_cloud_log_heap(const char *stage)
 {
@@ -108,44 +116,19 @@ static bool app_cloud_json_get_string(const char *json,
     {
         return false;
     }
-    char pattern[48];
-    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
-    const char *p = strstr(json, pattern);
-    if (p == NULL)
+    cJSON *root = cJSON_Parse(json);
+    if (root == NULL)
     {
         return false;
     }
-    p += strlen(pattern);
-    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') {
-        p++;
-    }
-    if (*p != ':')
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(root, key);
+    const bool ok = cJSON_IsString(item) && item->valuestring != NULL;
+    if (ok)
     {
-        return false;
+        strlcpy(out, item->valuestring, out_size);
     }
-    p++;
-    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') {
-        p++;
-    }
-    if (*p != '"')
-    {
-        return false;
-    }
-    p++;
-    size_t i = 0;
-    while (*p != '\0' && *p != '"' && i + 1U < out_size) {
-        if (*p == '\\' && p[1] != '\0')
-        {
-            p++;
-        }
-        out[i++] = *p++;
-    }
-    if (*p != '"')
-    {
-        return false;
-    }
-    out[i] = '\0';
-    return true;
+    cJSON_Delete(root);
+    return ok;
 }
 /* 从简单 JSON 文本中提取 uint16 数字字段。 */
 static bool app_cloud_json_get_u16(const char *json,
@@ -156,42 +139,51 @@ static bool app_cloud_json_get_u16(const char *json,
     {
         return false;
     }
-    char pattern[48];
-    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
-    const char *p = strstr(json, pattern);
-    if (p == NULL)
+    cJSON *root = cJSON_Parse(json);
+    if (root == NULL)
     {
         return false;
     }
-    p += strlen(pattern);
-    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') {
-        p++;
-    }
-    if (*p != ':')
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(root, key);
+    const bool ok = cJSON_IsNumber(item) &&
+        item->valuedouble >= 0 &&
+        item->valuedouble <= UINT16_MAX;
+    if (ok)
     {
-        return false;
+        *out = (uint16_t)item->valuedouble;
     }
-    p++;
-    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') {
-        p++;
-    }
-    if (!isdigit((unsigned char)*p))
-    {
-        return false;
-    }
-    unsigned value = 0U;
-    while (isdigit((unsigned char)*p)) {
-        value = value * 10U + (unsigned)(*p - '0');
-        if (value > UINT16_MAX)
-        {
-            return false;
-        }
-        p++;
-    }
-    *out = (uint16_t)value;
-    return true;
+    cJSON_Delete(root);
+    return ok;
 }
 /* 解析云端命令 payload，得到命令名、目标 ID 和 request_id。 */
+static bool app_cloud_json_add_string(cJSON *root, const char *key, const char *value)
+{
+    return cJSON_AddStringToObject(root, key, (value != NULL) ? value : "") != NULL;
+}
+
+static bool app_cloud_json_add_number(cJSON *root, const char *key, double value)
+{
+    return cJSON_AddNumberToObject(root, key, value) != NULL;
+}
+
+static esp_err_t app_cloud_publish_json(const char *topic, cJSON *root, int retain)
+{
+    if (topic == NULL || root == NULL)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    char *json = cJSON_PrintUnformatted(root);
+    if (json == NULL)
+    {
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_err_t ret = app_cloud_publish_raw(topic, json, CONFIG_SKY_MQTT_QOS, retain);
+    cJSON_free(json);
+    return ret;
+}
+
 static esp_err_t app_cloud_parse_command_json(const char *payload, app_cloud_cmd_t *out)
 {
     if (payload == NULL || out == NULL)
@@ -200,7 +192,8 @@ static esp_err_t app_cloud_parse_command_json(const char *payload, app_cloud_cmd
         return ESP_ERR_INVALID_ARG;
     }
     memset(out, 0, sizeof(*out));
-    if (!app_cloud_json_get_string(payload, "cmd", out->cmd, sizeof(out->cmd)))
+    if (!app_cloud_json_get_string(payload, "cmd", out->cmd, sizeof(out->cmd)) ||
+        out->cmd[0] == '\0')
     {
 
         return ESP_ERR_INVALID_ARG;
@@ -263,6 +256,72 @@ static void app_cloud_log_topics_once(void)
         s_cloud.topic_state);
 }
 /* 检查 Wi-Fi 和 MQTT menuconfig 配置是否完整有效。 */
+static void app_cloud_request_wifi_connect(const char *reason)
+{
+    esp_err_t ret = esp_wifi_connect();
+    if (ret != ESP_OK)
+    {
+        ESP_LOGW(TAG,
+            "wifi connect request failed (%s): %s",
+            (reason != NULL) ? reason : "-",
+            esp_err_to_name(ret));
+    }
+}
+
+static void app_cloud_log_dns_info(const char *label, const esp_netif_dns_info_t *dns)
+{
+    if (dns == NULL || dns->ip.u_addr.ip4.addr == 0)
+    {
+        ESP_LOGW(TAG, "%s dns: not configured", label);
+        return;
+    }
+
+    char ip[16] = {0};
+    ESP_LOGI(TAG,
+        "%s dns: %s",
+        label,
+        esp_ip4addr_ntoa(&dns->ip.u_addr.ip4, ip, sizeof(ip)));
+}
+
+static void app_cloud_ensure_dns_after_ip(void)
+{
+    if (s_cloud.sta_netif == NULL)
+    {
+        return;
+    }
+
+    esp_netif_dns_info_t dns = {0};
+    esp_err_t ret = esp_netif_get_dns_info(s_cloud.sta_netif, ESP_NETIF_DNS_MAIN, &dns);
+    if (ret == ESP_OK && dns.ip.u_addr.ip4.addr != 0)
+    {
+        app_cloud_log_dns_info("main", &dns);
+        return;
+    }
+
+    ESP_LOGW(TAG,
+        "main dns missing (%s), setting fallback %u.%u.%u.%u",
+        esp_err_to_name(ret),
+        APP_CLOUD_FALLBACK_DNS_A,
+        APP_CLOUD_FALLBACK_DNS_B,
+        APP_CLOUD_FALLBACK_DNS_C,
+        APP_CLOUD_FALLBACK_DNS_D);
+
+    esp_netif_dns_info_t fallback = {0};
+    fallback.ip.type = ESP_IPADDR_TYPE_V4;
+    esp_netif_set_ip4_addr(&fallback.ip.u_addr.ip4,
+        APP_CLOUD_FALLBACK_DNS_A,
+        APP_CLOUD_FALLBACK_DNS_B,
+        APP_CLOUD_FALLBACK_DNS_C,
+        APP_CLOUD_FALLBACK_DNS_D);
+    ret = esp_netif_set_dns_info(s_cloud.sta_netif, ESP_NETIF_DNS_MAIN, &fallback);
+    if (ret != ESP_OK)
+    {
+        ESP_LOGW(TAG, "set fallback dns failed: %s", esp_err_to_name(ret));
+        return;
+    }
+    app_cloud_log_dns_info("fallback", &fallback);
+}
+
 static esp_err_t app_cloud_validate_config(void)
 {
     if (CONFIG_SKY_WIFI_SSID[0] == '\0')
@@ -343,22 +402,20 @@ static esp_err_t app_cloud_publish_ack(const app_cloud_cmd_t *cmd,
 
         return ESP_ERR_INVALID_ARG;
     }
-    char json[APP_CLOUD_JSON_BUF_LEN];
-    snprintf(json,
-        sizeof(json),
-        "{"
-        "\"request_id\":\"%s\","
-        "\"cmd\":\"%s\","
-        "\"code\":%d,"
-        "\"msg\":\"%s\","
-        "\"target_id\":%u"
-        "}",
-        cmd->request_id,
-        cmd->cmd,
-        code,
-        (msg != NULL) ? msg : "-",
-        (unsigned)target_id);
-    return app_cloud_publish_raw(s_cloud.topic_ack, json, CONFIG_SKY_MQTT_QOS, 0);
+    cJSON *root = cJSON_CreateObject();
+    if (root == NULL)
+    {
+        return ESP_ERR_NO_MEM;
+    }
+
+    bool ok = app_cloud_json_add_string(root, "request_id", cmd->request_id) &&
+        app_cloud_json_add_string(root, "cmd", cmd->cmd) &&
+        app_cloud_json_add_number(root, "code", code) &&
+        app_cloud_json_add_string(root, "msg", (msg != NULL) ? msg : "-") &&
+        app_cloud_json_add_number(root, "target_id", target_id);
+    esp_err_t ret = ok ? app_cloud_publish_json(s_cloud.topic_ack, root, 0) : ESP_ERR_NO_MEM;
+    cJSON_Delete(root);
+    return ret;
 }
 /* 将任务快照组装成 JSON 并发布到状态 topic。 */
 static void app_cloud_publish_task_snapshot_internal(const app_task_snapshot_t *snap)
@@ -372,37 +429,28 @@ static void app_cloud_publish_task_snapshot_internal(const app_task_snapshot_t *
     time(&now);
     int cargo_received = (snap->state == APP_TASK_STATE_COMPLETED) ? 1 : 0;
     int fault = (snap->state == APP_TASK_STATE_FAULT) ? 1 : 0;
-    char json[APP_CLOUD_JSON_BUF_LEN];
-    snprintf(json,
-        sizeof(json),
-        "{"
-        "\"msg_id\":%u,"
-        "\"ts\":%lld,"
-        "\"request_id\":\"%s\","
-        "\"device\":\"%s\","
-        "\"state\":\"%s\","
-        "\"active\":%u,"
-        "\"target_id\":%u,"
-        "\"matched_tag_id\":%u,"
-        "\"cargo_received\":%d,"
-        "\"fault\":%d,"
-        "\"source\":\"%s\","
-        "\"note\":\"%s\""
-        "}",
-        (unsigned)seq,
-        (long long)now,
-        s_cloud.current_request_id,
-        CONFIG_SKY_MQTT_DEVICE_NAME,
-        app_task_state_to_text(snap->state),
-        snap->active ? 1U : 0U,
-        (unsigned)snap->target_id,
-        (unsigned)snap->matched_tag_id,
-        cargo_received,
-        fault,
-        snap->source,
-        snap->note);
+    cJSON *root = cJSON_CreateObject();
+    if (root == NULL)
+    {
+        ESP_LOGW(TAG, "task snapshot not sent yet: no memory");
+        return;
+    }
 
-    esp_err_t ret = app_cloud_publish_raw(s_cloud.topic_state, json, CONFIG_SKY_MQTT_QOS, 1);
+    bool ok = app_cloud_json_add_number(root, "msg_id", seq) &&
+        app_cloud_json_add_number(root, "ts", (double)now) &&
+        app_cloud_json_add_string(root, "request_id", s_cloud.current_request_id) &&
+        app_cloud_json_add_string(root, "device", CONFIG_SKY_MQTT_DEVICE_NAME) &&
+        app_cloud_json_add_string(root, "state", app_task_state_to_text(snap->state)) &&
+        app_cloud_json_add_number(root, "active", snap->active ? 1U : 0U) &&
+        app_cloud_json_add_number(root, "target_id", snap->target_id) &&
+        app_cloud_json_add_number(root, "matched_tag_id", snap->matched_tag_id) &&
+        app_cloud_json_add_number(root, "cargo_received", cargo_received) &&
+        app_cloud_json_add_number(root, "fault", fault) &&
+        app_cloud_json_add_string(root, "source", snap->source) &&
+        app_cloud_json_add_string(root, "note", snap->note);
+
+    esp_err_t ret = ok ? app_cloud_publish_json(s_cloud.topic_state, root, 1) : ESP_ERR_NO_MEM;
+    cJSON_Delete(root);
     if (ret != ESP_OK)
     {
         ESP_LOGW(TAG, "task snapshot not sent yet: %s", esp_err_to_name(ret));
@@ -690,7 +738,7 @@ static void app_cloud_wifi_event_handler(void *arg,
         case WIFI_EVENT_STA_START:
             ESP_LOGD(TAG, "wifi sta start -> connect");
 
-            ESP_ERROR_CHECK(esp_wifi_connect());
+            app_cloud_request_wifi_connect("sta_start");
             break;
         case WIFI_EVENT_STA_DISCONNECTED: {
 
@@ -706,7 +754,7 @@ static void app_cloud_wifi_event_handler(void *arg,
                 s_cloud.mqtt_connected = false;
                 app_cloud_destroy_mqtt_client();
 
-                ESP_ERROR_CHECK(esp_wifi_connect());
+                app_cloud_request_wifi_connect("sta_disconnected");
                 break;
             }
         default:
@@ -716,6 +764,7 @@ static void app_cloud_wifi_event_handler(void *arg,
     else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP)
     {
         ESP_LOGI(TAG, "wifi got ip");
+        app_cloud_ensure_dns_after_ip();
 
         xEventGroupSetBits(s_cloud.event_group,
             APP_CLOUD_WIFI_CONNECTED_BIT | APP_CLOUD_START_MQTT_BIT);
