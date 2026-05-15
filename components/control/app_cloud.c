@@ -33,6 +33,7 @@
 #include "esp_netif.h"
 #include "esp_wifi.h"
 #include "mqtt_client.h"
+#include "app_cloud_cmd.h"
 #include "app_task.h"
 
 static const char *TAG = "app_cloud";
@@ -58,11 +59,6 @@ static const char *TAG = "app_cloud";
 /* 运行状态                                                               */
 /* -------------------------------------------------------------------------- */
 
-typedef struct {
-    char cmd[24];           /* 云端下发的命令名称。 */
-    uint16_t target_id;     /* 命令携带的目标 tag ID。 */
-    char request_id[32];    /* 云端请求 ID，用于应答消息关联。 */
-} app_cloud_cmd_t;
 typedef struct {
     bool inited;                                      /* 云端模块是否完成初始化。 */
     bool mqtt_started;                                /* MQTT 客户端是否已经启动。 */
@@ -106,56 +102,6 @@ static void app_cloud_log_heap(const char *stage)
 /* JSON 小工具                                                          */
 /* -------------------------------------------------------------------------- */
 
-/* 从简单 JSON 文本中提取字符串字段。 */
-static bool app_cloud_json_get_string(const char *json,
-    const char *key,
-    char *out,
-    size_t out_size)
-{
-    if (json == NULL || key == NULL || out == NULL || out_size == 0U)
-    {
-        return false;
-    }
-    cJSON *root = cJSON_Parse(json);
-    if (root == NULL)
-    {
-        return false;
-    }
-    const cJSON *item = cJSON_GetObjectItemCaseSensitive(root, key);
-    const bool ok = cJSON_IsString(item) && item->valuestring != NULL;
-    if (ok)
-    {
-        strlcpy(out, item->valuestring, out_size);
-    }
-    cJSON_Delete(root);
-    return ok;
-}
-/* 从简单 JSON 文本中提取 uint16 数字字段。 */
-static bool app_cloud_json_get_u16(const char *json,
-    const char *key,
-    uint16_t *out)
-{
-    if (json == NULL || key == NULL || out == NULL)
-    {
-        return false;
-    }
-    cJSON *root = cJSON_Parse(json);
-    if (root == NULL)
-    {
-        return false;
-    }
-    const cJSON *item = cJSON_GetObjectItemCaseSensitive(root, key);
-    const bool ok = cJSON_IsNumber(item) &&
-        item->valuedouble >= 0 &&
-        item->valuedouble <= UINT16_MAX;
-    if (ok)
-    {
-        *out = (uint16_t)item->valuedouble;
-    }
-    cJSON_Delete(root);
-    return ok;
-}
-/* 解析云端命令 payload，得到命令名、目标 ID 和 request_id。 */
 static bool app_cloud_json_add_string(cJSON *root, const char *key, const char *value)
 {
     return cJSON_AddStringToObject(root, key, (value != NULL) ? value : "") != NULL;
@@ -182,25 +128,6 @@ static esp_err_t app_cloud_publish_json(const char *topic, cJSON *root, int reta
     esp_err_t ret = app_cloud_publish_raw(topic, json, CONFIG_SKY_MQTT_QOS, retain);
     cJSON_free(json);
     return ret;
-}
-
-static esp_err_t app_cloud_parse_command_json(const char *payload, app_cloud_cmd_t *out)
-{
-    if (payload == NULL || out == NULL)
-    {
-
-        return ESP_ERR_INVALID_ARG;
-    }
-    memset(out, 0, sizeof(*out));
-    if (!app_cloud_json_get_string(payload, "cmd", out->cmd, sizeof(out->cmd)) ||
-        out->cmd[0] == '\0')
-    {
-
-        return ESP_ERR_INVALID_ARG;
-    }
-    (void)app_cloud_json_get_u16(payload, "target_id", &out->target_id);
-    (void)app_cloud_json_get_string(payload, "request_id", out->request_id, sizeof(out->request_id));
-    return ESP_OK;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -603,7 +530,7 @@ static esp_err_t app_cloud_handle_command(const char *payload, size_t payload_le
     memcpy(json, payload, copy_len);
     json[copy_len] = '\0';
     app_cloud_cmd_t cmd = {0};
-    esp_err_t ret = app_cloud_parse_command_json(json, &cmd);
+    esp_err_t ret = app_cloud_cmd_parse_json(json, &cmd);
     if (ret != ESP_OK)
     {
         ESP_LOGW(TAG, "bad EMQX cmd payload, len=%u", (unsigned)copy_len);

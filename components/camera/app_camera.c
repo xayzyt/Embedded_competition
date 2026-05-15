@@ -775,6 +775,48 @@ static bool app_camera_ai_gate_active(void)
            !app_drone_ai_is_drone_confirmed();
 }
 
+typedef struct {
+    bool ai_due;
+    bool vision_due;
+    bool capture_due;
+} app_camera_frame_route_t;
+
+static app_camera_frame_route_t app_camera_select_frame_route(void)
+{
+    app_camera_frame_route_t route = {0};
+    const bool capture_active = app_ai_capture_is_active();
+    const bool ai_gate_active = app_camera_ai_gate_active();
+    const bool apriltag_gate_open = app_camera_apriltag_gate_open();
+
+    if (!ai_gate_active)
+    {
+        s_drone_ai_sample_skip = 0;
+    }
+    else if (++s_drone_ai_sample_skip >= DRONE_AI_SAMPLE_INTERVAL)
+    {
+        s_drone_ai_sample_skip = 0;
+        route.ai_due = true;
+    }
+    if (capture_active || !apriltag_gate_open)
+    {
+        s_vision_sample_skip = 0;
+        s_apriltag_gate_was_open = false;
+    }
+    else if (!s_apriltag_gate_was_open)
+    {
+        s_vision_sample_skip = 0;
+        s_apriltag_gate_was_open = true;
+        route.vision_due = true;
+    }
+    else if (++s_vision_sample_skip >= VISION_SAMPLE_INTERVAL)
+    {
+        s_vision_sample_skip = 0;
+        route.vision_due = true;
+    }
+    route.capture_due = app_ai_capture_should_capture_frame();
+    return route;
+}
+
 static void app_camera_maybe_log_diag(void)
 {
     const uint32_t now_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
@@ -857,43 +899,13 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
     app_camera_maybe_log_diag();
 
     bool camera_synced_for_cpu = false;
-    bool capture_active = app_ai_capture_is_active();
-    bool ai_gate_active = app_camera_ai_gate_active();
-    bool apriltag_gate_open = app_camera_apriltag_gate_open();
-    bool ai_due = false;
-    bool vision_due = false;
-    if (!ai_gate_active)
-    {
-        s_drone_ai_sample_skip = 0;
-    }
-    else if (++s_drone_ai_sample_skip >= DRONE_AI_SAMPLE_INTERVAL)
-    {
-        s_drone_ai_sample_skip = 0;
-        ai_due = true;
-    }
-    if (capture_active || !apriltag_gate_open)
-    {
-        s_vision_sample_skip = 0;
-        s_apriltag_gate_was_open = false;
-    }
-    else if (!s_apriltag_gate_was_open)
-    {
-        s_vision_sample_skip = 0;
-        s_apriltag_gate_was_open = true;
-        vision_due = true;
-    }
-    else if (++s_vision_sample_skip >= VISION_SAMPLE_INTERVAL)
-    {
-        s_vision_sample_skip = 0;
-        vision_due = true;
-    }
-    bool capture_due = app_ai_capture_should_capture_frame();
-    if (ai_due || vision_due || capture_due)
+    app_camera_frame_route_t route = app_camera_select_frame_route();
+    if (route.ai_due || route.vision_due || route.capture_due)
     {
         if (app_camera_msync_m2c(camera_buf, camera_buf_len) == ESP_OK)
         {
             camera_synced_for_cpu = true;
-            if (ai_due)
+            if (route.ai_due)
             {
                 (void)app_drone_ai_submit_frame(camera_buf,
                     camera_buf_hes,
@@ -901,7 +913,7 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
                     camera_buf_len);
                 s_ai_submit_count++;
             }
-            if (vision_due)
+            if (route.vision_due)
             {
                 (void)app_vision_submit_frame(camera_buf,
                     camera_buf_hes,
@@ -909,7 +921,7 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
                     camera_buf_len);
                 s_vision_submit_count++;
             }
-            if (capture_due)
+            if (route.capture_due)
             {
                 (void)app_ai_capture_submit_frame(camera_buf,
                     camera_buf_hes,
