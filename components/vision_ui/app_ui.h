@@ -67,6 +67,9 @@ void app_ui_main_screen_update_status(bool wifi_ok, bool mqtt_ok, bool ch32_ok);
 /* 设置主屏幕任务状态文本。 */
 void app_ui_main_screen_set_task_text(const char *text);
 
+/* 预留天气区域文本更新接口。 */
+void app_ui_main_screen_set_weather_text(const char *text);
+
 /* 注册"取货"按钮回调（由 main 设置，避免 UI 层依赖 control）。 */
 typedef void (*app_ui_pickup_cb_t)(void);
 void app_ui_set_pickup_callback(app_ui_pickup_cb_t cb);
