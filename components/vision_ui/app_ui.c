@@ -15,6 +15,7 @@
 #include "app_ui.h"
 #include <stdio.h>
 #include <inttypes.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include "lvgl.h"
@@ -27,8 +28,48 @@
 #endif
 
 LV_FONT_DECLARE(font_loading_cn)
+LV_FONT_DECLARE(font_main_title_cn)
 LV_FONT_DECLARE(font_title_en)
 LV_IMAGE_DECLARE(logo);
+LV_IMAGE_DECLARE(weather_0);
+LV_IMAGE_DECLARE(weather_1);
+LV_IMAGE_DECLARE(weather_2);
+LV_IMAGE_DECLARE(weather_3);
+LV_IMAGE_DECLARE(weather_4);
+LV_IMAGE_DECLARE(weather_5);
+LV_IMAGE_DECLARE(weather_6);
+LV_IMAGE_DECLARE(weather_7);
+LV_IMAGE_DECLARE(weather_8);
+LV_IMAGE_DECLARE(weather_9);
+LV_IMAGE_DECLARE(weather_10);
+LV_IMAGE_DECLARE(weather_11);
+LV_IMAGE_DECLARE(weather_12);
+LV_IMAGE_DECLARE(weather_13);
+LV_IMAGE_DECLARE(weather_14);
+LV_IMAGE_DECLARE(weather_15);
+LV_IMAGE_DECLARE(weather_16);
+LV_IMAGE_DECLARE(weather_17);
+LV_IMAGE_DECLARE(weather_18);
+LV_IMAGE_DECLARE(weather_19);
+LV_IMAGE_DECLARE(weather_20);
+LV_IMAGE_DECLARE(weather_21);
+LV_IMAGE_DECLARE(weather_22);
+LV_IMAGE_DECLARE(weather_23);
+LV_IMAGE_DECLARE(weather_24);
+LV_IMAGE_DECLARE(weather_26);
+LV_IMAGE_DECLARE(weather_27);
+LV_IMAGE_DECLARE(weather_28);
+LV_IMAGE_DECLARE(weather_29);
+LV_IMAGE_DECLARE(weather_30);
+LV_IMAGE_DECLARE(weather_31);
+LV_IMAGE_DECLARE(weather_32);
+LV_IMAGE_DECLARE(weather_33);
+LV_IMAGE_DECLARE(weather_34);
+LV_IMAGE_DECLARE(weather_35);
+LV_IMAGE_DECLARE(weather_36);
+LV_IMAGE_DECLARE(weather_37);
+LV_IMAGE_DECLARE(weather_38);
+LV_IMAGE_DECLARE(weather_99);
 
 /* -------------------------------------------------------------------------- */
 /* HUD 布局                                                                  */
@@ -44,6 +85,7 @@ LV_IMAGE_DECLARE(logo);
 #define UI_CONTEST_NAME         "第九届（2026）全国大学生嵌入式芯片与系统设计竞赛"
 #define UI_TEAM_NAME            "地线引力队"
 #define UI_CLOCK_VALID_EPOCH    1704067200LL
+#define UI_CLOCK_TIMEZONE       "CST-8"
 static const char *TAG = "app_ui";
 
 /* -------------------------------------------------------------------------- */
@@ -79,10 +121,18 @@ static lv_obj_t *s_main_conn_label = NULL;
 static lv_obj_t *s_main_dock_label = NULL;
 static lv_obj_t *s_main_clock_time = NULL;
 static lv_obj_t *s_main_clock_note = NULL;
+static lv_obj_t *s_main_weather_title = NULL;
+static lv_obj_t *s_main_weather_icon = NULL;
 static lv_obj_t *s_main_weather_label = NULL;
+static lv_obj_t *s_weather_sim_btn = NULL;
+static lv_obj_t *s_weather_sim_label = NULL;
 static lv_obj_t *s_main_pickup_btn = NULL;
 static lv_timer_t *s_main_clock_timer = NULL;
 static app_ui_pickup_cb_t s_pickup_cb = NULL;
+static app_ui_weather_sim_cb_t s_weather_sim_cb = NULL;
+static bool s_clock_tz_set = false;
+static char s_main_weather_text[96] = "同步中";
+static int s_main_weather_code = 99;
 static bool s_have_last_box = false;
 static int32_t s_last_box_x = 0;
 static int32_t s_last_box_y = 0;
@@ -249,10 +299,10 @@ static lv_obj_t *app_ui_create_soft_panel(lv_obj_t *parent,
 {
     lv_obj_t *panel = lv_obj_create(parent);
     lv_obj_set_size(panel, w, h);
-    lv_obj_set_style_bg_color(panel, lv_color_hex(0xF8FAFB), 0);
+    lv_obj_set_style_bg_color(panel, lv_color_hex(0xFFFFFF), 0);
     lv_obj_set_style_bg_opa(panel, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(panel, 1, 0);
-    lv_obj_set_style_border_color(panel, lv_color_hex(0xD7E2E8), 0);
+    lv_obj_set_style_border_color(panel, lv_color_hex(0xE2E8F0), 0);
     lv_obj_set_style_radius(panel, radius, 0);
     lv_obj_set_style_pad_all(panel, 0, 0);
     lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
@@ -263,7 +313,7 @@ static lv_obj_t *app_ui_create_soft_panel(lv_obj_t *parent,
 static lv_obj_t *app_ui_create_panel_title(lv_obj_t *parent, const char *text)
 {
     lv_obj_t *label = lv_label_create(parent);
-    lv_obj_set_style_text_color(label, lv_color_hex(0x60717D), 0);
+    lv_obj_set_style_text_color(label, lv_color_hex(0x64748B), 0);
     lv_obj_set_style_text_font(label, &font_loading_cn, 0);
     lv_label_set_text(label, text);
     lv_obj_align(label, LV_ALIGN_TOP_LEFT, 16, 12);
@@ -275,11 +325,11 @@ static lv_obj_t *app_ui_create_panel_value(lv_obj_t *parent, const char *text)
 {
     lv_obj_t *label = lv_label_create(parent);
     lv_obj_set_width(label, lv_obj_get_width(parent) - 32);
-    lv_obj_set_style_text_color(label, lv_color_hex(0x1F6F7A), 0);
-    lv_obj_set_style_text_font(label, &font_loading_cn, 0);
+    lv_obj_set_style_text_color(label, lv_color_hex(0x0F766E), 0);
+    lv_obj_set_style_text_font(label, &font_main_title_cn, 0);
     lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_LEFT, 0);
     lv_label_set_text(label, text);
-    lv_obj_align(label, LV_ALIGN_BOTTOM_LEFT, 16, -14);
+    lv_obj_align(label, LV_ALIGN_BOTTOM_LEFT, 16, -10);
     return label;
 }
 
@@ -965,6 +1015,11 @@ void app_ui_set_pickup_callback(app_ui_pickup_cb_t cb)
     s_pickup_cb = cb;
 }
 
+void app_ui_set_weather_sim_callback(app_ui_weather_sim_cb_t cb)
+{
+    s_weather_sim_cb = cb;
+}
+
 static void app_ui_pickup_event_cb(lv_event_t *e)
 {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED)
@@ -977,23 +1032,38 @@ static void app_ui_pickup_event_cb(lv_event_t *e)
     }
 }
 
-static lv_obj_t *app_ui_create_status_dot(lv_obj_t *parent, const char *label_text, int x_offset)
+static void app_ui_weather_sim_event_cb(lv_event_t *e)
 {
-    lv_obj_t *lbl = lv_label_create(parent);
-    lv_obj_set_style_text_color(lbl, lv_color_hex(0x60717D), 0);
-    lv_obj_set_style_text_font(lbl, &font_loading_cn, 0);
-    lv_label_set_text(lbl, label_text);
-    lv_obj_align(lbl, LV_ALIGN_TOP_RIGHT, x_offset, 16);
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED)
+    {
+        return;
+    }
+    if (s_weather_sim_cb != NULL)
+    {
+        s_weather_sim_cb();
+    }
+}
 
+static lv_obj_t *app_ui_create_status_dot(lv_obj_t *parent,
+    const char *label_text,
+    int32_t x,
+    int32_t y)
+{
     lv_obj_t *ind = lv_obj_create(parent);
-    lv_obj_set_size(ind, 11, 11);
-    lv_obj_set_style_radius(ind, 6, 0);
+    lv_obj_set_size(ind, 10, 10);
+    lv_obj_set_style_radius(ind, 5, 0);
     lv_obj_set_style_border_width(ind, 1, 0);
     lv_obj_set_style_border_color(ind, lv_color_hex(0xFFFFFF), 0);
     lv_obj_set_style_bg_color(ind, lv_color_hex(0xD85B5B), 0);
     lv_obj_set_style_bg_opa(ind, LV_OPA_COVER, 0);
     lv_obj_set_style_pad_all(ind, 0, 0);
-    lv_obj_align_to(ind, lbl, LV_ALIGN_OUT_BOTTOM_MID, 0, 6);
+    lv_obj_align(ind, LV_ALIGN_TOP_LEFT, x, y + 6);
+
+    lv_obj_t *lbl = lv_label_create(parent);
+    lv_obj_set_style_text_color(lbl, lv_color_hex(0x64748B), 0);
+    lv_obj_set_style_text_font(lbl, &font_loading_cn, 0);
+    lv_label_set_text(lbl, label_text);
+    lv_obj_align_to(lbl, ind, LV_ALIGN_OUT_RIGHT_MID, 8, 0);
 
     return ind;
 }
@@ -1018,13 +1088,20 @@ static void app_ui_update_clock_unlocked(void)
         return;
     }
 
+    if (!s_clock_tz_set)
+    {
+        setenv("TZ", UI_CLOCK_TIMEZONE, 1);
+        tzset();
+        s_clock_tz_set = true;
+    }
+
     time_t now = 0;
     time(&now);
     if ((int64_t)now < UI_CLOCK_VALID_EPOCH)
     {
         lv_label_set_text(s_main_clock_time, "--:--:--");
         lv_label_set_text(s_main_clock_note, "WAIT SYNC");
-        lv_obj_set_style_text_color(s_main_clock_time, lv_color_hex(0x8A99A3), 0);
+        lv_obj_set_style_text_color(s_main_clock_time, lv_color_hex(0x94A3B8), 0);
         return;
     }
 
@@ -1037,13 +1114,100 @@ static void app_ui_update_clock_unlocked(void)
     strftime(date_buf, sizeof(date_buf), "%Y-%m-%d", &tm_now);
     lv_label_set_text(s_main_clock_time, time_buf);
     lv_label_set_text(s_main_clock_note, date_buf);
-    lv_obj_set_style_text_color(s_main_clock_time, lv_color_hex(0x263544), 0);
+    lv_obj_set_style_text_color(s_main_clock_time, lv_color_hex(0x0F172A), 0);
 }
 
 static void app_ui_clock_timer_cb(lv_timer_t *timer)
 {
     (void)timer;
     app_ui_update_clock_unlocked();
+}
+
+static const lv_image_dsc_t *app_ui_weather_image_src(int weather_code)
+{
+    switch (weather_code) {
+    case 0: return &weather_0;
+    case 1: return &weather_1;
+    case 2: return &weather_2;
+    case 3: return &weather_3;
+    case 4: return &weather_4;
+    case 5: return &weather_5;
+    case 6: return &weather_6;
+    case 7: return &weather_7;
+    case 8: return &weather_8;
+    case 9: return &weather_9;
+    case 10: return &weather_10;
+    case 11: return &weather_11;
+    case 12: return &weather_12;
+    case 13: return &weather_13;
+    case 14: return &weather_14;
+    case 15: return &weather_15;
+    case 16: return &weather_16;
+    case 17: return &weather_17;
+    case 18: return &weather_18;
+    case 19: return &weather_19;
+    case 20: return &weather_20;
+    case 21: return &weather_21;
+    case 22: return &weather_22;
+    case 23: return &weather_23;
+    case 24: return &weather_24;
+    case 25: return &weather_24;
+    case 26: return &weather_26;
+    case 27: return &weather_27;
+    case 28: return &weather_28;
+    case 29: return &weather_29;
+    case 30: return &weather_30;
+    case 31: return &weather_31;
+    case 32: return &weather_32;
+    case 33: return &weather_33;
+    case 34: return &weather_34;
+    case 35: return &weather_35;
+    case 36: return &weather_36;
+    case 37: return &weather_37;
+    case 38: return &weather_38;
+    case 99:
+    default:
+        return &weather_99;
+    }
+}
+
+static bool app_ui_weather_is_severe(int weather_code)
+{
+    return weather_code == 36 || weather_code == 37 || weather_code == 38;
+}
+
+static void app_ui_apply_weather_unlocked(void)
+{
+    const bool extreme = app_ui_weather_is_severe(s_main_weather_code);
+    const lv_color_t accent = extreme ? lv_color_hex(0xDC2626) : lv_color_hex(0x0F766E);
+
+    if (s_main_weather_title != NULL)
+    {
+        lv_label_set_text(s_main_weather_title, "云端天气");
+        lv_obj_set_style_text_color(s_main_weather_title, lv_color_hex(0x64748B), 0);
+    }
+    if (s_main_weather_icon != NULL)
+    {
+        lv_image_set_src(s_main_weather_icon, app_ui_weather_image_src(s_main_weather_code));
+        lv_obj_set_style_image_recolor(s_main_weather_icon, accent, 0);
+        lv_obj_set_style_image_recolor_opa(s_main_weather_icon, LV_OPA_COVER, 0);
+    }
+    if (s_main_weather_label != NULL)
+    {
+        lv_label_set_text(s_main_weather_label, s_main_weather_text);
+        lv_obj_set_style_text_color(s_main_weather_label,
+            extreme ? lv_color_hex(0x991B1B) : lv_color_hex(0x0F172A),
+            0);
+    }
+    if (s_weather_sim_btn != NULL)
+    {
+        lv_obj_set_style_bg_color(s_weather_sim_btn, lv_color_hex(0xB91C1C), 0);
+    }
+    if (s_weather_sim_label != NULL)
+    {
+        lv_label_set_text(s_weather_sim_label, "模拟\n恶劣天\n气");
+        lv_obj_center(s_weather_sim_label);
+    }
 }
 
 static void app_ui_set_main_task_text_unlocked(const char *text, lv_color_t color)
@@ -1073,7 +1237,7 @@ bool app_ui_show_main_screen(void)
     {
         s_main_layer = lv_obj_create(scr);
         lv_obj_set_size(s_main_layer, BSP_LCD_H_RES, BSP_LCD_V_RES);
-        lv_obj_set_style_bg_color(s_main_layer, lv_color_hex(0xEAF0F4), 0);
+        lv_obj_set_style_bg_color(s_main_layer, lv_color_hex(0xFFFFFF), 0);
         lv_obj_set_style_bg_opa(s_main_layer, LV_OPA_COVER, 0);
         lv_obj_set_style_border_width(s_main_layer, 0, 0);
         lv_obj_set_style_radius(s_main_layer, 0, 0);
@@ -1081,164 +1245,151 @@ bool app_ui_show_main_screen(void)
         lv_obj_clear_flag(s_main_layer, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_align(s_main_layer, LV_ALIGN_CENTER, 0, 0);
 
-        /* 顶栏 */
-        lv_obj_t *topbar = app_ui_create_soft_panel(s_main_layer, BSP_LCD_H_RES, 82, 0);
-        lv_obj_set_style_bg_color(topbar, lv_color_hex(0xF8FAFB), 0);
-        lv_obj_set_style_border_width(topbar, 0, 0);
-        lv_obj_align(topbar, LV_ALIGN_TOP_LEFT, 0, 0);
+        lv_obj_t *main_logo = lv_image_create(s_main_layer);
+        lv_image_set_src(main_logo, &logo);
+        lv_image_set_scale(main_logo, 150);
+        lv_obj_align(main_logo, LV_ALIGN_TOP_LEFT, -27, -16);
 
-        lv_obj_t *topbar_line = lv_obj_create(s_main_layer);
-        lv_obj_set_size(topbar_line, BSP_LCD_H_RES, 1);
-        lv_obj_set_style_bg_color(topbar_line, lv_color_hex(0xD7E2E8), 0);
-        lv_obj_set_style_bg_opa(topbar_line, LV_OPA_COVER, 0);
-        lv_obj_set_style_border_width(topbar_line, 0, 0);
-        lv_obj_set_style_radius(topbar_line, 0, 0);
-        lv_obj_set_style_pad_all(topbar_line, 0, 0);
-        lv_obj_align(topbar_line, LV_ALIGN_TOP_LEFT, 0, 82);
+        lv_obj_t *header_line = lv_obj_create(s_main_layer);
+        lv_obj_set_size(header_line, BSP_LCD_H_RES, 1);
+        lv_obj_set_style_bg_color(header_line, lv_color_hex(0xE5E7EB), 0);
+        lv_obj_set_style_bg_opa(header_line, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(header_line, 0, 0);
+        lv_obj_set_style_radius(header_line, 0, 0);
+        lv_obj_set_style_pad_all(header_line, 0, 0);
+        lv_obj_clear_flag(header_line, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_align(header_line, LV_ALIGN_TOP_LEFT, 0, 92);
 
-        /* Logo 左上角 */
-        lv_obj_t *logo_panel = app_ui_create_soft_panel(s_main_layer, 124, 68, 6);
-        lv_obj_set_style_bg_color(logo_panel, lv_color_hex(0xFFFFFF), 0);
-        lv_obj_align(logo_panel, LV_ALIGN_TOP_LEFT, 16, 7);
-
-        lv_obj_t *img = lv_image_create(logo_panel);
-        lv_image_set_src(img, &logo);
-        lv_image_set_scale(img, 112);
-        lv_obj_center(img);
-
-        /* 作品名称 顶栏 */
+        /* 作品名称 */
         lv_obj_t *proj_name = lv_label_create(s_main_layer);
-        lv_obj_set_width(proj_name, BSP_LCD_H_RES - 390);
+        lv_obj_set_width(proj_name, BSP_LCD_H_RES - 48);
 #if LVGL_VERSION_MAJOR >= 9
-        lv_label_set_long_mode(proj_name, LV_LABEL_LONG_MODE_WRAP);
+        lv_label_set_long_mode(proj_name, LV_LABEL_LONG_MODE_DOTS);
 #else
-        lv_label_set_long_mode(proj_name, LV_LABEL_LONG_WRAP);
+        lv_label_set_long_mode(proj_name, LV_LABEL_LONG_DOT);
 #endif
-        lv_obj_set_style_text_color(proj_name, lv_color_hex(0x263544), 0);
-        lv_obj_set_style_text_font(proj_name, &font_loading_cn, 0);
-        lv_obj_set_style_text_align(proj_name, LV_TEXT_ALIGN_LEFT, 0);
+        lv_obj_set_style_text_color(proj_name, lv_color_hex(0x0F172A), 0);
+        lv_obj_set_style_text_font(proj_name, &font_main_title_cn, 0);
+        lv_obj_set_style_text_align(proj_name, LV_TEXT_ALIGN_CENTER, 0);
         lv_label_set_text(proj_name, UI_PROJECT_NAME);
-        lv_obj_align(proj_name, LV_ALIGN_TOP_LEFT, 158, 20);
+        lv_obj_align(proj_name, LV_ALIGN_TOP_MID, 0, 40);
 
-        /* 状态指示器 右上角 */
-        s_main_ch32_ind = app_ui_create_status_dot(s_main_layer, "CH32", -22);
-        s_main_mqtt_ind = app_ui_create_status_dot(s_main_layer, "云端", -100);
-        s_main_wifi_ind = app_ui_create_status_dot(s_main_layer, "WiFi", -178);
+        const int32_t info_card_w = 260;
+        const int32_t info_card_h = 150;
+        const int32_t info_card_y = 130;
+        const int32_t info_card_margin = 50;
 
-        /* 主信息区 */
-        lv_obj_t *hero = app_ui_create_soft_panel(s_main_layer, 392, 188, 10);
-        lv_obj_set_style_bg_color(hero, lv_color_hex(0xF9FBFC), 0);
-        lv_obj_align(hero, LV_ALIGN_TOP_LEFT, 28, 108);
-
-        lv_obj_t *title = lv_label_create(hero);
-        lv_obj_set_style_text_color(title, lv_color_hex(0x60717D), 0);
-        lv_obj_set_style_text_font(title, &font_loading_cn, 0);
-        lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_LEFT, 0);
-        lv_label_set_text(title, "任务状态");
-        lv_obj_align(title, LV_ALIGN_TOP_LEFT, 24, 20);
-
-        lv_obj_t *hero_sub = lv_label_create(hero);
-        lv_obj_set_style_text_color(hero_sub, lv_color_hex(0x8A99A3), 0);
-        lv_obj_set_style_text_font(hero_sub, &font_loading_cn, 0);
-        lv_label_set_text(hero_sub, UI_TEAM_NAME);
-        lv_obj_align(hero_sub, LV_ALIGN_TOP_LEFT, 24, 54);
-
-        s_main_task_label = lv_label_create(hero);
-        lv_obj_set_width(s_main_task_label, 210);
-        lv_obj_set_style_text_color(s_main_task_label, lv_color_hex(0x263544), 0);
-        lv_obj_set_style_text_font(s_main_task_label, &font_loading_cn, 0);
-        lv_obj_set_style_text_align(s_main_task_label, LV_TEXT_ALIGN_LEFT, 0);
-        lv_label_set_text(s_main_task_label, "等待任务");
-        lv_obj_align(s_main_task_label, LV_ALIGN_TOP_LEFT, 24, 100);
-
-        /* 时钟卡片 */
-        lv_obj_t *clock_card = app_ui_create_soft_panel(s_main_layer, 320, 112, 10);
-        lv_obj_align(clock_card, LV_ALIGN_TOP_RIGHT, -28, 108);
+        lv_obj_t *clock_card = app_ui_create_soft_panel(s_main_layer,
+            info_card_w,
+            info_card_h,
+            8);
+        lv_obj_set_style_bg_color(clock_card, lv_color_hex(0xF8FAFC), 0);
+        lv_obj_align(clock_card, LV_ALIGN_TOP_LEFT, info_card_margin, info_card_y);
 
         lv_obj_t *clock_title = lv_label_create(clock_card);
-        lv_obj_set_style_text_color(clock_title, lv_color_hex(0x60717D), 0);
-        lv_obj_set_style_text_font(clock_title, &font_loading_cn, 0);
-        lv_label_set_text(clock_title, "TIME");
-        lv_obj_align(clock_title, LV_ALIGN_TOP_LEFT, 18, 12);
+        lv_obj_set_style_text_color(clock_title, lv_color_hex(0x64748B), 0);
+        lv_obj_set_style_text_font(clock_title, &font_main_title_cn, 0);
+        lv_label_set_text(clock_title, "北京时间");
+        lv_obj_align(clock_title, LV_ALIGN_TOP_LEFT, 18, 14);
 
         s_main_clock_time = lv_label_create(clock_card);
-        lv_obj_set_style_text_color(s_main_clock_time, lv_color_hex(0x263544), 0);
+        lv_obj_set_width(s_main_clock_time, info_card_w - 36);
+        lv_obj_set_style_text_color(s_main_clock_time, lv_color_hex(0x0F172A), 0);
         lv_obj_set_style_text_font(s_main_clock_time, &font_title_en, 0);
-        lv_obj_set_style_text_align(s_main_clock_time, LV_TEXT_ALIGN_RIGHT, 0);
+        lv_obj_set_style_text_align(s_main_clock_time, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_letter_space(s_main_clock_time, 1, 0);
         lv_label_set_text(s_main_clock_time, "--:--:--");
-        lv_obj_align(s_main_clock_time, LV_ALIGN_RIGHT_MID, -18, 6);
+        lv_obj_align(s_main_clock_time, LV_ALIGN_TOP_MID, 0, 48);
 
         s_main_clock_note = lv_label_create(clock_card);
-        lv_obj_set_style_text_color(s_main_clock_note, lv_color_hex(0x8A99A3), 0);
-        lv_obj_set_style_text_font(s_main_clock_note, &font_loading_cn, 0);
-        lv_label_set_text(s_main_clock_note, "WAIT SYNC");
-        lv_obj_align(s_main_clock_note, LV_ALIGN_BOTTOM_RIGHT, -20, -12);
+        lv_obj_set_width(s_main_clock_note, info_card_w - 36);
+        lv_obj_set_style_text_color(s_main_clock_note, lv_color_hex(0x64748B), 0);
+        lv_obj_set_style_text_font(s_main_clock_note, &font_main_title_cn, 0);
+        lv_obj_set_style_text_align(s_main_clock_note, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_text(s_main_clock_note, "同步中");
+        lv_obj_align(s_main_clock_note, LV_ALIGN_TOP_MID, 0, 108);
 
-        /* 天气预留卡片 */
-        lv_obj_t *weather_card = app_ui_create_soft_panel(s_main_layer, 320, 64, 10);
-        lv_obj_align(weather_card, LV_ALIGN_TOP_RIGHT, -28, 232);
+        lv_obj_t *weather_card = app_ui_create_soft_panel(s_main_layer,
+            info_card_w,
+            info_card_h,
+            8);
+        lv_obj_set_style_bg_color(weather_card, lv_color_hex(0xF8FAFC), 0);
+        lv_obj_align(weather_card,
+            LV_ALIGN_TOP_RIGHT,
+            -info_card_margin,
+            info_card_y);
 
-        lv_obj_t *weather_title = lv_label_create(weather_card);
-        lv_obj_set_style_text_color(weather_title, lv_color_hex(0x60717D), 0);
-        lv_obj_set_style_text_font(weather_title, &font_loading_cn, 0);
-        lv_label_set_text(weather_title, "WEATHER");
-        lv_obj_align(weather_title, LV_ALIGN_LEFT_MID, 18, 0);
+        s_main_weather_title = lv_label_create(weather_card);
+        lv_obj_set_width(s_main_weather_title, info_card_w - 36);
+#if LVGL_VERSION_MAJOR >= 9
+        lv_label_set_long_mode(s_main_weather_title, LV_LABEL_LONG_MODE_DOTS);
+#else
+        lv_label_set_long_mode(s_main_weather_title, LV_LABEL_LONG_DOT);
+#endif
+        lv_obj_set_style_text_color(s_main_weather_title, lv_color_hex(0x64748B), 0);
+        lv_obj_set_style_text_font(s_main_weather_title, &font_main_title_cn, 0);
+        lv_label_set_text(s_main_weather_title, "云端天气");
+        lv_obj_align(s_main_weather_title, LV_ALIGN_TOP_LEFT, 18, 14);
+
+        s_main_weather_icon = lv_image_create(weather_card);
+        lv_image_set_src(s_main_weather_icon, app_ui_weather_image_src(s_main_weather_code));
+        lv_obj_align(s_main_weather_icon, LV_ALIGN_TOP_LEFT, 22, 60);
 
         s_main_weather_label = lv_label_create(weather_card);
-        lv_obj_set_width(s_main_weather_label, 160);
-        lv_obj_set_style_text_color(s_main_weather_label, lv_color_hex(0x1F6F7A), 0);
-        lv_obj_set_style_text_font(s_main_weather_label, &font_loading_cn, 0);
-        lv_obj_set_style_text_align(s_main_weather_label, LV_TEXT_ALIGN_RIGHT, 0);
-        lv_label_set_text(s_main_weather_label, "--");
-        lv_obj_align(s_main_weather_label, LV_ALIGN_RIGHT_MID, -18, 0);
+        lv_obj_set_width(s_main_weather_label, info_card_w - 104);
+#if LVGL_VERSION_MAJOR >= 9
+        lv_label_set_long_mode(s_main_weather_label, LV_LABEL_LONG_MODE_WRAP);
+#else
+        lv_label_set_long_mode(s_main_weather_label, LV_LABEL_LONG_WRAP);
+#endif
+        lv_obj_set_style_text_color(s_main_weather_label, lv_color_hex(0x0F172A), 0);
+        lv_obj_set_style_text_font(s_main_weather_label, &font_main_title_cn, 0);
+        lv_obj_set_style_text_align(s_main_weather_label, LV_TEXT_ALIGN_LEFT, 0);
+        lv_obj_set_style_text_line_space(s_main_weather_label, 8, 0);
+        lv_label_set_text(s_main_weather_label, s_main_weather_text);
+        lv_obj_align(s_main_weather_label, LV_ALIGN_TOP_LEFT, 94, 56);
+        app_ui_apply_weather_unlocked();
 
-        /* 下方状态卡片 */
-        lv_obj_t *task_card = app_ui_create_main_card(s_main_layer, "任务状态", 28, 318, 224, 86);
-        s_main_task_card_label = app_ui_create_panel_value(task_card, "等待任务");
+        s_weather_sim_btn = app_ui_button_create(s_main_layer);
+        lv_obj_set_size(s_weather_sim_btn, 74, 64);
+        lv_obj_set_style_bg_color(s_weather_sim_btn, lv_color_hex(0xB91C1C), 0);
+        lv_obj_set_style_bg_opa(s_weather_sim_btn, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(s_weather_sim_btn, 0, 0);
+        lv_obj_set_style_radius(s_weather_sim_btn, 8, 0);
+        lv_obj_set_style_pad_all(s_weather_sim_btn, 0, 0);
+        lv_obj_clear_flag(s_weather_sim_btn, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_align(s_weather_sim_btn, LV_ALIGN_TOP_MID, 0, info_card_y + 46);
+        lv_obj_add_event_cb(s_weather_sim_btn, app_ui_weather_sim_event_cb, LV_EVENT_CLICKED, NULL);
 
-        lv_obj_t *conn_card = app_ui_create_main_card(s_main_layer, "通信状态", 288, 318, 224, 86);
-        s_main_conn_label = app_ui_create_panel_value(conn_card, "通信未就绪");
-
-        lv_obj_t *dock_card = app_ui_create_main_card(s_main_layer, "接驳系统", 548, 318, 224, 86);
-        s_main_dock_label = app_ui_create_panel_value(dock_card, "接驳未就绪");
-
-        /* 取货按钮 */
-        s_main_pickup_btn = app_ui_button_create(s_main_layer);
-        lv_obj_set_size(s_main_pickup_btn, 136, 46);
-        lv_obj_set_style_bg_color(s_main_pickup_btn, lv_color_hex(0x2D8A73), 0);
-        lv_obj_set_style_bg_opa(s_main_pickup_btn, LV_OPA_COVER, 0);
-        lv_obj_set_style_border_width(s_main_pickup_btn, 0, 0);
-        lv_obj_set_style_radius(s_main_pickup_btn, 8, 0);
-        lv_obj_align(s_main_pickup_btn, LV_ALIGN_TOP_LEFT, 260, 224);
-        lv_obj_add_event_cb(s_main_pickup_btn, app_ui_pickup_event_cb, LV_EVENT_CLICKED, NULL);
-        lv_obj_add_flag(s_main_pickup_btn, LV_OBJ_FLAG_HIDDEN);
-
-        lv_obj_t *btn_label = lv_label_create(s_main_pickup_btn);
-        lv_obj_set_style_text_color(btn_label, lv_color_hex(0xFFFFFF), 0);
-        lv_obj_set_style_text_font(btn_label, &font_loading_cn, 0);
-        lv_label_set_text(btn_label, "取货");
-        lv_obj_center(btn_label);
-
-        /* 底部信息 */
-        lv_obj_t *contest = lv_label_create(s_main_layer);
-        lv_obj_set_style_text_color(contest, lv_color_hex(0x8A99A3), 0);
-        lv_obj_set_style_text_font(contest, &font_loading_cn, 0);
-        lv_obj_set_style_text_align(contest, LV_TEXT_ALIGN_CENTER, 0);
-        lv_label_set_text(contest, UI_CONTEST_NAME);
-        lv_obj_align(contest, LV_ALIGN_BOTTOM_MID, 0, -10);
-
-        lv_obj_t *team = lv_label_create(s_main_layer);
-        lv_obj_set_style_text_color(team, lv_color_hex(0x60717D), 0);
-        lv_obj_set_style_text_font(team, &font_loading_cn, 0);
-        lv_obj_set_style_text_align(team, LV_TEXT_ALIGN_CENTER, 0);
-        lv_label_set_text(team, UI_TEAM_NAME);
-        lv_obj_align(team, LV_ALIGN_BOTTOM_MID, 0, -34);
+        s_weather_sim_label = lv_label_create(s_weather_sim_btn);
+        lv_obj_set_width(s_weather_sim_label, 62);
+        lv_obj_set_style_text_color(s_weather_sim_label, lv_color_hex(0xFFFFFF), 0);
+        lv_obj_set_style_text_font(s_weather_sim_label, &font_main_title_cn, 0);
+        lv_obj_set_style_text_align(s_weather_sim_label, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_text(s_weather_sim_label, "模拟\n恶劣天\n气");
+        lv_obj_center(s_weather_sim_label);
+        app_ui_apply_weather_unlocked();
 
         app_ui_update_clock_unlocked();
         if (s_main_clock_timer == NULL)
         {
             s_main_clock_timer = lv_timer_create(app_ui_clock_timer_cb, 1000, NULL);
         }
+
+        /* 底部信息 */
+        lv_obj_t *contest = lv_label_create(s_main_layer);
+        lv_obj_set_style_text_color(contest, lv_color_hex(0x94A3B8), 0);
+        lv_obj_set_style_text_font(contest, &font_loading_cn, 0);
+        lv_obj_set_style_text_align(contest, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_text(contest, UI_CONTEST_NAME);
+        lv_obj_align(contest, LV_ALIGN_BOTTOM_MID, 0, -12);
+
+        lv_obj_t *team = lv_label_create(s_main_layer);
+        lv_obj_set_style_text_color(team, lv_color_hex(0x64748B), 0);
+        lv_obj_set_style_text_font(team, &font_loading_cn, 0);
+        lv_obj_set_style_text_align(team, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_text(team, UI_TEAM_NAME);
+        lv_obj_align(team, LV_ALIGN_BOTTOM_MID, 0, -38);
     }
     else
     {
@@ -1279,12 +1430,12 @@ void app_ui_main_screen_show_pickup(bool show)
     if (show)
     {
         lv_obj_clear_flag(s_main_pickup_btn, LV_OBJ_FLAG_HIDDEN);
-        app_ui_set_main_task_text_unlocked("任务完成", lv_color_hex(0x2D8A73));
+        app_ui_set_main_task_text_unlocked("任务完成", lv_color_hex(0x0F766E));
     }
     else
     {
         lv_obj_add_flag(s_main_pickup_btn, LV_OBJ_FLAG_HIDDEN);
-        app_ui_set_main_task_text_unlocked("等待任务", lv_color_hex(0x1F6F7A));
+        app_ui_set_main_task_text_unlocked("等待任务", lv_color_hex(0x0F766E));
     }
     bsp_display_unlock();
 }
@@ -1299,7 +1450,7 @@ void app_ui_main_screen_update_status(bool wifi_ok, bool mqtt_ok, bool ch32_ok)
     {
         return;
     }
-    lv_color_t green = lv_color_hex(0x2D8A73);
+    lv_color_t green = lv_color_hex(0x0F766E);
     lv_color_t red = lv_color_hex(0xD85B5B);
     if (s_main_wifi_ind != NULL)
     {
@@ -1340,7 +1491,7 @@ void app_ui_main_screen_set_task_text(const char *text)
         return;
     }
     const char *display_text = text;
-    lv_color_t color = lv_color_hex(0x1F6F7A);
+    lv_color_t color = lv_color_hex(0x0F766E);
     if (strcmp(text, "waiting task") == 0)
     {
         display_text = "等待任务";
@@ -1350,13 +1501,31 @@ void app_ui_main_screen_set_task_text(const char *text)
         display_text = "取货未完成";
         color = lv_color_hex(0xD85B5B);
     }
+    else if (strcmp(text, "weather blocked") == 0 || strcmp(text, "天气故障") == 0)
+    {
+        display_text = "天气故障";
+        color = lv_color_hex(0xD85B5B);
+    }
     app_ui_set_main_task_text_unlocked(display_text, color);
     bsp_display_unlock();
 }
 
 void app_ui_main_screen_set_weather_text(const char *text)
 {
-    if (s_main_weather_label == NULL || text == NULL)
+    app_ui_main_screen_set_weather(text, s_main_weather_code);
+}
+
+void app_ui_main_screen_set_weather(const char *text, int weather_code)
+{
+    if (text == NULL)
+    {
+        return;
+    }
+
+    strlcpy(s_main_weather_text, text, sizeof(s_main_weather_text));
+    s_main_weather_code = weather_code;
+
+    if (s_main_weather_label == NULL && s_main_weather_icon == NULL)
     {
         return;
     }
@@ -1364,7 +1533,7 @@ void app_ui_main_screen_set_weather_text(const char *text)
     {
         return;
     }
-    lv_label_set_text(s_main_weather_label, text);
+    app_ui_apply_weather_unlocked();
     bsp_display_unlock();
 }
 

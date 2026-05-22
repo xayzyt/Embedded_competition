@@ -17,6 +17,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include "cJSON.h"
@@ -29,12 +30,16 @@
 #include "esp_err.h"
 #include "esp_event.h"
 #include "esp_heap_caps.h"
+#include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_netif_sntp.h"
 #include "esp_wifi.h"
 #include "mqtt_client.h"
+#include "app_ch32_link.h"
 #include "app_cloud_cmd.h"
 #include "app_task.h"
+#include "app_ui.h"
 
 static const char *TAG = "app_cloud";
 
@@ -54,6 +59,19 @@ static const char *TAG = "app_cloud";
 #define APP_CLOUD_FALLBACK_DNS_B       5
 #define APP_CLOUD_FALLBACK_DNS_C       5
 #define APP_CLOUD_FALLBACK_DNS_D       5
+#define APP_CLOUD_NTP_SERVER           "ntp.aliyun.com"
+#define APP_CLOUD_TIMEZONE             "CST-8"
+#define APP_CLOUD_WEATHER_CITY         "changsha"
+#define APP_CLOUD_WEATHER_CITY_CN      "长沙"
+#define APP_CLOUD_WEATHER_URL_LEN      256
+#define APP_CLOUD_WEATHER_RESP_LEN     1024
+#define APP_CLOUD_WEATHER_TASK_STACK   (6 * 1024)
+#define APP_CLOUD_WEATHER_TASK_PRIO    4
+#define APP_CLOUD_WEATHER_RETRY_MS     (30 * 1000)
+#define APP_CLOUD_WEATHER_REFRESH_MS   (30 * 60 * 1000)
+#define APP_CLOUD_WEATHER_FALLBACK_CODE 4
+#define APP_CLOUD_WEATHER_SEVERE_CODE  36
+#define APP_CLOUD_ABORT_WAIT_MS        800
 
 /* -------------------------------------------------------------------------- */
 /* 运行状态                                                               */
@@ -63,6 +81,9 @@ typedef struct {
     bool inited;                                      /* 云端模块是否完成初始化。 */
     bool mqtt_started;                                /* MQTT 客户端是否已经启动。 */
     bool mqtt_connected;                              /* MQTT 当前是否已连接。 */
+    bool sntp_started;                                /* SNTP 时间同步是否已经启动。 */
+    bool weather_simulated;                           /* 是否启用恶劣天气模拟。 */
+    bool weather_docking_blocked;                     /* 当前天气是否禁止接驳。 */
     bool have_last_snapshot;                          /* 是否缓存了最近一次任务快照。 */
     uint32_t msg_seq;                                 /* 发布状态消息时递增的本地序号。 */
     EventGroupHandle_t event_group;                   /* Wi-Fi/MQTT 状态同步事件组。 */
@@ -76,6 +97,7 @@ typedef struct {
 } app_cloud_runtime_t;
 static app_cloud_runtime_t s_cloud = {0};
 static TaskHandle_t s_cloud_task = NULL;
+static TaskHandle_t s_weather_task = NULL;
 
 /* MQTT 事件处理函数需要先声明，创建客户端时会注册它。 */
 static void app_cloud_mqtt_event_handler(void *handler_args,
@@ -86,6 +108,13 @@ static esp_err_t app_cloud_publish_raw(const char *topic,
     const char *payload,
     int qos,
     int retain);
+
+typedef struct {
+    char *buf;
+    int len;
+    int cap;
+    bool truncated;
+} app_cloud_http_buf_t;
 
 static void app_cloud_log_heap(const char *stage)
 {
@@ -247,6 +276,304 @@ static void app_cloud_ensure_dns_after_ip(void)
         return;
     }
     app_cloud_log_dns_info("fallback", &fallback);
+}
+
+static void app_cloud_time_sync_cb(struct timeval *tv)
+{
+    (void)tv;
+
+    time_t now = 0;
+    time(&now);
+
+    struct tm tm_now;
+    localtime_r(&now, &tm_now);
+
+    char time_buf[32] = {0};
+    strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", &tm_now);
+    ESP_LOGI(TAG, "time synced: %s", time_buf);
+}
+
+static void app_cloud_start_sntp_once(void)
+{
+    if (s_cloud.sntp_started)
+    {
+        return;
+    }
+
+    setenv("TZ", APP_CLOUD_TIMEZONE, 1);
+    tzset();
+
+    esp_sntp_config_t sntp_config = ESP_NETIF_SNTP_DEFAULT_CONFIG(APP_CLOUD_NTP_SERVER);
+    sntp_config.sync_cb = app_cloud_time_sync_cb;
+
+    esp_err_t ret = esp_netif_sntp_init(&sntp_config);
+    if (ret == ESP_ERR_INVALID_STATE)
+    {
+        s_cloud.sntp_started = true;
+        ESP_LOGW(TAG, "SNTP already initialized");
+        return;
+    }
+    if (ret != ESP_OK)
+    {
+        ESP_LOGW(TAG, "SNTP start failed: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    s_cloud.sntp_started = true;
+    ESP_LOGI(TAG, "SNTP started, server=%s", APP_CLOUD_NTP_SERVER);
+}
+
+static esp_err_t app_cloud_weather_http_event_cb(esp_http_client_event_t *evt)
+{
+    if (evt == NULL || evt->event_id != HTTP_EVENT_ON_DATA)
+    {
+        return ESP_OK;
+    }
+
+    app_cloud_http_buf_t *rx = (app_cloud_http_buf_t *)evt->user_data;
+    if (rx == NULL || rx->buf == NULL || rx->cap <= 0 || evt->data == NULL || evt->data_len <= 0)
+    {
+        return ESP_OK;
+    }
+
+    int free_len = rx->cap - rx->len;
+    if (free_len <= 0)
+    {
+        rx->truncated = true;
+        return ESP_OK;
+    }
+
+    int copy_len = evt->data_len;
+    if (copy_len > free_len)
+    {
+        copy_len = free_len;
+        rx->truncated = true;
+    }
+    memcpy(rx->buf + rx->len, evt->data, (size_t)copy_len);
+    rx->len += copy_len;
+    rx->buf[rx->len] = '\0';
+    return ESP_OK;
+}
+
+static const char *app_cloud_json_get_string(cJSON *obj, const char *key)
+{
+    if (obj == NULL || key == NULL)
+    {
+        return NULL;
+    }
+    cJSON *item = cJSON_GetObjectItemCaseSensitive(obj, key);
+    if (cJSON_IsString(item) && item->valuestring != NULL)
+    {
+        return item->valuestring;
+    }
+    return NULL;
+}
+
+static esp_err_t app_cloud_parse_weather_response(const char *json,
+    char *weather_text,
+    size_t weather_text_size,
+    int *weather_code)
+{
+    if (json == NULL || weather_text == NULL || weather_text_size == 0 || weather_code == NULL)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    cJSON *root = cJSON_Parse(json);
+    if (root == NULL)
+    {
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    esp_err_t ret = ESP_ERR_INVALID_RESPONSE;
+    cJSON *results = cJSON_GetObjectItemCaseSensitive(root, "results");
+    cJSON *first = cJSON_IsArray(results) ? cJSON_GetArrayItem(results, 0) : NULL;
+    cJSON *now = first ? cJSON_GetObjectItemCaseSensitive(first, "now") : NULL;
+
+    const char *text = app_cloud_json_get_string(now, "text");
+    const char *code = app_cloud_json_get_string(now, "code");
+    const char *temp = app_cloud_json_get_string(now, "temperature");
+    if (text != NULL && code != NULL && temp != NULL)
+    {
+        *weather_code = atoi(code);
+        snprintf(weather_text,
+            weather_text_size,
+            "%s\n%s℃",
+            text,
+            temp);
+        ret = ESP_OK;
+    }
+
+    cJSON_Delete(root);
+    return ret;
+}
+
+static void app_cloud_show_weather_fallback(void)
+{
+    app_ui_main_screen_set_weather("多云\n--℃", APP_CLOUD_WEATHER_FALLBACK_CODE);
+}
+
+static void app_cloud_apply_weather_docking_policy(bool simulated)
+{
+    s_cloud.weather_docking_blocked = simulated;
+
+    if (!simulated)
+    {
+        return;
+    }
+
+    app_task_cancel("blocked by simulated severe weather");
+    app_ui_main_screen_set_task_text("weather blocked");
+
+    if (app_ch32_link_is_ready())
+    {
+        esp_err_t ret = app_ch32_link_send_cmd_and_wait_ack('S', APP_CLOUD_ABORT_WAIT_MS);
+        if (ret != ESP_OK)
+        {
+            ESP_LOGW(TAG, "abort dock for severe weather failed: %s", esp_err_to_name(ret));
+        }
+    }
+}
+
+static void app_cloud_show_simulated_severe_weather(void)
+{
+    app_ui_main_screen_set_weather("台风\n28℃", APP_CLOUD_WEATHER_SEVERE_CODE);
+    app_cloud_apply_weather_docking_policy(true);
+}
+
+static esp_err_t app_cloud_fetch_weather_once(void)
+{
+    if (s_cloud.weather_simulated)
+    {
+        app_cloud_show_simulated_severe_weather();
+        return ESP_OK;
+    }
+
+    if (CONFIG_SKY_WEATHER_API_KEY[0] == '\0')
+    {
+        ESP_LOGW(TAG, "CONFIG_SKY_WEATHER_API_KEY is empty, show local weather fallback");
+        app_cloud_show_weather_fallback();
+        s_cloud.weather_docking_blocked = false;
+        return ESP_OK;
+    }
+
+    char url[APP_CLOUD_WEATHER_URL_LEN] = {0};
+    snprintf(url,
+        sizeof(url),
+        "https://api.seniverse.com/v3/weather/now.json?key=%s&location=%s&language=zh-Hans&unit=c",
+        CONFIG_SKY_WEATHER_API_KEY,
+        APP_CLOUD_WEATHER_CITY);
+
+    char response[APP_CLOUD_WEATHER_RESP_LEN] = {0};
+    app_cloud_http_buf_t rx = {
+        .buf = response,
+        .len = 0,
+        .cap = (int)sizeof(response) - 1,
+        .truncated = false,
+    };
+    esp_http_client_config_t http_cfg = {
+        .url = url,
+        .event_handler = app_cloud_weather_http_event_cb,
+        .user_data = &rx,
+#if CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
+        .crt_bundle_attach = esp_crt_bundle_attach,
+#endif
+        .timeout_ms = 10000,
+        .buffer_size = 1024,
+    };
+
+    esp_http_client_handle_t client = esp_http_client_init(&http_cfg);
+    if (client == NULL)
+    {
+        app_ui_main_screen_set_weather("同步失败", 99);
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_err_t ret = esp_http_client_perform(client);
+    int status = esp_http_client_get_status_code(client);
+    esp_http_client_cleanup(client);
+
+    if (ret != ESP_OK || status != 200 || rx.len <= 0 || rx.truncated)
+    {
+        ESP_LOGW(TAG,
+            "weather fetch failed: ret=%s http=%d len=%d trunc=%d",
+            esp_err_to_name(ret),
+            status,
+            rx.len,
+            rx.truncated);
+        app_ui_main_screen_set_weather("同步失败", 99);
+        return (ret != ESP_OK) ? ret : ESP_FAIL;
+    }
+
+    char weather_text[96] = {0};
+    int weather_code = 99;
+    ret = app_cloud_parse_weather_response(response,
+        weather_text,
+        sizeof(weather_text),
+        &weather_code);
+    if (ret != ESP_OK)
+    {
+        ESP_LOGW(TAG, "weather json parse failed: %s", esp_err_to_name(ret));
+        app_ui_main_screen_set_weather("同步失败", 99);
+        return ret;
+    }
+
+    s_cloud.weather_docking_blocked = false;
+    app_ui_main_screen_set_weather(weather_text, weather_code);
+    ESP_LOGI(TAG, "weather updated: %s code=%d", weather_text, weather_code);
+    return ESP_OK;
+}
+
+static void app_cloud_weather_task(void *arg)
+{
+    (void)arg;
+    app_ui_main_screen_set_weather("同步中", 99);
+
+    for (;;)
+    {
+        if (!app_cloud_is_wifi_connected())
+        {
+            vTaskDelay(pdMS_TO_TICKS(5000));
+            continue;
+        }
+
+        esp_err_t ret = app_cloud_fetch_weather_once();
+        vTaskDelay(pdMS_TO_TICKS((ret == ESP_OK) ?
+            APP_CLOUD_WEATHER_REFRESH_MS :
+            APP_CLOUD_WEATHER_RETRY_MS));
+    }
+}
+
+static void app_cloud_start_weather_task_once(void)
+{
+    if (s_weather_task != NULL)
+    {
+        return;
+    }
+
+    BaseType_t ok = xTaskCreate(app_cloud_weather_task,
+        "weather",
+        APP_CLOUD_WEATHER_TASK_STACK,
+        NULL,
+        APP_CLOUD_WEATHER_TASK_PRIO,
+        &s_weather_task);
+    if (ok != pdPASS)
+    {
+        ESP_LOGW(TAG, "create weather task failed");
+        s_weather_task = NULL;
+    }
+}
+
+void app_cloud_simulate_severe_weather(void)
+{
+    ESP_LOGW(TAG, "simulate severe weather: block docking");
+    s_cloud.weather_simulated = true;
+    app_cloud_show_simulated_severe_weather();
+}
+
+bool app_cloud_is_weather_docking_blocked(void)
+{
+    return s_cloud.weather_docking_blocked;
 }
 
 static esp_err_t app_cloud_validate_config(void)
@@ -692,6 +1019,8 @@ static void app_cloud_wifi_event_handler(void *arg,
     {
         ESP_LOGI(TAG, "wifi got ip");
         app_cloud_ensure_dns_after_ip();
+        app_cloud_start_sntp_once();
+        app_cloud_start_weather_task_once();
 
         xEventGroupSetBits(s_cloud.event_group,
             APP_CLOUD_WIFI_CONNECTED_BIT | APP_CLOUD_START_MQTT_BIT);

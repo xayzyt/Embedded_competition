@@ -70,6 +70,13 @@ void app_ui_main_screen_set_task_text(const char *text);
 /* 预留天气区域文本更新接口。 */
 void app_ui_main_screen_set_weather_text(const char *text);
 
+/* 更新天气卡片文本和天气现象图标，weather_code 使用心知天气 now.code。 */
+void app_ui_main_screen_set_weather(const char *text, int weather_code);
+
 /* 注册"取货"按钮回调（由 main 设置，避免 UI 层依赖 control）。 */
 typedef void (*app_ui_pickup_cb_t)(void);
 void app_ui_set_pickup_callback(app_ui_pickup_cb_t cb);
+
+/* 注册"模拟恶劣天气"按钮回调。 */
+typedef void (*app_ui_weather_sim_cb_t)(void);
+void app_ui_set_weather_sim_callback(app_ui_weather_sim_cb_t cb);

@@ -24,6 +24,7 @@
 #include "esp_err.h"
 #include "esp_log.h"
 #include "app_ch32_link.h"
+#include "app_cloud.h"
 #include "app_ctrl_proto.h"
 #include "app_ctrl_text.h"
 #include "app_dock_judge.h"
@@ -463,6 +464,14 @@ static void app_ctrl_try_auto_dock(uint32_t now_ms,
     const bool auth_ready_retry = (task->state == APP_TASK_STATE_AUTH_PASSED) && ready_level;
     if (!(task->active && !*dock_busy && !retrigger_blocked && (ready_rising || auth_ready_retry)))
     {
+        return;
+    }
+    if (app_cloud_is_weather_docking_blocked())
+    {
+        app_ctrl_set_notice("dock: blocked by weather", CTRL_NOTICE_SHOW_MS);
+        app_task_cancel("blocked by severe weather");
+        app_ui_main_screen_set_task_text("weather blocked");
+        (void)app_task_get_snapshot(task);
         return;
     }
     if (!ch32_ready)

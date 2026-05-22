@@ -82,4 +82,11 @@ config SKY_MQTT_SKIP_SERVER_CERT_VERIFY
     help
         仅在调试阶段临时使用，不建议正式演示或答辩时开启。
 
+config SKY_WEATHER_API_KEY
+    string "Seniverse weather API key"
+    default ""
+    help
+        心知天气 API Key。主屏幕天气固定查询长沙：
+        https://api.seniverse.com/v3/weather/now.json?location=changsha
+
 endmenu

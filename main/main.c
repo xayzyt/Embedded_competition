@@ -53,25 +53,33 @@ static void app_init_nvs(void)
 /* 初始化显示和常驻 UI，并在开背光前先绘制加载页。 */
 static bool app_start_display_ui(void)
 {
+    ESP_LOGI(TAG, "display step: init begin");
     if (!app_display_init())
     {
         ESP_LOGE(TAG, "display init failed");
         return false;
     }
+    ESP_LOGI(TAG, "display step: init done");
 
+    ESP_LOGI(TAG, "display step: ui create begin");
     if (!app_ui_create())
     {
         ESP_LOGE(TAG, "ui create failed");
         return false;
     }
+    ESP_LOGI(TAG, "display step: ui create done");
 
     /* 先绘制首帧再开背光，避免上电时屏幕先闪白。 */
+    ESP_LOGI(TAG, "display step: loading begin");
     if (!app_ui_show_loading("显示屏就绪"))
     {
         ESP_LOGE(TAG, "loading UI create failed");
         return false;
     }
+    ESP_LOGI(TAG, "display step: loading done, backlight on");
     app_display_backlight_on();
+    ESP_LOGI(TAG, "display step: backlight done");
+
     app_ui_set_status("dock: booting");
     app_ui_set_vision_text("vision: init");
     app_ui_set_dock_text("dock dbg: init");
@@ -290,6 +298,11 @@ static void app_pickup_cb(void)
     app_ui_main_screen_set_task_text("waiting task");
 }
 
+static void app_weather_sim_cb(void)
+{
+    app_cloud_simulate_severe_weather();
+}
+
 static void app_main_screen_status_task(void *arg)
 {
     (void)arg;
@@ -306,7 +319,10 @@ static void app_main_screen_status_task(void *arg)
 /* ESP-IDF 应用入口，按依赖顺序拉起整套接驳系统。 */
 void app_main(void)
 {
+    ESP_LOGI(TAG, "app_main enter");
+    ESP_LOGI(TAG, "nvs init begin");
     app_init_nvs();
+    ESP_LOGI(TAG, "nvs init done");
 
     if (!app_start_display_ui())
     {
@@ -319,6 +335,7 @@ void app_main(void)
     app_init_runtime_modules(&dock_cfg);
 
     app_ui_set_pickup_callback(app_pickup_cb);
+    app_ui_set_weather_sim_callback(app_weather_sim_cb);
     app_ui_show_main_screen();
     app_ui_hide_loading();
     app_show_ready_status(&dock_cfg);
