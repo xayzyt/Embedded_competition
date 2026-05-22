@@ -1,7 +1,13 @@
+/*
+ * LVGL 中文字体数据文件 - 主界面标题使用 (22px, OPPO Sans 4.0)。
+ * 由 lvgl 字体转换工具自动生成，请勿手动编辑。
+ *
+ * Size: 22 px, Bpp: 4
+ */
 /*******************************************************************************
  * Size: 22 px
  * Bpp: 4
- * Opts: --no-compress --no-prefilter --bpp 4 --size 22 --font components/vision_ui/OPPO Sans 4.0.ttf -r 0x20-0x7f --symbols 基于双芯协同的低空接驳微港与端侧鉴权闭环系统地线引力队第九届（）全国大学生嵌入式芯片与系统设计竞赛任务状态等待完成取货未通信已就绪云端天气本地时间北京时间同步中接驳运行正常离线在线失败重试故障取消晴阴雨雪多云风温度湿℃°长沙小中大暴阵雷雾霾浮尘扬冻冰雹夹强沙心知更新模拟恶劣台龙卷禁止特飓热带恢复 --format lvgl -o components/vision_ui/font_main_title_cn.c --force-fast-kern-format
+ * Opts: --no-compress --no-prefilter --bpp 4 --size 22 --font components/vision_ui/OPPO Sans 4.0.ttf -r 0x20-0x7f --symbols ... --format lvgl -o components/vision_ui/font_main_title_cn.c --force-fast-kern-format
  ******************************************************************************/
 
 #ifdef LV_LVGL_H_INCLUDE_SIMPLE

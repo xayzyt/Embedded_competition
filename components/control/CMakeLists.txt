@@ -1,12 +1,12 @@
 idf_component_register(
     SRCS
         "app_ctrl.c"
-        "app_ctrl_proto.c"
-        "app_ctrl_text.c"
+        "private/app_ctrl_proto.c"
+        "private/app_ctrl_text.c"
         "app_dock_judge.c"
         "app_task.c"
         "app_cloud.c"
-        "app_cloud_cmd.c"
+        "private/app_cloud_cmd.c"
         "app_ch32_link.c"
     INCLUDE_DIRS "."
     PRIV_INCLUDE_DIRS "private"

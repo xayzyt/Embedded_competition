@@ -1,7 +1,13 @@
+/*
+ * LVGL 中文字体数据文件 - 启动加载页使用 (20px, OPPO Sans 4.0)。
+ * 由 lvgl 字体转换工具自动生成，请勿手动编辑。
+ *
+ * Size: 20 px, Bpp: 4
+ */
 /*******************************************************************************
  * Size: 20 px
  * Bpp: 4
- * Opts: --no-compress --no-prefilter --bpp 4 --size 20 --font components/vision_ui/OPPO Sans 4.0.ttf -r 0x20-0x7f --symbols 天锚系统正在启动显示屏就绪通信准备视觉模块加载对接判定任务状态无人机连云端控制器抓图型摄像头未帧等待号开预览流地线引力队第九届（）全国大学生嵌入式芯片与设计竞赛取货已接断完成基于双协同的低空驳微港侧鉴权闭环 --format lvgl -o components/vision_ui/font_loading_cn.c --force-fast-kern-format
+ * Opts: --no-compress --no-prefilter --bpp 4 --size 20 --font components/vision_ui/OPPO Sans 4.0.ttf -r 0x20-0x7f --symbols ... --format lvgl -o components/vision_ui/font_loading_cn.c --force-fast-kern-format
  ******************************************************************************/
 
 #include "lvgl.h"

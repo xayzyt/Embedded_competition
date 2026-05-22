@@ -1,7 +1,13 @@
+/*
+ * LVGL 英文字体数据文件 - 主界面数字时钟使用 (40px, Montserrat Medium)。
+ * 由 lvgl 字体转换工具自动生成，请勿手动编辑。
+ *
+ * Size: 40 px, Bpp: 4
+ */
 /*******************************************************************************
  * Size: 40 px
  * Bpp: 4
- * Opts: --no-compress --no-prefilter --bpp 4 --size 40 --font managed_components/lvgl__lvgl/scripts/built_in_font/Montserrat-Medium.ttf -r 0x20-0x7f --format lvgl -o components/vision_ui/font_title_en.c --force-fast-kern-format
+ * Opts: --no-compress --no-prefilter --bpp 4 --size 40 --font .../Montserrat-Medium.ttf -r 0x20-0x7f --format lvgl -o components/vision_ui/font_title_en.c --force-fast-kern-format
  ******************************************************************************/
 
 #include "lvgl.h"
