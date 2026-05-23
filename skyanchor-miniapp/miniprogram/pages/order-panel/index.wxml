@@ -52,7 +52,7 @@
         wx:if="{{!isReceiverView}}"
         class="primary-btn"
         loading="{{actionPending && !loading}}"
-        disabled="{{loading || actionPending || order.primary_action_disabled}}"
+        disabled="{{loading || actionPending || order.primary_action_disabled || (serviceWeatherBlocked && order.primary_action == 'start')}}"
         bindtap="handlePrimaryAction"
       >
         {{order.primary_action_text}}

@@ -184,6 +184,11 @@ page {
   color: #b91c1c;
 }
 
+.service-banner.status-weather-blocked {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
 .service-banner.status-checking {
   background: #e0f2fe;
   color: #0369a1;

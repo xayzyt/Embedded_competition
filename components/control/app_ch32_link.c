@@ -90,6 +90,7 @@ static app_ch32_proto_cmd_t app_ch32_char_cmd_to_proto(char cmd)
     case 'W': return APP_CH32_PROTO_CMD_READ_WEIGHT;
     case 'S': return APP_CH32_PROTO_CMD_ABORT;
     case 'D': return APP_CH32_PROTO_CMD_OPEN_INNER_DOOR;
+    case 'C': return APP_CH32_PROTO_CMD_SAFE_CLOSE;
     default:  return APP_CH32_PROTO_CMD_NONE;
     }
 }

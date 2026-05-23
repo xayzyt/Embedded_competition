@@ -23,7 +23,8 @@ const MQTT_CONFIG = {
   password: 'qq134679',
   topicPrefix: 'skyanchor',
   connectTimeoutMs: 2500,
-  stateWaitTimeoutMs: 1500,
+  stateWaitTimeoutMs: 3500,
+  ackWaitTimeoutMs: 3500,
   qos: 1
 };
 const STATUS_INDEX = {
@@ -127,6 +128,10 @@ function buildStateTopic(deviceName) {
   return `${MQTT_CONFIG.topicPrefix}/${normalizeDeviceName(deviceName)}/state`;
 }
 
+function buildAckTopic(deviceName) {
+  return `${MQTT_CONFIG.topicPrefix}/${normalizeDeviceName(deviceName)}/ack`;
+}
+
 function buildMqttClientId(prefix) {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
 }
@@ -198,28 +203,129 @@ function connectMqttClient(prefix) {
   });
 }
 
-async function publishMqttCommand(deviceName, payload) {
+function isAckForCommand(ack, payload) {
+  if (!ack || !payload) {
+    return false;
+  }
+
+  const ackCmd = String(ack.cmd || '').trim();
+  const payloadCmd = String(payload.cmd || '').trim();
+  if (ackCmd && payloadCmd && ackCmd !== payloadCmd) {
+    return false;
+  }
+
+  const ackRequestId = String(ack.request_id || '').trim();
+  const payloadRequestId = String(payload.request_id || payload.order_id || '').trim();
+  if (payloadRequestId && ackRequestId !== payloadRequestId) {
+    return false;
+  }
+
+  return true;
+}
+
+async function publishMqttCommand(deviceName, payload, options = {}) {
   const client = await connectMqttClient('skyanchor-cloud-pub');
-  const topic = buildCommandTopic(deviceName);
+  const cmdTopic = buildCommandTopic(deviceName);
+  const ackTopic = buildAckTopic(deviceName);
+  const waitAck = !!options.waitAck;
+  const ackTimeoutMs = Number(options.ackTimeoutMs || MQTT_CONFIG.ackWaitTimeoutMs);
 
   try {
-    await new Promise((resolve, reject) => {
-      client.publish(
-        topic,
-        JSON.stringify(payload),
-        { qos: MQTT_CONFIG.qos },
-        (error) => {
-          if (error) {
-            reject(error);
-            return;
-          }
-          resolve(true);
+    return await new Promise((resolve, reject) => {
+      let settled = false;
+      let timer = null;
+
+      const finish = (error, value) => {
+        if (settled) {
+          return;
         }
-      );
+        settled = true;
+        if (timer) {
+          clearTimeout(timer);
+        }
+        client.removeListener('message', onMessage);
+        client.removeListener('error', onError);
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve(value);
+      };
+
+      const publishCommand = () => {
+        client.publish(
+          cmdTopic,
+          JSON.stringify(payload),
+          { qos: MQTT_CONFIG.qos },
+          (error) => {
+            if (error) {
+              finish(error);
+              return;
+            }
+            if (!waitAck) {
+              finish(null, true);
+            }
+          }
+        );
+      };
+
+      const onMessage = (receivedTopic, payloadBuffer) => {
+        if (!waitAck || receivedTopic !== ackTopic) {
+          return;
+        }
+
+        try {
+          const ack = JSON.parse(payloadBuffer.toString('utf8'));
+          if (isAckForCommand(ack, payload)) {
+            finish(null, ack);
+          }
+        } catch (error) {
+          console.warn('[skyanchorService] MQTT ACK 解析失败', {
+            topic: receivedTopic,
+            message: error && error.message
+          });
+        }
+      };
+
+      const onError = (error) => finish(error);
+
+      if (!waitAck) {
+        publishCommand();
+        return;
+      }
+
+      timer = setTimeout(() => {
+        finish(new AppError('未收到板端确认，配送命令未完成', 'MQTT_ACK_TIMEOUT'));
+      }, ackTimeoutMs);
+
+      client.on('message', onMessage);
+      client.once('error', onError);
+      client.subscribe(ackTopic, { qos: MQTT_CONFIG.qos }, (error) => {
+        if (error) {
+          finish(error);
+          return;
+        }
+        publishCommand();
+      });
     });
   } finally {
     closeMqttClient(client);
   }
+}
+
+function assertDeviceAckAccepted(ack) {
+  const code = Number(ack && ack.code);
+  const msg = String(ack && ack.msg || '').trim();
+
+  if (code === 0) {
+    return;
+  }
+
+  if (msg === 'weather_blocked') {
+    throw new AppError('恶劣天气管制中，暂时不能开始配送', 'WEATHER_BLOCKED');
+  }
+
+  throw new AppError(msg || '板端拒绝执行配送命令', 'DEVICE_REJECTED');
 }
 
 async function probeMqttReady() {
@@ -294,6 +400,40 @@ async function fetchLatestDeviceState(deviceName) {
   } finally {
     closeMqttClient(client);
   }
+}
+
+function isDeviceWeatherBlocked(payload) {
+  if (!payload) {
+    return false;
+  }
+
+  const weatherBlocked = Number(payload.weather_blocked || 0) === 1;
+  const acceptOrdersValue = payload.accept_orders;
+  const acceptOrdersBlocked = acceptOrdersValue !== undefined && Number(acceptOrdersValue) === 0;
+  const weatherMode = String(payload.weather_mode || '').trim();
+  return weatherBlocked || acceptOrdersBlocked || weatherMode === 'cloud_guard' || weatherMode === 'emergency';
+}
+
+async function fetchDefaultDeviceStateForWeather() {
+  try {
+    return await fetchLatestDeviceState(DEFAULT_DEVICE_NAME);
+  } catch (error) {
+    console.warn('[skyanchorService] 读取天气管制状态失败', {
+      message: error && error.message
+    });
+    return null;
+  }
+}
+
+async function assertOrdersAccepted() {
+  const deviceState = await fetchDefaultDeviceStateForWeather();
+  if (!deviceState) {
+    throw new AppError('未收到板端状态，暂时不能下单和配送', 'DEVICE_STATE_UNAVAILABLE');
+  }
+  if (isDeviceWeatherBlocked(deviceState)) {
+    throw new AppError('恶劣天气，暂停下单和配送', 'WEATHER_BLOCKED');
+  }
+  return deviceState;
 }
 
 function mapDeviceStateToOrderStatus(payload) {
@@ -515,11 +655,19 @@ async function ensureCollectionsReady() {
 
 async function handleHealth() {
   const mqttReady = await probeMqttReady();
+  const deviceState = mqttReady ? await fetchDefaultDeviceStateForWeather() : null;
+  const weatherBlocked = isDeviceWeatherBlocked(deviceState);
+  const acceptOrders = !!deviceState && !weatherBlocked;
 
   return {
     ok: true,
     app: 'SkyAnchor Cloud MQTT Service',
     mqtt_started: mqttReady,
+    weather_blocked: weatherBlocked,
+    accept_orders: acceptOrders,
+    device_state_ready: !!deviceState,
+    weather_mode: String(deviceState && deviceState.weather_mode || 'normal'),
+    device_state: String(deviceState && deviceState.state || ''),
     default_device: DEFAULT_DEVICE_NAME,
     device_candidates: DEVICE_CANDIDATES,
     mode: 'cloud-mqtt',
@@ -530,6 +678,8 @@ async function handleHealth() {
 
 async function handleCreateOrder(payload) {
   const receiverId = ensureString(payload.receiver_id, 'receiver_id');
+  await assertOrdersAccepted();
+
   const senderId = String(payload.sender_id || '').trim() || receiverId;
   const targetId = normalizeTargetId(payload.target_id);
   const orderId = buildOrderId();
@@ -656,15 +806,21 @@ async function handleStartOrder(payload) {
     throw new AppError('订单还没有分配有效的 AprilTag');
   }
 
+  await assertOrdersAccepted();
+
   try {
     // 这里改成真实发 MQTT 开始命令，不再只在数据库里假装已发送。
-    await publishMqttCommand(deviceName, {
+    const ack = await publishMqttCommand(deviceName, {
       cmd: 'start_task',
       order_id: order.order_id,
       target_id: Number(order.target_id),
       request_id: String(order.request_id || order.order_id)
-    });
+    }, { waitAck: true });
+    assertDeviceAckAccepted(ack);
   } catch (error) {
+    if (error instanceof AppError) {
+      throw error;
+    }
     console.error('[skyanchorService] MQTT start_task 发送失败', {
       order_id: order.order_id,
       device_name: deviceName,

@@ -109,6 +109,7 @@ static lv_obj_t *s_auth = NULL;
 static lv_obj_t *s_cap_btn = NULL;
 static lv_obj_t *s_stop_btn = NULL;
 static lv_obj_t *s_mode_btn = NULL;
+static lv_obj_t *s_weather_guard_btn = NULL;
 static lv_obj_t *s_mode_label = NULL;
 static lv_obj_t *s_capture = NULL;
 static lv_obj_t *s_loading_layer = NULL;
@@ -141,6 +142,7 @@ static lv_timer_t *s_main_clock_timer = NULL;
 static lv_timer_t *s_main_task_blink_timer = NULL;
 static app_ui_pickup_cb_t s_pickup_cb = NULL;
 static app_ui_weather_sim_cb_t s_weather_sim_cb = NULL;
+static app_ui_weather_emergency_cb_t s_weather_emergency_cb = NULL;
 static bool s_clock_tz_set = false;
 static bool s_main_weather_simulated = false;
 static bool s_main_task_blink_enabled = false;
@@ -153,6 +155,7 @@ static bool s_main_task_weather_blocked = false;
 static bool s_main_pickup_phase_active = false;
 static char s_main_weather_text[96] = "同步中";
 static int s_main_weather_code = 99;
+static void app_ui_weather_emergency_event_cb(lv_event_t *e);
 static bool s_have_last_box = false;
 static int32_t s_last_box_x = 0;
 static int32_t s_last_box_y = 0;
@@ -886,6 +889,15 @@ bool app_ui_create(void)
         lv_obj_set_style_text_align(s_capture, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_align(s_capture, LV_ALIGN_RIGHT_MID, -14, 166);
     }
+    if (s_weather_guard_btn == NULL)
+    {
+        s_weather_guard_btn = app_ui_button_create(scr);
+        app_ui_style_capture_button(s_weather_guard_btn, lv_color_hex(0xB91C1C));
+        lv_obj_t *weather_label = app_ui_add_button_label(s_weather_guard_btn, "天气");
+        lv_obj_set_style_text_font(weather_label, &font_main_title_cn, 0);
+        lv_obj_add_event_cb(s_weather_guard_btn, app_ui_weather_emergency_event_cb, LV_EVENT_CLICKED, NULL);
+        lv_obj_align(s_weather_guard_btn, LV_ALIGN_RIGHT_MID, -14, 218);
+    }
     if (s_status) lv_obj_move_foreground(s_status);
     if (s_vision) lv_obj_move_foreground(s_vision);
     if (s_coord) lv_obj_move_foreground(s_coord);
@@ -896,6 +908,7 @@ bool app_ui_create(void)
     if (s_cap_btn) lv_obj_move_foreground(s_cap_btn);
     if (s_stop_btn) lv_obj_move_foreground(s_stop_btn);
     if (s_capture) lv_obj_move_foreground(s_capture);
+    if (s_weather_guard_btn) lv_obj_move_foreground(s_weather_guard_btn);
 
     bsp_display_unlock();
     return true;
@@ -1044,6 +1057,11 @@ void app_ui_set_weather_sim_callback(app_ui_weather_sim_cb_t cb)
     s_weather_sim_cb = cb;
 }
 
+void app_ui_set_weather_emergency_callback(app_ui_weather_emergency_cb_t cb)
+{
+    s_weather_emergency_cb = cb;
+}
+
 static void app_ui_pickup_event_cb(lv_event_t *e)
 {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED)
@@ -1065,6 +1083,18 @@ static void app_ui_weather_sim_event_cb(lv_event_t *e)
     if (s_weather_sim_cb != NULL)
     {
         s_weather_sim_cb();
+    }
+}
+
+static void app_ui_weather_emergency_event_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED)
+    {
+        return;
+    }
+    if (s_weather_emergency_cb != NULL)
+    {
+        s_weather_emergency_cb();
     }
 }
 
@@ -1239,7 +1269,7 @@ static void app_ui_update_main_task_badge_unlocked(void)
 
     if (s_main_task_weather_blocked)
     {
-        text = "禁止接驳";
+        text = "恶劣天气 禁止接驳";
         color = danger;
     }
     else if (s_main_pickup_phase_active)

@@ -172,6 +172,8 @@ static void action_end_to_ready(void)
     s_action_rsp_valid = 0U;
 }
 
+static uint8_t close_to_safe_locked(uint8_t emit_safe_event);
+
 /* -------------------- 称重 -------------------- */
 static int32_t get_weight_avg(uint8_t times)
 {
@@ -222,6 +224,22 @@ static uint8_t pump_runtime_packets(void)
                 send_proto_state_ctx(ESP32_COMM_PROTO_TYPE_STATUS,
                                      &(ch32_rsp_ctx_t){pkt.proto_cmd, pkt.proto_seq},
                                      ESP32_COMM_STAGE_IDLE, ESP32_COMM_ERR_NONE);
+                return 1U;
+
+            case ESP32_COMM_PROTO_CMD_SAFE_CLOSE:
+                ESP32_Comm_SendProtoAck(pkt.proto_cmd, pkt.proto_seq);
+                stop_all_action();
+                s_action_rsp.proto_cmd = pkt.proto_cmd;
+                s_action_rsp.proto_seq = pkt.proto_seq;
+                s_action_rsp_valid = 1U;
+                s_action_busy = 1U;
+                s_locked = 0U;
+                s_last_error = ESP32_COMM_ERR_NONE;
+                if((close_to_safe_locked(1U) == 0U) && (s_current_stage != ESP32_COMM_STAGE_IDLE))
+                {
+                    send_fault(ESP32_COMM_ERR_SAFETY);
+                }
+                action_end_to_ready();
                 return 1U;
 
             case ESP32_COMM_PROTO_CMD_QUERY_STATUS:
@@ -438,6 +456,7 @@ static void handle_proto_command(const ESP32_Comm_Packet_t *pkt)
             case ESP32_COMM_PROTO_CMD_QUERY_STATUS:
             case ESP32_COMM_PROTO_CMD_READ_WEIGHT:
             case ESP32_COMM_PROTO_CMD_ABORT:
+            case ESP32_COMM_PROTO_CMD_SAFE_CLOSE:
                 break;
             default:
                 ESP32_Comm_SendProtoNack(pkt->proto_cmd, pkt->proto_seq, ESP32_COMM_ERR_BUSY);
@@ -486,6 +505,16 @@ static void handle_proto_command(const ESP32_Comm_Packet_t *pkt)
             s_last_error = ESP32_COMM_ERR_NONE;
             s_locked = 0U;
             send_stage(ESP32_COMM_STAGE_IDLE, ESP32_COMM_ERR_NONE);
+            break;
+
+        case ESP32_COMM_PROTO_CMD_SAFE_CLOSE:
+            action_begin();
+            ESP32_Comm_SendProtoAck(pkt->proto_cmd, pkt->proto_seq);
+            if((close_to_safe_locked(1U) == 0U) && (s_current_stage != ESP32_COMM_STAGE_IDLE))
+            {
+                send_fault(ESP32_COMM_ERR_SAFETY);
+            }
+            action_end_to_ready();
             break;
 
         case ESP32_COMM_PROTO_CMD_RESET_FAULT:

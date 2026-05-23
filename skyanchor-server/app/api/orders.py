@@ -19,6 +19,7 @@ from app.services.order_status_clean import set_order_status
 router = APIRouter(prefix="/api/orders", tags=["orders"])
 UNASSIGNED_TARGET_ID = -1
 VALID_TARGET_IDS = {0, 1}
+WEATHER_BLOCKED_DETAIL = "恶劣天气，暂停下单和配送"
 
 
 class CreateOrderRequest(BaseModel):
@@ -43,8 +44,20 @@ def build_order_id() -> str:
     return f"ORD-{stamp}-{suffix}"
 
 
+def ensure_weather_allows_orders(device_name: str | None = None) -> None:
+    settings = get_settings()
+    target_device = str(device_name or settings.mqtt_default_device or "").strip()
+    if not target_device:
+        return
+    if mqtt_bridge.is_ready and mqtt_bridge.latest_device_state(target_device) is None:
+        raise HTTPException(status_code=409, detail="未收到板端状态，暂时不能下单和配送")
+    if mqtt_bridge.is_weather_blocked(target_device):
+        raise HTTPException(status_code=409, detail=WEATHER_BLOCKED_DETAIL)
+
+
 @router.post("")
 def create_order_endpoint(body: CreateOrderRequest) -> dict:
+    ensure_weather_allows_orders()
     target_id = body.target_id if body.target_id is not None else UNASSIGNED_TARGET_ID
 
     order = create_order(
@@ -112,6 +125,8 @@ def start_order_endpoint(order_id: str) -> StartOrderResponse:
         raise HTTPException(status_code=400, detail="Order has no assigned device")
     if order["target_id"] not in VALID_TARGET_IDS:
         raise HTTPException(status_code=400, detail="Order has no assigned AprilTag")
+
+    ensure_weather_allows_orders(order["device_name"])
 
     try:
         mqtt_bridge.publish_command(

@@ -152,6 +152,15 @@ Page({
       return;
     }
 
+    if (serviceStatus.serviceWeatherBlocked) {
+      wx.showModal({
+        title: '恶劣天气管制',
+        content: serviceStatus.serviceMessage,
+        showCancel: false
+      });
+      return;
+    }
+
     this.setData({ creating: true });
     wx.showLoading({ title: '提交订单中' });
 

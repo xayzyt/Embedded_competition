@@ -89,3 +89,6 @@ void app_ui_set_pickup_callback(app_ui_pickup_cb_t cb);
 /* 注册"模拟恶劣天气"按钮回调。 */
 typedef void (*app_ui_weather_sim_cb_t)(void);
 void app_ui_set_weather_sim_callback(app_ui_weather_sim_cb_t cb);
+
+typedef void (*app_ui_weather_emergency_cb_t)(void);
+void app_ui_set_weather_emergency_callback(app_ui_weather_emergency_cb_t cb);

@@ -21,6 +21,7 @@ class MQTTBridge:
         self._started = False
         self._connected = False
         self._lock = threading.Lock()
+        self._device_states: dict[str, dict[str, Any]] = {}
 
     @property
     def is_started(self) -> bool:
@@ -85,6 +86,23 @@ class MQTTBridge:
         result.wait_for_publish()
         if result.rc != mqtt.MQTT_ERR_SUCCESS:
             raise RuntimeError(f"MQTT publish failed: rc={result.rc}")
+
+    def latest_device_state(self, device_name: str) -> dict[str, Any] | None:
+        with self._lock:
+            state = self._device_states.get(str(device_name or "").strip())
+            return dict(state) if state is not None else None
+
+    def is_weather_blocked(self, device_name: str) -> bool:
+        state = self.latest_device_state(device_name)
+        if not state:
+            return False
+
+        weather_mode = str(state.get("weather_mode", "")).strip()
+        return (
+            int(state.get("weather_blocked", 0) or 0) == 1
+            or int(state.get("accept_orders", 1) or 0) == 0
+            or weather_mode in {"cloud_guard", "emergency"}
+        )
 
     def _on_connect(
         self,
@@ -182,6 +200,9 @@ class MQTTBridge:
             set_order_status(order["order_id"], "cancelled", note=msg or "cancelled")
 
     def _handle_state(self, device_name: str, payload: dict[str, Any]) -> None:
+        with self._lock:
+            self._device_states[device_name] = dict(payload)
+
         order_id = str(payload.get("order_id", "")).strip()
         raw_target_id = payload.get("target_id", None)
         try:

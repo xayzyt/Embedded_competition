@@ -18,7 +18,7 @@
 
     <view class="button-row compact">
       <button class="ghost-btn" bindtap="saveReceiver">保存信息</button>
-      <button class="primary-btn" loading="{{creating}}" bindtap="openCreateOrder">我要下单</button>
+      <button class="primary-btn" loading="{{creating}}" disabled="{{serviceWeatherBlocked}}" bindtap="openCreateOrder">我要下单</button>
       <button class="ghost-btn" loading="{{loading}}" bindtap="fetchOrders">刷新订单</button>
     </view>
   </view>

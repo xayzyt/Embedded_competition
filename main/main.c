@@ -33,6 +33,10 @@ static const char *TAG = "main";
 #define APP_MAX_DISTANCE_MM          (700)
 #define APP_CLOUD_START_TASK_STACK   (8 * 1024)
 #define APP_CLOUD_START_TASK_PRIO    4
+#define APP_WEATHER_EMERGENCY_TASK_STACK (4 * 1024)
+#define APP_WEATHER_EMERGENCY_TASK_PRIO  5
+
+static TaskHandle_t s_weather_emergency_task = NULL;
 
 /* -------------------------------------------------------------------------- */
 /* 启动步骤                                                                  */
@@ -318,6 +322,21 @@ static void app_on_task_event(app_task_event_t event,
 
 static void app_pickup_cb(void)
 {
+    if (app_cloud_is_weather_docking_blocked())
+    {
+        app_ui_main_screen_show_pickup(false);
+        app_ui_main_screen_set_task_text("weather blocked");
+        return;
+    }
+
+    app_task_snapshot_t snap = {0};
+    if (!app_task_peek_snapshot(&snap) || snap.state != APP_TASK_STATE_COMPLETED)
+    {
+        app_ui_main_screen_show_pickup(false);
+        app_ui_main_screen_set_task_text("pickup failed / retry");
+        return;
+    }
+
     esp_err_t ret = app_ch32_link_send_cmd_and_wait_ack('D', 2000);
     if (ret != ESP_OK)
     {
@@ -334,6 +353,39 @@ static void app_pickup_cb(void)
 static void app_weather_sim_cb(void)
 {
     app_cloud_set_weather_simulated(!app_cloud_is_weather_simulated());
+}
+
+static void app_weather_emergency_task(void *arg)
+{
+    (void)arg;
+    app_cloud_trigger_weather_emergency();
+    s_weather_emergency_task = NULL;
+    vTaskDelete(NULL);
+}
+
+static void app_weather_emergency_cb(void)
+{
+    app_camera_pause();
+    app_ui_show_main_screen();
+    app_ui_main_screen_show_pickup(false);
+    app_ui_main_screen_set_task_text("weather blocked");
+
+    if (s_weather_emergency_task != NULL)
+    {
+        return;
+    }
+
+    BaseType_t ok = xTaskCreate(app_weather_emergency_task,
+        "weather_guard",
+        APP_WEATHER_EMERGENCY_TASK_STACK,
+        NULL,
+        APP_WEATHER_EMERGENCY_TASK_PRIO,
+        &s_weather_emergency_task);
+    if (ok != pdPASS)
+    {
+        s_weather_emergency_task = NULL;
+        app_cloud_trigger_weather_emergency();
+    }
 }
 
 static void app_main_screen_status_task(void *arg)
@@ -369,6 +421,7 @@ void app_main(void)
 
     app_ui_set_pickup_callback(app_pickup_cb);
     app_ui_set_weather_sim_callback(app_weather_sim_cb);
+    app_ui_set_weather_emergency_callback(app_weather_emergency_cb);
     app_ui_show_main_screen();
     app_ui_hide_loading();
     app_show_ready_status(&dock_cfg);

@@ -7,6 +7,9 @@ function defaultServiceStatus() {
     serviceOnline: false,
     serviceChecking: false,
     serviceMqttReady: false,
+    serviceWeatherBlocked: false,
+    serviceAcceptOrders: true,
+    serviceWeatherMode: 'normal',
     serviceState: 'checking',
     serviceMessage: DEFAULT_MESSAGE
   };
@@ -23,6 +26,13 @@ function buildCheckingStatus(previousStatus) {
 }
 
 function buildReadyMessage(payload) {
+  if (payload && payload.weather_blocked) {
+    return '恶劣天气管制中，暂时不能下单或开始配送。恢复天气后可重新操作。';
+  }
+  if (payload && payload.accept_orders === false) {
+    return '板端状态未同步，暂时不能下单或开始配送。请确认设备在线后刷新。';
+  }
+
   const mode = String(payload && payload.mode || '').trim();
 
   // 这里按健康检查结果区分“真实 MQTT 闭环”与“演示模式”，避免页面继续误报为演示态。
@@ -39,14 +49,23 @@ function buildBackendOnlyMessage() {
 
 function buildServiceStatusFromHealth(payload) {
   const mqttReady = !!(payload && payload.mqtt_started);
+  const weatherBlocked = !!(payload && payload.weather_blocked);
+  const acceptOrders = payload && payload.accept_orders !== undefined
+    ? Number(payload.accept_orders) !== 0
+    : !weatherBlocked;
+  const ordersBlocked = weatherBlocked || !acceptOrders;
 
   return {
     serviceChecked: true,
     serviceOnline: true,
     serviceChecking: false,
     serviceMqttReady: mqttReady,
-    serviceState: mqttReady ? 'ready' : 'backend-only',
-    serviceMessage: mqttReady ? buildReadyMessage(payload) : buildBackendOnlyMessage()
+    serviceWeatherBlocked: ordersBlocked,
+    serviceAcceptOrders: acceptOrders,
+    serviceWeatherMode: String(payload && payload.weather_mode || 'normal'),
+    serviceState: ordersBlocked ? 'weather-blocked' : (mqttReady ? 'ready' : 'backend-only'),
+    serviceMessage: ordersBlocked ? buildReadyMessage(payload) :
+      (mqttReady ? buildReadyMessage(payload) : buildBackendOnlyMessage())
   };
 }
 

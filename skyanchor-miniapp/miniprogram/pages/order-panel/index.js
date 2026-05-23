@@ -238,6 +238,15 @@ Page({
       return false;
     }
 
+    if (serviceStatus.serviceWeatherBlocked) {
+      wx.showModal({
+        title: '恶劣天气管制',
+        content: serviceStatus.serviceMessage,
+        showCancel: false
+      });
+      return false;
+    }
+
     return true;
   },
 

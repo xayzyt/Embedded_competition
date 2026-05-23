@@ -70,6 +70,7 @@ typedef enum {
     APP_CH32_PROTO_CMD_ABORT         = 0x09,
     APP_CH32_PROTO_CMD_RESET_FAULT   = 0x0A,
     APP_CH32_PROTO_CMD_OPEN_INNER_DOOR = 0x0B,
+    APP_CH32_PROTO_CMD_SAFE_CLOSE    = 0x0C,
 } app_ch32_proto_cmd_t;
 
 /* 阶段 */

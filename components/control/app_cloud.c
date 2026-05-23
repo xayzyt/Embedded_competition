@@ -77,6 +77,12 @@ static const char *TAG = "app_cloud";
 #define APP_CLOUD_WEATHER_TOGGLE_DEBOUNCE_MS (800)
 #define APP_CLOUD_WEATHER_RESTORE_REFETCH_MIN_MS (30 * 1000)
 
+typedef enum {
+    APP_CLOUD_WEATHER_MODE_NORMAL = 0,
+    APP_CLOUD_WEATHER_MODE_CLOUD_GUARD,
+    APP_CLOUD_WEATHER_MODE_EMERGENCY,
+} app_cloud_weather_mode_t;
+
 /* -------------------------------------------------------------------------- */
 /* 运行状态                                                               */
 /* -------------------------------------------------------------------------- */
@@ -105,6 +111,7 @@ typedef struct {
     char topic_state[APP_CLOUD_TOPIC_BUF_LEN];        /* 发布任务状态的 topic。 */
     char cached_weather_text[APP_CLOUD_WEATHER_TEXT_LEN]; /* 最近一次正常天气文本。 */
     int cached_weather_code;                          /* 最近一次正常天气 code。 */
+    app_cloud_weather_mode_t weather_mode;
 } app_cloud_runtime_t;
 static app_cloud_runtime_t s_cloud = {0};
 static TaskHandle_t s_cloud_task = NULL;
@@ -119,6 +126,7 @@ static esp_err_t app_cloud_publish_raw(const char *topic,
     const char *payload,
     int qos,
     int retain);
+static void app_cloud_publish_current_state(void);
 
 typedef struct {
     char *buf;
@@ -150,6 +158,32 @@ static bool app_cloud_json_add_string(cJSON *root, const char *key, const char *
 static bool app_cloud_json_add_number(cJSON *root, const char *key, double value)
 {
     return cJSON_AddNumberToObject(root, key, value) != NULL;
+}
+
+static const char *app_cloud_weather_mode_text(app_cloud_weather_mode_t mode)
+{
+    switch (mode) {
+    case APP_CLOUD_WEATHER_MODE_CLOUD_GUARD:
+        return "cloud_guard";
+    case APP_CLOUD_WEATHER_MODE_EMERGENCY:
+        return "emergency";
+    case APP_CLOUD_WEATHER_MODE_NORMAL:
+    default:
+        return "normal";
+    }
+}
+
+static bool app_cloud_snapshot_is_active_task(const app_task_snapshot_t *snap)
+{
+    if (snap == NULL)
+    {
+        return false;
+    }
+
+    return snap->active ||
+        snap->state == APP_TASK_STATE_WAIT_APPROACH ||
+        snap->state == APP_TASK_STATE_AUTH_PASSED ||
+        snap->state == APP_TASK_STATE_DOCKING;
 }
 
 static esp_err_t app_cloud_publish_json(const char *topic, cJSON *root, int retain)
@@ -458,6 +492,28 @@ static void app_cloud_show_weather_fallback(void)
         NULL);
 }
 
+static void app_cloud_send_weather_protection(void)
+{
+    if (!app_ch32_link_is_ready())
+    {
+        ESP_LOGW(TAG, "weather protection skipped: CH32 not ready");
+        return;
+    }
+
+    esp_err_t ret = app_ch32_link_send_cmd_and_wait_ack('C', 3000);
+    if (ret == ESP_OK)
+    {
+        return;
+    }
+
+    ESP_LOGW(TAG, "SAFE_CLOSE failed, fallback abort: %s", esp_err_to_name(ret));
+    ret = app_ch32_link_send_cmd_and_wait_ack('S', APP_CLOUD_ABORT_WAIT_MS);
+    if (ret != ESP_OK)
+    {
+        ESP_LOGW(TAG, "abort dock for severe weather failed: %s", esp_err_to_name(ret));
+    }
+}
+
 static void app_cloud_apply_weather_docking_policy(bool simulated)
 {
     s_cloud.weather_docking_blocked = simulated;
@@ -474,9 +530,25 @@ static void app_cloud_apply_weather_docking_policy(bool simulated)
     }
     s_cloud.weather_docking_policy_applied = true;
 
-    app_task_cancel("blocked by simulated severe weather");
+    app_task_snapshot_t snap = {0};
+    const bool active_task = app_task_peek_snapshot(&snap) && app_cloud_snapshot_is_active_task(&snap);
+    if (active_task)
+    {
+        if (s_cloud.weather_mode == APP_CLOUD_WEATHER_MODE_EMERGENCY)
+        {
+            app_task_mark_fault("恶劣天气，已终止接驳保护");
+        }
+        else
+        {
+            app_task_cancel("blocked by simulated severe weather");
+        }
+    }
 
-    if (app_ch32_link_is_ready())
+    if (s_cloud.weather_mode == APP_CLOUD_WEATHER_MODE_EMERGENCY)
+    {
+        app_cloud_send_weather_protection();
+    }
+    else if (active_task && app_ch32_link_is_ready())
     {
         esp_err_t ret = app_ch32_link_send_cmd_and_wait_ack('S', APP_CLOUD_ABORT_WAIT_MS);
         if (ret != ESP_OK)
@@ -517,6 +589,7 @@ static void app_cloud_show_restored_weather_ui(bool update_task_text)
 static void app_cloud_show_restored_weather(bool update_task_text)
 {
     app_cloud_apply_weather_docking_policy(false);
+    s_cloud.weather_mode = APP_CLOUD_WEATHER_MODE_NORMAL;
     app_cloud_show_restored_weather_ui(update_task_text);
 }
 
@@ -533,6 +606,7 @@ static esp_err_t app_cloud_fetch_weather_once(void)
         ESP_LOGW(TAG, "CONFIG_SKY_WEATHER_API_KEY is empty, show local weather fallback");
         app_cloud_show_weather_fallback();
         s_cloud.weather_docking_blocked = false;
+        s_cloud.weather_mode = APP_CLOUD_WEATHER_MODE_NORMAL;
         return ESP_OK;
     }
 
@@ -605,6 +679,7 @@ static esp_err_t app_cloud_fetch_weather_once(void)
 
     app_cloud_cache_weather(weather_text, weather_code);
     s_cloud.weather_docking_blocked = false;
+    s_cloud.weather_mode = APP_CLOUD_WEATHER_MODE_NORMAL;
     app_ui_main_screen_apply_weather_state(weather_text, weather_code, false, NULL);
     ESP_LOGI(TAG, "weather updated: %s code=%d", weather_text, weather_code);
     return ESP_OK;
@@ -704,6 +779,7 @@ void app_cloud_set_weather_simulated(bool simulated)
         {
             app_cloud_show_restored_weather_ui(false);
         }
+        app_cloud_publish_current_state();
         app_cloud_notify_weather_task();
         return;
     }
@@ -715,6 +791,7 @@ void app_cloud_set_weather_simulated(bool simulated)
     if (simulated)
     {
         s_cloud.weather_docking_blocked = true;
+        s_cloud.weather_mode = APP_CLOUD_WEATHER_MODE_CLOUD_GUARD;
         s_cloud.weather_restore_pending = false;
         app_cloud_show_simulated_weather_ui();
         ESP_LOGW(TAG, "simulate severe weather requested");
@@ -723,11 +800,28 @@ void app_cloud_set_weather_simulated(bool simulated)
     {
         s_cloud.weather_docking_blocked = false;
         s_cloud.weather_docking_policy_applied = false;
+        s_cloud.weather_mode = APP_CLOUD_WEATHER_MODE_NORMAL;
         s_cloud.weather_restore_pending = restore_pending;
         app_cloud_show_restored_weather_ui(true);
         ESP_LOGI(TAG, "restore weather requested");
     }
 
+    app_cloud_publish_current_state();
+    app_cloud_notify_weather_task();
+}
+
+void app_cloud_trigger_weather_emergency(void)
+{
+    s_cloud.weather_simulated = true;
+    s_cloud.weather_docking_blocked = true;
+    s_cloud.weather_docking_policy_applied = false;
+    s_cloud.weather_restore_pending = false;
+    s_cloud.weather_mode = APP_CLOUD_WEATHER_MODE_EMERGENCY;
+
+    app_cloud_show_simulated_weather_ui();
+    app_cloud_publish_current_state();
+    app_cloud_apply_weather_docking_policy(true);
+    app_cloud_publish_current_state();
     app_cloud_notify_weather_task();
 }
 
@@ -865,6 +959,10 @@ static void app_cloud_publish_task_snapshot_internal(const app_task_snapshot_t *
         app_cloud_json_add_number(root, "matched_tag_id", snap->matched_tag_id) &&
         app_cloud_json_add_number(root, "cargo_received", cargo_received) &&
         app_cloud_json_add_number(root, "fault", fault) &&
+        app_cloud_json_add_number(root, "weather_blocked", s_cloud.weather_docking_blocked ? 1U : 0U) &&
+        app_cloud_json_add_number(root, "weather_simulated", s_cloud.weather_simulated ? 1U : 0U) &&
+        app_cloud_json_add_number(root, "accept_orders", s_cloud.weather_docking_blocked ? 0U : 1U) &&
+        app_cloud_json_add_string(root, "weather_mode", app_cloud_weather_mode_text(s_cloud.weather_mode)) &&
         app_cloud_json_add_string(root, "source", snap->source) &&
         app_cloud_json_add_string(root, "note", snap->note);
 
@@ -873,6 +971,23 @@ static void app_cloud_publish_task_snapshot_internal(const app_task_snapshot_t *
     if (ret != ESP_OK)
     {
         ESP_LOGW(TAG, "task snapshot not sent yet: %s", esp_err_to_name(ret));
+    }
+}
+
+static void app_cloud_publish_current_state(void)
+{
+    app_task_snapshot_t snap = {0};
+    if (app_task_peek_snapshot(&snap))
+    {
+        s_cloud.last_snapshot = snap;
+        s_cloud.have_last_snapshot = true;
+        app_cloud_publish_task_snapshot_internal(&snap);
+        return;
+    }
+
+    if (s_cloud.have_last_snapshot)
+    {
+        app_cloud_publish_task_snapshot_internal(&s_cloud.last_snapshot);
     }
 }
 
@@ -983,6 +1098,15 @@ static esp_err_t app_cloud_receive_start_task(const app_cloud_cmd_t *cmd)
 
         return ESP_ERR_INVALID_ARG;
     }
+    if (s_cloud.weather_docking_blocked)
+    {
+        ESP_LOGW(TAG,
+            "cloud rx: reject start_task for weather target=%u request_id=%s",
+            (unsigned)cmd->target_id,
+            (cmd->request_id[0] != '\0') ? cmd->request_id : "-");
+        app_cloud_publish_current_state();
+        return ESP_ERR_INVALID_STATE;
+    }
     char previous_request_id[sizeof(s_cloud.current_request_id)];
     strlcpy(previous_request_id, s_cloud.current_request_id, sizeof(previous_request_id));
     strlcpy(s_cloud.current_request_id, cmd->request_id, sizeof(s_cloud.current_request_id));
@@ -1038,8 +1162,9 @@ static esp_err_t app_cloud_handle_command(const char *payload, size_t payload_le
         ret = app_cloud_receive_start_task(&cmd);
 
         (void)app_cloud_publish_ack(&cmd,
-            (ret == ESP_OK) ? 0 : -1,
-            (ret == ESP_OK) ? "accepted" : "start_failed",
+            (ret == ESP_OK) ? 0 : ((ret == ESP_ERR_INVALID_STATE && s_cloud.weather_docking_blocked) ? -3 : -1),
+            (ret == ESP_OK) ? "accepted" :
+                ((ret == ESP_ERR_INVALID_STATE && s_cloud.weather_docking_blocked) ? "weather_blocked" : "start_failed"),
             cmd.target_id);
         return ret;
     }
@@ -1268,6 +1393,8 @@ esp_err_t app_cloud_init(void)
     ESP_RETURN_ON_ERROR(app_task_register_event_callback(app_cloud_on_task_event, NULL),
         TAG,
         "register task callback failed");
+    (void)app_task_peek_snapshot(&s_cloud.last_snapshot);
+    s_cloud.have_last_snapshot = true;
     ESP_RETURN_ON_ERROR(app_cloud_init_netif_once(), TAG, "esp_netif_init failed");
     ESP_RETURN_ON_ERROR(app_cloud_init_event_loop_once(), TAG, "event loop init failed");
     s_cloud.sta_netif = esp_netif_create_default_wifi_sta();

@@ -27,6 +27,7 @@ void app_cloud_simulate_severe_weather(void);
 
 /* 开启或恢复天气模拟状态。 */
 void app_cloud_set_weather_simulated(bool simulated);
+void app_cloud_trigger_weather_emergency(void);
 
 /* 查询当前是否处于天气模拟状态。 */
 bool app_cloud_is_weather_simulated(void);
