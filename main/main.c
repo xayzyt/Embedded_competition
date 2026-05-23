@@ -31,6 +31,8 @@ static const char *TAG = "main";
 #define APP_FOCAL_LENGTH_PX          (314.0f)
 #define APP_MIN_DISTANCE_MM          (120)
 #define APP_MAX_DISTANCE_MM          (700)
+#define APP_CLOUD_START_TASK_STACK   (8 * 1024)
+#define APP_CLOUD_START_TASK_PRIO    4
 
 /* -------------------------------------------------------------------------- */
 /* 启动步骤                                                                  */
@@ -121,11 +123,9 @@ static void app_log_dock_config(const app_dock_judge_config_t *cfg)
              (long)cfg->max_distance_mm);
 }
 
-/* 初始化 CH32、视觉、接驳判定、任务、云端、控制和抓图模块。 */
+/* 初始化 CH32、视觉、接驳判定、任务、控制和抓图模块。 */
 static void app_init_runtime_modules(const app_dock_judge_config_t *dock_cfg)
 {
-    esp_err_t cloud_ret;
-
     /* 较慢的外设和服务启动期间保持加载页可见。 */
     app_ui_set_loading_text("启动 CH32 通信");
     app_ui_set_loading_progress(5);
@@ -143,23 +143,12 @@ static void app_init_runtime_modules(const app_dock_judge_config_t *dock_cfg)
     app_ui_set_loading_progress(45);
     ESP_ERROR_CHECK(app_drone_ai_init());
 
-    app_ui_set_loading_text("连接云端");
-    app_ui_set_loading_progress(55);
-    cloud_ret = app_cloud_init();
-    if (cloud_ret != ESP_OK)
-    {
-        ESP_LOGW(TAG,
-                 "cloud init failed (%s), continue with local vision/control",
-                 esp_err_to_name(cloud_ret));
-        app_ui_set_status("task: local mode / cloud offline");
-    }
-
     app_ui_set_loading_text("启动控制器");
-    app_ui_set_loading_progress(65);
+    app_ui_set_loading_progress(55);
     ESP_ERROR_CHECK(app_ctrl_init());
     ESP_ERROR_CHECK(app_ctrl_start());
     app_ui_set_loading_text("准备抓图模块");
-    app_ui_set_loading_progress(75);
+    app_ui_set_loading_progress(65);
     ESP_ERROR_CHECK(app_ai_capture_init());
 }
 
@@ -225,6 +214,50 @@ static void app_show_ready_status(const app_dock_judge_config_t *dock_cfg)
 /* -------------------------------------------------------------------------- */
 
 static bool s_camera_started = false;
+static bool s_cloud_start_requested = false;
+
+static void app_cloud_start_task(void *arg)
+{
+    (void)arg;
+
+    ESP_LOGI(TAG, "cloud async init begin");
+    esp_err_t ret = app_cloud_init();
+    if (ret != ESP_OK)
+    {
+        ESP_LOGW(TAG,
+                 "cloud init failed (%s), continue with local vision/control",
+                 esp_err_to_name(ret));
+        app_ui_set_status("task: local mode / cloud offline");
+    }
+    else
+    {
+        ESP_LOGI(TAG, "cloud async init done");
+    }
+
+    vTaskDelete(NULL);
+}
+
+static void app_start_cloud_async(void)
+{
+    if (s_cloud_start_requested)
+    {
+        return;
+    }
+
+    s_cloud_start_requested = true;
+    BaseType_t ok = xTaskCreate(app_cloud_start_task,
+        "cloud_start",
+        APP_CLOUD_START_TASK_STACK,
+        NULL,
+        APP_CLOUD_START_TASK_PRIO,
+        NULL);
+    if (ok != pdPASS)
+    {
+        s_cloud_start_requested = false;
+        ESP_LOGE(TAG, "create cloud start task failed");
+        app_ui_set_status("task: local mode / cloud start failed");
+    }
+}
 
 static void app_camera_start_task(void *arg)
 {
@@ -346,6 +379,8 @@ void app_main(void)
         ESP_LOGE(TAG, "register task event callback failed: %s", esp_err_to_name(cb_ret));
         app_ui_set_status("task: event callback failed");
     }
+
+    app_start_cloud_async();
 
     BaseType_t status_task_ok = xTaskCreate(app_main_screen_status_task,
         "main_status",

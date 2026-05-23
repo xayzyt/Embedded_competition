@@ -19,6 +19,7 @@ idf_component_register(
         esp_netif
         esp_http_client
         esp_wifi
+        espressif__esp_hosted
         mqtt
         mbedtls
         heap

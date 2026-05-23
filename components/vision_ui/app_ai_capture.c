@@ -487,7 +487,7 @@ static void app_ai_capture_writer_task(void *arg)
     }
 }
 
-/* 初始化抓拍队列、PSRAM 缓冲、写盘任务和存储目录。 */
+/* 初始化抓拍队列、PSRAM 缓冲和写盘任务；SD 卡在开始抓拍时再挂载。 */
 esp_err_t app_ai_capture_init(void)
 {
     if (s_inited)
@@ -529,7 +529,6 @@ esp_err_t app_ai_capture_init(void)
     }
 
     s_inited = true;
-    (void)app_ai_capture_prepare_storage();
     app_ai_capture_format_status("off");
     return ESP_OK;
 }
