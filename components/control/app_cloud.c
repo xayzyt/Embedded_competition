@@ -64,6 +64,7 @@ static const char *TAG = "app_cloud";
 #define APP_CLOUD_TIMEZONE             "CST-8"
 #define APP_CLOUD_WEATHER_CITY         "changsha"
 #define APP_CLOUD_WEATHER_CITY_CN      "长沙"
+#define APP_CLOUD_WEATHER_TEXT_LEN     96
 #define APP_CLOUD_WEATHER_URL_LEN      256
 #define APP_CLOUD_WEATHER_RESP_LEN     1024
 #define APP_CLOUD_WEATHER_TASK_STACK   (6 * 1024)
@@ -73,6 +74,8 @@ static const char *TAG = "app_cloud";
 #define APP_CLOUD_WEATHER_FALLBACK_CODE 4
 #define APP_CLOUD_WEATHER_SEVERE_CODE  36
 #define APP_CLOUD_ABORT_WAIT_MS        800
+#define APP_CLOUD_WEATHER_TOGGLE_DEBOUNCE_MS (800)
+#define APP_CLOUD_WEATHER_RESTORE_REFETCH_MIN_MS (30 * 1000)
 
 /* -------------------------------------------------------------------------- */
 /* 运行状态                                                               */
@@ -85,8 +88,13 @@ typedef struct {
     bool sntp_started;                                /* SNTP 时间同步是否已经启动。 */
     bool weather_simulated;                           /* 是否启用恶劣天气模拟。 */
     bool weather_docking_blocked;                     /* 当前天气是否禁止接驳。 */
+    bool weather_docking_policy_applied;              /* 是否已经执行过天气阻止动作。 */
+    bool weather_restore_pending;                     /* 是否需要从禁止接驳状态回到等待任务。 */
+    bool have_cached_weather;                         /* 是否缓存了最近一次真实/兜底天气。 */
     bool have_last_snapshot;                          /* 是否缓存了最近一次任务快照。 */
     uint32_t msg_seq;                                 /* 发布状态消息时递增的本地序号。 */
+    TickType_t weather_cache_tick;                    /* 最近一次正常天气缓存时间。 */
+    TickType_t weather_last_toggle_tick;              /* 天气模拟按钮上次有效切换时间。 */
     EventGroupHandle_t event_group;                   /* Wi-Fi/MQTT 状态同步事件组。 */
     esp_netif_t *sta_netif;                           /* Wi-Fi STA 网络接口句柄。 */
     esp_mqtt_client_handle_t mqtt_client;             /* MQTT 客户端句柄。 */
@@ -95,6 +103,8 @@ typedef struct {
     char topic_cmd[APP_CLOUD_TOPIC_BUF_LEN];          /* 订阅云端命令的 topic。 */
     char topic_ack[APP_CLOUD_TOPIC_BUF_LEN];          /* 发布命令应答的 topic。 */
     char topic_state[APP_CLOUD_TOPIC_BUF_LEN];        /* 发布任务状态的 topic。 */
+    char cached_weather_text[APP_CLOUD_WEATHER_TEXT_LEN]; /* 最近一次正常天气文本。 */
+    int cached_weather_code;                          /* 最近一次正常天气 code。 */
 } app_cloud_runtime_t;
 static app_cloud_runtime_t s_cloud = {0};
 static TaskHandle_t s_cloud_task = NULL;
@@ -409,9 +419,43 @@ static esp_err_t app_cloud_parse_weather_response(const char *json,
     return ret;
 }
 
+static void app_cloud_cache_weather(const char *text, int weather_code)
+{
+    if (text == NULL)
+    {
+        return;
+    }
+    strlcpy(s_cloud.cached_weather_text, text, sizeof(s_cloud.cached_weather_text));
+    s_cloud.cached_weather_code = weather_code;
+    s_cloud.have_cached_weather = true;
+    s_cloud.weather_cache_tick = xTaskGetTickCount();
+}
+
+static bool app_cloud_cached_weather_is_fresh(TickType_t max_age_ticks)
+{
+    if (!s_cloud.have_cached_weather)
+    {
+        return false;
+    }
+    return (xTaskGetTickCount() - s_cloud.weather_cache_tick) < max_age_ticks;
+}
+
+static void app_cloud_notify_weather_task(void)
+{
+    if (s_weather_task != NULL)
+    {
+        xTaskNotifyGive(s_weather_task);
+    }
+}
+
 static void app_cloud_show_weather_fallback(void)
 {
-    app_ui_main_screen_set_weather("多云\n--℃", APP_CLOUD_WEATHER_FALLBACK_CODE);
+    const char *fallback = "多云\n--℃";
+    app_cloud_cache_weather(fallback, APP_CLOUD_WEATHER_FALLBACK_CODE);
+    app_ui_main_screen_apply_weather_state(fallback,
+        APP_CLOUD_WEATHER_FALLBACK_CODE,
+        false,
+        NULL);
 }
 
 static void app_cloud_apply_weather_docking_policy(bool simulated)
@@ -420,11 +464,17 @@ static void app_cloud_apply_weather_docking_policy(bool simulated)
 
     if (!simulated)
     {
+        s_cloud.weather_docking_policy_applied = false;
         return;
     }
 
+    if (s_cloud.weather_docking_policy_applied)
+    {
+        return;
+    }
+    s_cloud.weather_docking_policy_applied = true;
+
     app_task_cancel("blocked by simulated severe weather");
-    app_ui_main_screen_set_task_text("weather blocked");
 
     if (app_ch32_link_is_ready())
     {
@@ -436,10 +486,38 @@ static void app_cloud_apply_weather_docking_policy(bool simulated)
     }
 }
 
+static void app_cloud_show_simulated_weather_ui(void)
+{
+    app_ui_main_screen_apply_weather_state("台风\n28℃",
+        APP_CLOUD_WEATHER_SEVERE_CODE,
+        true,
+        "weather blocked");
+}
+
 static void app_cloud_show_simulated_severe_weather(void)
 {
-    app_ui_main_screen_set_weather("台风\n28℃", APP_CLOUD_WEATHER_SEVERE_CODE);
+    app_cloud_show_simulated_weather_ui();
     app_cloud_apply_weather_docking_policy(true);
+}
+
+static void app_cloud_show_restored_weather_ui(bool update_task_text)
+{
+    const char *task_text = update_task_text ? "waiting task" : NULL;
+    if (s_cloud.have_cached_weather)
+    {
+        app_ui_main_screen_apply_weather_state(s_cloud.cached_weather_text,
+            s_cloud.cached_weather_code,
+            false,
+            task_text);
+        return;
+    }
+    app_ui_main_screen_apply_weather_state("同步中", 99, false, task_text);
+}
+
+static void app_cloud_show_restored_weather(bool update_task_text)
+{
+    app_cloud_apply_weather_docking_policy(false);
+    app_cloud_show_restored_weather_ui(update_task_text);
 }
 
 static esp_err_t app_cloud_fetch_weather_once(void)
@@ -506,7 +584,7 @@ static esp_err_t app_cloud_fetch_weather_once(void)
         return (ret != ESP_OK) ? ret : ESP_FAIL;
     }
 
-    char weather_text[96] = {0};
+    char weather_text[APP_CLOUD_WEATHER_TEXT_LEN] = {0};
     int weather_code = 99;
     ret = app_cloud_parse_weather_response(response,
         weather_text,
@@ -519,8 +597,15 @@ static esp_err_t app_cloud_fetch_weather_once(void)
         return ret;
     }
 
+    if (s_cloud.weather_simulated)
+    {
+        app_cloud_show_simulated_severe_weather();
+        return ESP_OK;
+    }
+
+    app_cloud_cache_weather(weather_text, weather_code);
     s_cloud.weather_docking_blocked = false;
-    app_ui_main_screen_set_weather(weather_text, weather_code);
+    app_ui_main_screen_apply_weather_state(weather_text, weather_code, false, NULL);
     ESP_LOGI(TAG, "weather updated: %s code=%d", weather_text, weather_code);
     return ESP_OK;
 }
@@ -528,18 +613,46 @@ static esp_err_t app_cloud_fetch_weather_once(void)
 static void app_cloud_weather_task(void *arg)
 {
     (void)arg;
-    app_ui_main_screen_set_weather("同步中", 99);
+    app_cloud_show_restored_weather_ui(false);
 
     for (;;)
     {
+        bool skip_fetch_once = false;
+
+        if (s_cloud.weather_simulated)
+        {
+            app_cloud_show_simulated_severe_weather();
+            (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(APP_CLOUD_WEATHER_REFRESH_MS));
+            continue;
+        }
+
+        const bool restore_pending = s_cloud.weather_restore_pending;
+        s_cloud.weather_restore_pending = false;
+        if (restore_pending)
+        {
+            app_cloud_show_restored_weather(true);
+            skip_fetch_once = app_cloud_cached_weather_is_fresh(
+                pdMS_TO_TICKS(APP_CLOUD_WEATHER_RESTORE_REFETCH_MIN_MS));
+        }
+        else
+        {
+            app_ui_main_screen_set_weather_simulated(false);
+        }
+
+        if (skip_fetch_once)
+        {
+            (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(APP_CLOUD_WEATHER_RESTORE_REFETCH_MIN_MS));
+            continue;
+        }
+
         if (!app_cloud_is_wifi_connected())
         {
-            vTaskDelay(pdMS_TO_TICKS(5000));
+            (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000));
             continue;
         }
 
         esp_err_t ret = app_cloud_fetch_weather_once();
-        vTaskDelay(pdMS_TO_TICKS((ret == ESP_OK) ?
+        (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS((ret == ESP_OK) ?
             APP_CLOUD_WEATHER_REFRESH_MS :
             APP_CLOUD_WEATHER_RETRY_MS));
     }
@@ -567,9 +680,60 @@ static void app_cloud_start_weather_task_once(void)
 
 void app_cloud_simulate_severe_weather(void)
 {
-    ESP_LOGW(TAG, "simulate severe weather: block docking");
-    s_cloud.weather_simulated = true;
-    app_cloud_show_simulated_severe_weather();
+    app_cloud_set_weather_simulated(true);
+}
+
+void app_cloud_set_weather_simulated(bool simulated)
+{
+    const TickType_t now = xTaskGetTickCount();
+    if (s_cloud.weather_last_toggle_tick != 0 &&
+        (now - s_cloud.weather_last_toggle_tick) < pdMS_TO_TICKS(APP_CLOUD_WEATHER_TOGGLE_DEBOUNCE_MS))
+    {
+        ESP_LOGD(TAG, "ignore weather toggle debounce");
+        return;
+    }
+
+    const bool was_simulated = s_cloud.weather_simulated;
+    if (was_simulated == simulated)
+    {
+        if (simulated)
+        {
+            app_cloud_show_simulated_weather_ui();
+        }
+        else
+        {
+            app_cloud_show_restored_weather_ui(false);
+        }
+        app_cloud_notify_weather_task();
+        return;
+    }
+
+    s_cloud.weather_last_toggle_tick = now;
+    s_cloud.weather_simulated = simulated;
+    const bool restore_pending = !simulated && (was_simulated || s_cloud.weather_docking_blocked);
+
+    if (simulated)
+    {
+        s_cloud.weather_docking_blocked = true;
+        s_cloud.weather_restore_pending = false;
+        app_cloud_show_simulated_weather_ui();
+        ESP_LOGW(TAG, "simulate severe weather requested");
+    }
+    else
+    {
+        s_cloud.weather_docking_blocked = false;
+        s_cloud.weather_docking_policy_applied = false;
+        s_cloud.weather_restore_pending = restore_pending;
+        app_cloud_show_restored_weather_ui(true);
+        ESP_LOGI(TAG, "restore weather requested");
+    }
+
+    app_cloud_notify_weather_task();
+}
+
+bool app_cloud_is_weather_simulated(void)
+{
+    return s_cloud.weather_simulated;
 }
 
 bool app_cloud_is_weather_docking_blocked(void)
@@ -1022,6 +1186,7 @@ static void app_cloud_wifi_event_handler(void *arg,
         app_cloud_ensure_dns_after_ip();
         app_cloud_start_sntp_once();
         app_cloud_start_weather_task_once();
+        app_cloud_notify_weather_task();
 
         xEventGroupSetBits(s_cloud.event_group,
             APP_CLOUD_WIFI_CONNECTED_BIT | APP_CLOUD_START_MQTT_BIT);
@@ -1163,6 +1328,7 @@ esp_err_t app_cloud_init(void)
     ESP_LOGI(TAG, "wifi started, mqtt waits for ip");
     app_cloud_log_topics_once();
     s_cloud.inited = true;
+    app_cloud_start_weather_task_once();
     ESP_LOGI(TAG, "EMQX init done (official host Wi-Fi path via ESP32-C6)");
     return ESP_OK;
 }

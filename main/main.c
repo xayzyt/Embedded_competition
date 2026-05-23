@@ -333,7 +333,7 @@ static void app_pickup_cb(void)
 
 static void app_weather_sim_cb(void)
 {
-    app_cloud_simulate_severe_weather();
+    app_cloud_set_weather_simulated(!app_cloud_is_weather_simulated());
 }
 
 static void app_main_screen_status_task(void *arg)

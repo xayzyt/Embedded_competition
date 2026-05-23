@@ -86,6 +86,9 @@ LV_IMAGE_DECLARE(weather_99);
 #define UI_TEAM_NAME            "地线引力队"
 #define UI_CLOCK_VALID_EPOCH    1704067200LL
 #define UI_CLOCK_TIMEZONE       "CST-8"
+#define UI_TASK_BLINK_MS        520
+#define UI_MAIN_PHASE_COUNT     4
+#define UI_MAIN_PHASE_DOCK_IDX  2
 static const char *TAG = "app_ui";
 
 /* -------------------------------------------------------------------------- */
@@ -115,8 +118,15 @@ static lv_obj_t *s_main_layer = NULL;
 static lv_obj_t *s_main_wifi_ind = NULL;
 static lv_obj_t *s_main_mqtt_ind = NULL;
 static lv_obj_t *s_main_ch32_ind = NULL;
+static lv_obj_t *s_main_task_accent = NULL;
+static lv_obj_t *s_main_task_badge = NULL;
 static lv_obj_t *s_main_task_label = NULL;
 static lv_obj_t *s_main_task_card_label = NULL;
+static lv_obj_t *s_main_task_hint_label = NULL;
+static lv_obj_t *s_main_task_alert = NULL;
+static lv_obj_t *s_main_task_alert_label = NULL;
+static lv_obj_t *s_main_phase_box[UI_MAIN_PHASE_COUNT] = {0};
+static lv_obj_t *s_main_phase_label[UI_MAIN_PHASE_COUNT] = {0};
 static lv_obj_t *s_main_conn_label = NULL;
 static lv_obj_t *s_main_dock_label = NULL;
 static lv_obj_t *s_main_clock_time = NULL;
@@ -128,9 +138,19 @@ static lv_obj_t *s_weather_sim_btn = NULL;
 static lv_obj_t *s_weather_sim_label = NULL;
 static lv_obj_t *s_main_pickup_btn = NULL;
 static lv_timer_t *s_main_clock_timer = NULL;
+static lv_timer_t *s_main_task_blink_timer = NULL;
 static app_ui_pickup_cb_t s_pickup_cb = NULL;
 static app_ui_weather_sim_cb_t s_weather_sim_cb = NULL;
 static bool s_clock_tz_set = false;
+static bool s_main_weather_simulated = false;
+static bool s_main_task_blink_enabled = false;
+static bool s_main_task_blink_dim = false;
+static bool s_main_status_seen = false;
+static bool s_main_status_wifi_ok = false;
+static bool s_main_status_mqtt_ok = false;
+static bool s_main_status_ch32_ok = false;
+static bool s_main_task_weather_blocked = false;
+static bool s_main_pickup_phase_active = false;
 static char s_main_weather_text[96] = "同步中";
 static int s_main_weather_code = 99;
 static bool s_have_last_box = false;
@@ -305,6 +325,10 @@ static lv_obj_t *app_ui_create_soft_panel(lv_obj_t *parent,
     lv_obj_set_style_border_color(panel, lv_color_hex(0xE2E8F0), 0);
     lv_obj_set_style_radius(panel, radius, 0);
     lv_obj_set_style_pad_all(panel, 0, 0);
+    lv_obj_set_style_shadow_width(panel, 8, 0);
+    lv_obj_set_style_shadow_offset_y(panel, 2, 0);
+    lv_obj_set_style_shadow_color(panel, lv_color_hex(0xCBD5E1), 0);
+    lv_obj_set_style_shadow_opa(panel, (lv_opa_t)48, 0);
     lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
     return panel;
 }
@@ -1123,6 +1147,192 @@ static void app_ui_clock_timer_cb(lv_timer_t *timer)
     app_ui_update_clock_unlocked();
 }
 
+static void app_ui_set_main_task_opa_unlocked(lv_opa_t opa)
+{
+    if (s_main_task_label != NULL)
+    {
+        lv_obj_set_style_text_opa(s_main_task_label, opa, 0);
+    }
+    if (s_main_task_card_label != NULL)
+    {
+        lv_obj_set_style_text_opa(s_main_task_card_label, opa, 0);
+    }
+    if (s_main_task_alert_label != NULL)
+    {
+        lv_obj_set_style_text_opa(s_main_task_alert_label, opa, 0);
+    }
+}
+
+static void app_ui_main_task_blink_timer_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    if (!s_main_task_blink_enabled)
+    {
+        app_ui_set_main_task_opa_unlocked(LV_OPA_COVER);
+        return;
+    }
+
+    s_main_task_blink_dim = !s_main_task_blink_dim;
+    app_ui_set_main_task_opa_unlocked(s_main_task_blink_dim ? LV_OPA_70 : LV_OPA_COVER);
+}
+
+static void app_ui_set_main_task_blink_unlocked(bool enabled)
+{
+    s_main_task_blink_enabled = enabled;
+    s_main_task_blink_dim = false;
+    app_ui_set_main_task_opa_unlocked(LV_OPA_COVER);
+
+    if (s_main_task_blink_timer == NULL)
+    {
+        return;
+    }
+
+    if (enabled)
+    {
+        lv_timer_reset(s_main_task_blink_timer);
+        lv_timer_resume(s_main_task_blink_timer);
+    }
+    else
+    {
+        lv_timer_pause(s_main_task_blink_timer);
+    }
+}
+
+static void app_ui_apply_main_phase_style_unlocked(int index, bool ready, bool danger)
+{
+    if (index < 0 || index >= UI_MAIN_PHASE_COUNT)
+    {
+        return;
+    }
+    if (s_main_phase_box[index] == NULL || s_main_phase_label[index] == NULL)
+    {
+        return;
+    }
+
+    lv_obj_set_style_bg_color(s_main_phase_box[index],
+        danger ? lv_color_hex(0xFEF2F2) :
+            (ready ? lv_color_hex(0xECFDF5) : lv_color_hex(0xF8FAFC)),
+        0);
+    lv_obj_set_style_border_color(s_main_phase_box[index],
+        danger ? lv_color_hex(0xFCA5A5) :
+            (ready ? lv_color_hex(0x5EEAD4) : lv_color_hex(0xE2E8F0)),
+        0);
+    lv_obj_set_style_text_color(s_main_phase_label[index],
+        danger ? lv_color_hex(0x991B1B) :
+            (ready ? lv_color_hex(0x0F766E) : lv_color_hex(0x475569)),
+        0);
+}
+
+static void app_ui_update_main_task_badge_unlocked(void)
+{
+    if (s_main_task_badge == NULL)
+    {
+        return;
+    }
+
+    const bool cloud_ready = s_main_status_wifi_ok && s_main_status_mqtt_ok;
+    const lv_color_t normal = lv_color_hex(0x0F766E);
+    const lv_color_t danger = lv_color_hex(0xB91C1C);
+    const lv_color_t muted = lv_color_hex(0x64748B);
+    const char *text = "状态同步中";
+    lv_color_t color = muted;
+
+    if (s_main_task_weather_blocked)
+    {
+        text = "禁止接驳";
+        color = danger;
+    }
+    else if (s_main_pickup_phase_active)
+    {
+        text = "取货已完成";
+        color = normal;
+    }
+    else if (!s_main_status_seen)
+    {
+        text = "状态同步中";
+        color = muted;
+    }
+    else if (!cloud_ready)
+    {
+        text = "云端通信未就绪";
+        color = danger;
+    }
+    else if (!s_main_status_ch32_ok)
+    {
+        text = "CH32通信未就绪";
+        color = danger;
+    }
+    else
+    {
+        text = "接驳已就绪";
+        color = normal;
+    }
+
+    lv_label_set_text(s_main_task_badge, text);
+    lv_obj_set_style_text_color(s_main_task_badge, color, 0);
+}
+
+static void app_ui_refresh_main_phase_indicators_unlocked(void)
+{
+    const bool cloud_ready = s_main_status_wifi_ok && s_main_status_mqtt_ok;
+    const bool link_ready = cloud_ready && s_main_status_ch32_ok;
+
+    app_ui_apply_main_phase_style_unlocked(0,
+        s_main_status_seen && cloud_ready,
+        s_main_status_seen && !cloud_ready);
+    app_ui_apply_main_phase_style_unlocked(1,
+        s_main_status_seen && link_ready,
+        s_main_status_seen && !link_ready);
+    app_ui_apply_main_phase_style_unlocked(UI_MAIN_PHASE_DOCK_IDX,
+        s_main_pickup_phase_active,
+        s_main_task_weather_blocked);
+    app_ui_apply_main_phase_style_unlocked(3,
+        s_main_pickup_phase_active,
+        false);
+    app_ui_update_main_task_badge_unlocked();
+}
+
+static void app_ui_apply_main_task_visual_unlocked(bool weather_blocked)
+{
+    const lv_color_t normal = lv_color_hex(0x0F766E);
+    const lv_color_t danger = lv_color_hex(0xB91C1C);
+
+    s_main_task_weather_blocked = weather_blocked;
+
+    if (s_main_task_accent != NULL)
+    {
+        lv_obj_set_style_bg_color(s_main_task_accent, weather_blocked ? danger : normal, 0);
+    }
+    if (s_main_task_hint_label != NULL)
+    {
+        if (weather_blocked)
+        {
+            lv_obj_add_flag(s_main_task_hint_label, LV_OBJ_FLAG_HIDDEN);
+        }
+        else
+        {
+            lv_obj_clear_flag(s_main_task_hint_label, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    if (s_main_task_alert != NULL)
+    {
+        if (weather_blocked)
+        {
+            lv_obj_clear_flag(s_main_task_alert, LV_OBJ_FLAG_HIDDEN);
+        }
+        else
+        {
+            lv_obj_add_flag(s_main_task_alert, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    if (s_main_task_alert_label != NULL)
+    {
+        lv_label_set_text(s_main_task_alert_label, "禁止接驳");
+    }
+
+    app_ui_refresh_main_phase_indicators_unlocked();
+}
+
 static const lv_image_dsc_t *app_ui_weather_image_src(int weather_code)
 {
     switch (weather_code) {
@@ -1176,6 +1386,26 @@ static bool app_ui_weather_is_severe(int weather_code)
     return weather_code == 36 || weather_code == 37 || weather_code == 38;
 }
 
+static void app_ui_update_weather_sim_button_unlocked(void)
+{
+    if (s_weather_sim_btn != NULL)
+    {
+        lv_obj_set_style_bg_color(s_weather_sim_btn,
+            s_main_weather_simulated ? lv_color_hex(0x0F766E) : lv_color_hex(0xB91C1C),
+            0);
+    }
+    if (s_weather_sim_label != NULL)
+    {
+        lv_label_set_text(s_weather_sim_label,
+            s_main_weather_simulated ? "恢复天气" : "天气模拟");
+        lv_obj_center(s_weather_sim_label);
+    }
+    if (s_weather_sim_btn != NULL)
+    {
+        lv_obj_invalidate(s_weather_sim_btn);
+    }
+}
+
 static void app_ui_apply_weather_unlocked(void)
 {
     const bool extreme = app_ui_weather_is_severe(s_main_weather_code);
@@ -1199,15 +1429,7 @@ static void app_ui_apply_weather_unlocked(void)
             extreme ? lv_color_hex(0x991B1B) : lv_color_hex(0x0F172A),
             0);
     }
-    if (s_weather_sim_btn != NULL)
-    {
-        lv_obj_set_style_bg_color(s_weather_sim_btn, lv_color_hex(0xB91C1C), 0);
-    }
-    if (s_weather_sim_label != NULL)
-    {
-        lv_label_set_text(s_weather_sim_label, "天气模拟");
-        lv_obj_center(s_weather_sim_label);
-    }
+    app_ui_update_weather_sim_button_unlocked();
 }
 
 static void app_ui_set_main_task_text_unlocked(const char *text, lv_color_t color)
@@ -1224,6 +1446,64 @@ static void app_ui_set_main_task_text_unlocked(const char *text, lv_color_t colo
     }
 }
 
+static void app_ui_apply_main_task_state_unlocked(const char *text)
+{
+    if (text == NULL)
+    {
+        return;
+    }
+
+    if (s_main_weather_simulated)
+    {
+        app_ui_apply_main_task_visual_unlocked(true);
+        app_ui_set_main_task_blink_unlocked(true);
+        app_ui_set_main_task_text_unlocked("恶劣天气", lv_color_hex(0xB91C1C));
+        return;
+    }
+
+    const char *display_text = text;
+    lv_color_t color = lv_color_hex(0x0F766E);
+    bool blink = false;
+    bool weather_blocked = false;
+    if (strcmp(text, "waiting task") == 0)
+    {
+        display_text = "等待任务";
+    }
+    else if (strcmp(text, "task: active") == 0)
+    {
+        display_text = "任务运行";
+    }
+    else if (strcmp(text, "task: configured / dist gate on") == 0 ||
+             strcmp(text, "task: configured / demo loose") == 0)
+    {
+        display_text = "等待任务";
+    }
+    else if (strcmp(text, "task: camera start failed") == 0 ||
+             strcmp(text, "task: local mode / cloud start failed") == 0 ||
+             strcmp(text, "task: local mode / cloud offline") == 0)
+    {
+        display_text = "本地等待";
+        color = lv_color_hex(0xD97706);
+    }
+    else if (strcmp(text, "pickup failed / retry") == 0)
+    {
+        display_text = "取货未完成";
+        color = lv_color_hex(0xD85B5B);
+    }
+    else if (strcmp(text, "weather blocked") == 0 ||
+             strcmp(text, "天气故障") == 0 ||
+             strcmp(text, "禁止接驳") == 0)
+    {
+        display_text = "恶劣天气";
+        color = lv_color_hex(0xB91C1C);
+        blink = true;
+        weather_blocked = true;
+    }
+    app_ui_apply_main_task_visual_unlocked(weather_blocked);
+    app_ui_set_main_task_blink_unlocked(blink);
+    app_ui_set_main_task_text_unlocked(display_text, color);
+}
+
 bool app_ui_show_main_screen(void)
 {
     if (!bsp_display_lock(UI_LOCK_BOOT_MS))
@@ -1237,7 +1517,9 @@ bool app_ui_show_main_screen(void)
     {
         s_main_layer = lv_obj_create(scr);
         lv_obj_set_size(s_main_layer, BSP_LCD_H_RES, BSP_LCD_V_RES);
-        lv_obj_set_style_bg_color(s_main_layer, lv_color_hex(0xF4F7FB), 0);
+        lv_obj_set_style_bg_color(s_main_layer, lv_color_hex(0xF7F9FC), 0);
+        lv_obj_set_style_bg_grad_color(s_main_layer, lv_color_hex(0xEFF5F8), 0);
+        lv_obj_set_style_bg_grad_dir(s_main_layer, LV_GRAD_DIR_VER, 0);
         lv_obj_set_style_bg_opa(s_main_layer, LV_OPA_COVER, 0);
         lv_obj_set_style_border_width(s_main_layer, 0, 0);
         lv_obj_set_style_radius(s_main_layer, 0, 0);
@@ -1293,6 +1575,7 @@ bool app_ui_show_main_screen(void)
         lv_obj_align(task_card, LV_ALIGN_TOP_LEFT, task_card_x, task_card_y);
 
         lv_obj_t *task_accent = lv_obj_create(task_card);
+        s_main_task_accent = task_accent;
         lv_obj_set_size(task_accent, 6, task_card_h);
         lv_obj_set_style_bg_color(task_accent, lv_color_hex(0x0F766E), 0);
         lv_obj_set_style_bg_opa(task_accent, LV_OPA_COVER, 0);
@@ -1309,10 +1592,18 @@ bool app_ui_show_main_screen(void)
         lv_obj_align(task_title, LV_ALIGN_TOP_LEFT, 28, 18);
 
         lv_obj_t *task_badge = lv_label_create(task_card);
+        s_main_task_badge = task_badge;
+        lv_obj_set_width(task_badge, 260);
+#if LVGL_VERSION_MAJOR >= 9
+        lv_label_set_long_mode(task_badge, LV_LABEL_LONG_MODE_DOTS);
+#else
+        lv_label_set_long_mode(task_badge, LV_LABEL_LONG_DOT);
+#endif
         lv_obj_set_style_text_color(task_badge, lv_color_hex(0x0F766E), 0);
-        lv_obj_set_style_text_font(task_badge, &font_loading_cn, 0);
-        lv_label_set_text(task_badge, "接驳");
-        lv_obj_align(task_badge, LV_ALIGN_TOP_RIGHT, -28, 22);
+        lv_obj_set_style_text_font(task_badge, &font_main_title_cn, 0);
+        lv_obj_set_style_text_align(task_badge, LV_TEXT_ALIGN_RIGHT, 0);
+        lv_label_set_text(task_badge, "状态同步中");
+        lv_obj_align(task_badge, LV_ALIGN_TOP_RIGHT, -28, 18);
 
         s_main_task_label = lv_label_create(task_card);
         lv_obj_set_width(s_main_task_label, task_card_w - 56);
@@ -1327,11 +1618,32 @@ bool app_ui_show_main_screen(void)
         lv_obj_align(s_main_task_label, LV_ALIGN_TOP_LEFT, 28, 66);
 
         lv_obj_t *task_hint = lv_label_create(task_card);
+        s_main_task_hint_label = task_hint;
         lv_obj_set_width(task_hint, task_card_w - 56);
         lv_obj_set_style_text_color(task_hint, lv_color_hex(0x64748B), 0);
         lv_obj_set_style_text_font(task_hint, &font_loading_cn, 0);
         lv_label_set_text(task_hint, "云端任务 / 视觉接驳");
         lv_obj_align(task_hint, LV_ALIGN_TOP_LEFT, 28, 108);
+
+        s_main_task_alert = lv_obj_create(task_card);
+        lv_obj_set_size(s_main_task_alert, 176, 34);
+        lv_obj_set_style_bg_color(s_main_task_alert, lv_color_hex(0xFEF2F2), 0);
+        lv_obj_set_style_bg_opa(s_main_task_alert, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(s_main_task_alert, 1, 0);
+        lv_obj_set_style_border_color(s_main_task_alert, lv_color_hex(0xFCA5A5), 0);
+        lv_obj_set_style_radius(s_main_task_alert, 6, 0);
+        lv_obj_set_style_pad_all(s_main_task_alert, 0, 0);
+        lv_obj_clear_flag(s_main_task_alert, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(s_main_task_alert, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_align(s_main_task_alert, LV_ALIGN_TOP_LEFT, 28, 104);
+
+        s_main_task_alert_label = lv_label_create(s_main_task_alert);
+        lv_obj_set_width(s_main_task_alert_label, 156);
+        lv_obj_set_style_text_color(s_main_task_alert_label, lv_color_hex(0x991B1B), 0);
+        lv_obj_set_style_text_font(s_main_task_alert_label, &font_main_title_cn, 0);
+        lv_obj_set_style_text_align(s_main_task_alert_label, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_text(s_main_task_alert_label, "禁止接驳");
+        lv_obj_center(s_main_task_alert_label);
 
         lv_obj_t *task_divider = lv_obj_create(task_card);
         lv_obj_set_size(task_divider, task_card_w - 56, 1);
@@ -1353,9 +1665,10 @@ bool app_ui_show_main_screen(void)
         const int32_t phase_h = 34;
         const int32_t phase_gap = 14;
         const int32_t phase_y = 178;
-        for (int i = 0; i < 4; i++)
+        for (int i = 0; i < UI_MAIN_PHASE_COUNT; i++)
         {
             lv_obj_t *phase = lv_obj_create(task_card);
+            s_main_phase_box[i] = phase;
             lv_obj_set_size(phase, phase_w, phase_h);
             lv_obj_set_style_bg_color(phase, lv_color_hex(0xF8FAFC), 0);
             lv_obj_set_style_bg_opa(phase, LV_OPA_COVER, 0);
@@ -1367,6 +1680,7 @@ bool app_ui_show_main_screen(void)
             lv_obj_align(phase, LV_ALIGN_TOP_LEFT, 28 + i * (phase_w + phase_gap), phase_y);
 
             lv_obj_t *phase_label = lv_label_create(phase);
+            s_main_phase_label[i] = phase_label;
             lv_obj_set_width(phase_label, phase_w - 12);
             lv_obj_set_style_text_color(phase_label, lv_color_hex(0x475569), 0);
             lv_obj_set_style_text_font(phase_label, &font_loading_cn, 0);
@@ -1379,7 +1693,7 @@ bool app_ui_show_main_screen(void)
         lv_obj_set_width(task_foot, task_card_w - 56);
         lv_obj_set_style_text_color(task_foot, lv_color_hex(0x94A3B8), 0);
         lv_obj_set_style_text_font(task_foot, &font_loading_cn, 0);
-        lv_label_set_text(task_foot, "低空接驳微港与端侧鉴权闭环");
+        lv_label_set_text(task_foot, "云端 / 通信 / 接驳 / 取货 LED状态");
         lv_obj_align(task_foot, LV_ALIGN_BOTTOM_LEFT, 28, -16);
 
         lv_obj_t *clock_card = app_ui_create_soft_panel(s_main_layer,
@@ -1536,11 +1850,24 @@ bool app_ui_show_main_screen(void)
         lv_label_set_text(pickup_label, "取货完成");
         lv_obj_center(pickup_label);
         app_ui_apply_weather_unlocked();
+        app_ui_apply_main_task_state_unlocked(s_main_weather_simulated ? "weather blocked" : "waiting task");
 
         app_ui_update_clock_unlocked();
         if (s_main_clock_timer == NULL)
         {
             s_main_clock_timer = lv_timer_create(app_ui_clock_timer_cb, 1000, NULL);
+        }
+        if (s_main_task_blink_timer == NULL)
+        {
+            s_main_task_blink_timer = lv_timer_create(app_ui_main_task_blink_timer_cb, UI_TASK_BLINK_MS, NULL);
+            if (s_main_task_blink_enabled)
+            {
+                lv_timer_reset(s_main_task_blink_timer);
+            }
+            else
+            {
+                lv_timer_pause(s_main_task_blink_timer);
+            }
         }
 
         /* 底部信息 */
@@ -1597,12 +1924,23 @@ void app_ui_main_screen_show_pickup(bool show)
     if (show)
     {
         lv_obj_clear_flag(s_main_pickup_btn, LV_OBJ_FLAG_HIDDEN);
-        app_ui_set_main_task_text_unlocked("任务完成", lv_color_hex(0x0F766E));
+        s_main_pickup_phase_active = true;
+        if (s_main_weather_simulated)
+        {
+            app_ui_apply_main_task_state_unlocked("weather blocked");
+        }
+        else
+        {
+            app_ui_set_main_task_blink_unlocked(false);
+            app_ui_apply_main_task_visual_unlocked(false);
+            app_ui_set_main_task_text_unlocked("任务完成", lv_color_hex(0x0F766E));
+        }
     }
     else
     {
         lv_obj_add_flag(s_main_pickup_btn, LV_OBJ_FLAG_HIDDEN);
-        app_ui_set_main_task_text_unlocked("等待任务", lv_color_hex(0x0F766E));
+        s_main_pickup_phase_active = false;
+        app_ui_apply_main_task_state_unlocked("waiting task");
     }
     bsp_display_unlock();
 }
@@ -1617,6 +1955,11 @@ void app_ui_main_screen_update_status(bool wifi_ok, bool mqtt_ok, bool ch32_ok)
     {
         return;
     }
+    s_main_status_seen = true;
+    s_main_status_wifi_ok = wifi_ok;
+    s_main_status_mqtt_ok = mqtt_ok;
+    s_main_status_ch32_ok = ch32_ok;
+
     lv_color_t green = lv_color_hex(0x0F766E);
     lv_color_t red = lv_color_hex(0xD85B5B);
     if (s_main_wifi_ind != NULL)
@@ -1644,6 +1987,7 @@ void app_ui_main_screen_update_status(bool wifi_ok, bool mqtt_ok, bool ch32_ok)
         lv_label_set_text(s_main_dock_label, ch32_ok ? "接驳已就绪" : "接驳未就绪");
         lv_obj_set_style_text_color(s_main_dock_label, ch32_ok ? green : red, 0);
     }
+    app_ui_refresh_main_phase_indicators_unlocked();
     bsp_display_unlock();
 }
 
@@ -1657,39 +2001,7 @@ void app_ui_main_screen_set_task_text(const char *text)
     {
         return;
     }
-    const char *display_text = text;
-    lv_color_t color = lv_color_hex(0x0F766E);
-    if (strcmp(text, "waiting task") == 0)
-    {
-        display_text = "等待任务";
-    }
-    else if (strcmp(text, "task: active") == 0)
-    {
-        display_text = "任务运行";
-    }
-    else if (strcmp(text, "task: configured / dist gate on") == 0 ||
-             strcmp(text, "task: configured / demo loose") == 0)
-    {
-        display_text = "等待任务";
-    }
-    else if (strcmp(text, "task: camera start failed") == 0 ||
-             strcmp(text, "task: local mode / cloud start failed") == 0 ||
-             strcmp(text, "task: local mode / cloud offline") == 0)
-    {
-        display_text = "本地等待";
-        color = lv_color_hex(0xD97706);
-    }
-    else if (strcmp(text, "pickup failed / retry") == 0)
-    {
-        display_text = "取货未完成";
-        color = lv_color_hex(0xD85B5B);
-    }
-    else if (strcmp(text, "weather blocked") == 0 || strcmp(text, "天气故障") == 0)
-    {
-        display_text = "天气故障";
-        color = lv_color_hex(0xD85B5B);
-    }
-    app_ui_set_main_task_text_unlocked(display_text, color);
+    app_ui_apply_main_task_state_unlocked(text);
     bsp_display_unlock();
 }
 
@@ -1717,6 +2029,54 @@ void app_ui_main_screen_set_weather(const char *text, int weather_code)
         return;
     }
     app_ui_apply_weather_unlocked();
+    bsp_display_unlock();
+}
+
+void app_ui_main_screen_set_weather_simulated(bool simulated)
+{
+    s_main_weather_simulated = simulated;
+    if (!bsp_display_lock(UI_LOCK_SHORT_MS))
+    {
+        return;
+    }
+    app_ui_apply_weather_unlocked();
+    if (simulated)
+    {
+        app_ui_apply_main_task_state_unlocked("weather blocked");
+    }
+    else
+    {
+        app_ui_set_main_task_blink_unlocked(false);
+        app_ui_apply_main_task_visual_unlocked(false);
+    }
+    bsp_display_unlock();
+}
+
+void app_ui_main_screen_apply_weather_state(const char *weather_text,
+    int weather_code,
+    bool simulated,
+    const char *task_text)
+{
+    if (weather_text != NULL)
+    {
+        strlcpy(s_main_weather_text, weather_text, sizeof(s_main_weather_text));
+        s_main_weather_code = weather_code;
+    }
+    s_main_weather_simulated = simulated;
+
+    if (!bsp_display_lock(UI_LOCK_BOOT_MS))
+    {
+        return;
+    }
+    app_ui_apply_weather_unlocked();
+    app_ui_apply_main_task_state_unlocked((simulated && task_text == NULL) ?
+        "weather blocked" :
+        task_text);
+    if (!simulated && task_text == NULL)
+    {
+        app_ui_set_main_task_blink_unlocked(false);
+        app_ui_apply_main_task_visual_unlocked(false);
+    }
     bsp_display_unlock();
 }
 
