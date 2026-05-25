@@ -15,10 +15,12 @@
 
 # Log files
 *.log
+server.*.log
 
 # Build artifacts and directories
 **/build/
 build/
+CH32/obj/
 *.o
 *.a
 *.out
@@ -53,12 +55,15 @@ CTestTestfile.cmake
 *.pyo
 *.pyd
 __pycache__/
+*.db
+*.db-journal
 *.egg-info/
 dist/
 
 # Virtual environment folders
 venv/
 .venv/
+.venv*/
 .venv-ai/
 env/
 
@@ -80,3 +85,4 @@ Desktop.ini
 *.workspace # General workspace files, can be from various tools
 *.suo       # Visual Studio Solution User Options
 *.sln.docstates # Visual Studio
+project.private.config.json

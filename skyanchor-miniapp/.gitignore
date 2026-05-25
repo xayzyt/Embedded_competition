@@ -1,0 +1,8 @@
+project.private.config.json
+*.local
+*.log
+.DS_Store
+node_modules/
+miniprogram_npm/
+cloudfunctions/*/node_modules/
+cloudfunctions/*/package-lock.json
