@@ -67,9 +67,6 @@ void app_ui_main_screen_update_status(bool wifi_ok, bool mqtt_ok, bool ch32_ok);
 /* 设置主屏幕任务状态文本。 */
 void app_ui_main_screen_set_task_text(const char *text);
 
-/* 预留天气区域文本更新接口。 */
-void app_ui_main_screen_set_weather_text(const char *text);
-
 /* 更新天气卡片文本和天气现象图标，weather_code 使用心知天气 now.code。 */
 void app_ui_main_screen_set_weather(const char *text, int weather_code);
 

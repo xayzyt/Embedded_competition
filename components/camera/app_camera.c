@@ -66,8 +66,8 @@ static const char *TAG = "app_camera";
 /* -------------------------------------------------------------------------- */
 
 static bool s_camera_inited = false;
-static bool s_preview_running = false;
-static bool s_camera_paused = false;
+static volatile bool s_preview_running = false;
+static volatile bool s_camera_paused = false;
 static int s_video_fd = -1;
 static lv_obj_t *s_camera_canvas = NULL;
 static size_t s_cache_line_size = 0;

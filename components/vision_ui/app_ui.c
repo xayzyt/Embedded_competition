@@ -336,30 +336,6 @@ static lv_obj_t *app_ui_create_soft_panel(lv_obj_t *parent,
     return panel;
 }
 
-/* 状态值面板标题。 */
-static lv_obj_t *app_ui_create_panel_title(lv_obj_t *parent, const char *text)
-{
-    lv_obj_t *label = lv_label_create(parent);
-    lv_obj_set_style_text_color(label, lv_color_hex(0x64748B), 0);
-    lv_obj_set_style_text_font(label, &font_loading_cn, 0);
-    lv_label_set_text(label, text);
-    lv_obj_align(label, LV_ALIGN_TOP_LEFT, 16, 12);
-    return label;
-}
-
-/* 状态值面板主文本。 */
-static lv_obj_t *app_ui_create_panel_value(lv_obj_t *parent, const char *text)
-{
-    lv_obj_t *label = lv_label_create(parent);
-    lv_obj_set_width(label, lv_obj_get_width(parent) - 32);
-    lv_obj_set_style_text_color(label, lv_color_hex(0x0F766E), 0);
-    lv_obj_set_style_text_font(label, &font_main_title_cn, 0);
-    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_LEFT, 0);
-    lv_label_set_text(label, text);
-    lv_obj_align(label, LV_ALIGN_BOTTOM_LEFT, 16, -10);
-    return label;
-}
-
 /* 在已持有 LVGL 锁时更新加载页详情文本。 */
 static void app_ui_set_loading_text_unlocked(const char *text)
 {
@@ -1120,19 +1096,6 @@ static lv_obj_t *app_ui_create_status_dot(lv_obj_t *parent,
     lv_obj_align_to(lbl, ind, LV_ALIGN_OUT_RIGHT_MID, 8, 0);
 
     return ind;
-}
-
-static lv_obj_t *app_ui_create_main_card(lv_obj_t *parent,
-    const char *title,
-    int32_t x,
-    int32_t y,
-    int32_t w,
-    int32_t h)
-{
-    lv_obj_t *card = app_ui_create_soft_panel(parent, w, h, 8);
-    lv_obj_align(card, LV_ALIGN_TOP_LEFT, x, y);
-    app_ui_create_panel_title(card, title);
-    return card;
 }
 
 static void app_ui_update_clock_unlocked(void)
@@ -2033,11 +1996,6 @@ void app_ui_main_screen_set_task_text(const char *text)
     }
     app_ui_apply_main_task_state_unlocked(text);
     bsp_display_unlock();
-}
-
-void app_ui_main_screen_set_weather_text(const char *text)
-{
-    app_ui_main_screen_set_weather(text, s_main_weather_code);
 }
 
 void app_ui_main_screen_set_weather(const char *text, int weather_code)

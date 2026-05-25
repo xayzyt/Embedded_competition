@@ -33,10 +33,12 @@ static const char *TAG = "main";
 #define APP_MAX_DISTANCE_MM          (700)
 #define APP_CLOUD_START_TASK_STACK   (8 * 1024)
 #define APP_CLOUD_START_TASK_PRIO    4
-#define APP_WEATHER_EMERGENCY_TASK_STACK (4 * 1024)
+#define APP_WEATHER_EMERGENCY_TASK_STACK (12 * 1024)
 #define APP_WEATHER_EMERGENCY_TASK_PRIO  5
 
 static TaskHandle_t s_weather_emergency_task = NULL;
+static portMUX_TYPE s_weather_emergency_mux = portMUX_INITIALIZER_UNLOCKED;
+static bool s_weather_emergency_running = false;
 
 /* -------------------------------------------------------------------------- */
 /* 启动步骤                                                                  */
@@ -153,11 +155,16 @@ static void app_init_runtime_modules(const app_dock_judge_config_t *dock_cfg)
     ESP_ERROR_CHECK(app_ctrl_start());
     app_ui_set_loading_text("准备抓图模块");
     app_ui_set_loading_progress(65);
-    ESP_ERROR_CHECK(app_ai_capture_init());
+    esp_err_t capture_ret = app_ai_capture_init();
+    if (capture_ret != ESP_OK)
+    {
+        ESP_LOGW(TAG, "AI capture disabled: %s", esp_err_to_name(capture_ret));
+        app_ui_set_capture_text("cap: disabled");
+    }
 }
 
 /* 启动摄像头预览和视觉流，成功后隐藏启动加载页。 */
-static void app_start_camera_pipeline(void)
+static esp_err_t app_start_camera_pipeline(void)
 {
     esp_err_t ai_ready_ret;
 
@@ -175,22 +182,35 @@ static void app_start_camera_pipeline(void)
     }
     app_ui_set_loading_text("启动摄像头");
     app_ui_set_loading_progress(85);
-    ESP_ERROR_CHECK(app_camera_init());
+    esp_err_t ret = app_camera_init();
+    if (ret != ESP_OK)
+    {
+        return ret;
+    }
     app_ui_set_loading_text("启动视觉流");
     app_ui_set_loading_progress(90);
-    ESP_ERROR_CHECK(app_vision_start());
+    ret = app_vision_start();
+    if (ret != ESP_OK)
+    {
+        return ret;
+    }
     app_ui_set_loading_text("开启预览");
     app_ui_set_loading_progress(95);
-    ESP_ERROR_CHECK(app_camera_preview_start());
+    ret = app_camera_preview_start();
+    if (ret != ESP_OK)
+    {
+        return ret;
+    }
     app_ui_set_loading_text("等待摄像头帧");
     app_ui_set_loading_progress(100);
     if (!app_camera_wait_first_frame(5000))
     {
         ESP_LOGW(TAG, "first camera frame did not reach LVGL before loading timeout");
         app_ui_set_loading_text("等待摄像头信号");
-        (void)app_camera_wait_first_frame(UINT32_MAX);
+        return ESP_ERR_TIMEOUT;
     }
     app_ui_hide_loading();
+    return ESP_OK;
 }
 
 /* 系统启动完成后，在 UI 上显示初始任务状态。 */
@@ -266,8 +286,20 @@ static void app_start_cloud_async(void)
 static void app_camera_start_task(void *arg)
 {
     (void)arg;
-    app_start_camera_pipeline();
-    app_ui_set_status("task: active");
+    esp_err_t ret = app_start_camera_pipeline();
+    if (ret == ESP_OK)
+    {
+        app_ui_set_status("task: active");
+    }
+    else
+    {
+        ESP_LOGE(TAG, "camera pipeline start failed: %s", esp_err_to_name(ret));
+        s_camera_started = false;
+        app_camera_pause();
+        app_ui_hide_loading();
+        app_ui_set_status("task: camera start failed");
+        app_ui_show_main_screen();
+    }
     vTaskDelete(NULL);
 }
 
@@ -355,11 +387,36 @@ static void app_weather_sim_cb(void)
     app_cloud_set_weather_simulated(!app_cloud_is_weather_simulated());
 }
 
+static bool app_weather_emergency_try_begin(void)
+{
+    bool ok = false;
+    taskENTER_CRITICAL(&s_weather_emergency_mux);
+    if (!s_weather_emergency_running)
+    {
+        s_weather_emergency_running = true;
+        ok = true;
+    }
+    taskEXIT_CRITICAL(&s_weather_emergency_mux);
+    return ok;
+}
+
+static void app_weather_emergency_finish(void)
+{
+    taskENTER_CRITICAL(&s_weather_emergency_mux);
+    s_weather_emergency_running = false;
+    s_weather_emergency_task = NULL;
+    taskEXIT_CRITICAL(&s_weather_emergency_mux);
+}
+
 static void app_weather_emergency_task(void *arg)
 {
     (void)arg;
+    ESP_LOGW(TAG, "weather emergency guard begin");
     app_cloud_trigger_weather_emergency();
-    s_weather_emergency_task = NULL;
+    ESP_LOGI(TAG,
+        "weather emergency guard done, stack_free=%u",
+        (unsigned)uxTaskGetStackHighWaterMark(NULL));
+    app_weather_emergency_finish();
     vTaskDelete(NULL);
 }
 
@@ -370,7 +427,11 @@ static void app_weather_emergency_cb(void)
     app_ui_main_screen_show_pickup(false);
     app_ui_main_screen_set_task_text("weather blocked");
 
-    if (s_weather_emergency_task != NULL)
+    if (app_cloud_is_weather_docking_blocked())
+    {
+        return;
+    }
+    if (!app_weather_emergency_try_begin())
     {
         return;
     }
@@ -383,8 +444,9 @@ static void app_weather_emergency_cb(void)
         &s_weather_emergency_task);
     if (ok != pdPASS)
     {
-        s_weather_emergency_task = NULL;
-        app_cloud_trigger_weather_emergency();
+        app_weather_emergency_finish();
+        ESP_LOGE(TAG, "create weather emergency task failed");
+        app_cloud_set_weather_simulated(true);
     }
 }
 

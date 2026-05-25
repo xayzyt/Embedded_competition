@@ -22,9 +22,6 @@ bool app_cloud_is_wifi_connected(void);
 /* 查询 MQTT 是否已连接到 broker。 */
 bool app_cloud_is_mqtt_connected(void);
 
-/* 模拟极端恶劣天气：天气固定为台风 28℃，并禁止/停止接驳。 */
-void app_cloud_simulate_severe_weather(void);
-
 /* 开启或恢复天气模拟状态。 */
 void app_cloud_set_weather_simulated(bool simulated);
 void app_cloud_trigger_weather_emergency(void);

@@ -153,14 +153,7 @@ esp_err_t app_ch32_link_send_cmd_and_wait_ack(char cmd, uint32_t timeout_ms);
 /* 主动探测 ready */
 esp_err_t app_ch32_link_probe_ready(uint32_t timeout_ms);
 
-/* 发送二进制协议帧 */
-esp_err_t app_ch32_link_send_proto(app_ch32_proto_cmd_t cmd,
-                                   const void *payload,
-                                   uint8_t payload_len,
-                                   uint8_t *out_seq);
-
 bool app_ch32_link_is_ready(void);
-bool app_ch32_link_last_weight(int32_t *out_weight_g);
 
 const char *app_ch32_link_proto_stage_name(app_ch32_proto_stage_t stage);
 const char *app_ch32_link_proto_error_name(uint8_t err);

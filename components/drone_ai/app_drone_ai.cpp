@@ -43,6 +43,22 @@ static const char *TAG = "drone_ai";
 #define DRONE_AI_STATUS_INTERVAL_MS   1000U
 #define DRONE_AI_LOG_INTERVAL         10U
 
+typedef enum {
+    APP_DRONE_AI_CLASS_NODRONE = 0,
+    APP_DRONE_AI_CLASS_DRONE = 1,
+} app_drone_ai_class_t;
+
+typedef struct {
+    bool valid;
+    bool confirmed;
+    app_drone_ai_class_t label;
+    float nodrone_score;
+    float drone_score;
+    uint8_t hit_count;
+    uint32_t frame_seq;
+    uint32_t infer_ms;
+} app_drone_ai_result_t;
+
 typedef struct {
     uint8_t *rgb;
     uint32_t src_width;
@@ -779,28 +795,6 @@ esp_err_t app_drone_ai_submit_frame(const uint8_t *rgb565,
         taskEXIT_CRITICAL(&s_ai_mux);
     }
     return ESP_OK;
-}
-
-bool app_drone_ai_get_latest_result(app_drone_ai_result_t *out)
-{
-    if (out == NULL)
-    {
-        return false;
-    }
-
-    taskENTER_CRITICAL(&s_ai_mux);
-    *out = s_latest;
-    taskEXIT_CRITICAL(&s_ai_mux);
-    return out->valid;
-}
-
-bool app_drone_ai_is_model_ready(void)
-{
-    bool ready = false;
-    taskENTER_CRITICAL(&s_ai_mux);
-    ready = s_model_ready;
-    taskEXIT_CRITICAL(&s_ai_mux);
-    return ready;
 }
 
 static void app_drone_ai_request_model_load(void)

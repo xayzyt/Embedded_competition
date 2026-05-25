@@ -496,8 +496,7 @@ static void app_cloud_send_weather_protection(void)
 {
     if (!app_ch32_link_is_ready())
     {
-        ESP_LOGW(TAG, "weather protection skipped: CH32 not ready");
-        return;
+        ESP_LOGW(TAG, "CH32 not ready, try SAFE_CLOSE anyway");
     }
 
     esp_err_t ret = app_ch32_link_send_cmd_and_wait_ack('C', 3000);
@@ -751,11 +750,6 @@ static void app_cloud_start_weather_task_once(void)
         ESP_LOGW(TAG, "create weather task failed");
         s_weather_task = NULL;
     }
-}
-
-void app_cloud_simulate_severe_weather(void)
-{
-    app_cloud_set_weather_simulated(true);
 }
 
 void app_cloud_set_weather_simulated(bool simulated)

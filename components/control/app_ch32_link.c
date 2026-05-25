@@ -10,6 +10,7 @@
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "driver/gpio.h"
 #include "driver/uart.h"
@@ -31,13 +32,12 @@ static const char *TAG = "app_ch32_link";
 typedef struct {
     uart_port_t uart_num;
     EventGroupHandle_t event_group;
+    SemaphoreHandle_t tx_mutex;
     TaskHandle_t rx_task;
     app_ch32_line_cb_t cb;
     void *user_ctx;
     bool inited;
     bool ready;
-    int32_t last_weight_g;
-    bool has_weight;
     app_ch32_proto_cmd_t last_ack_cmd;
     uint8_t last_ack_seq;
     app_ch32_proto_cmd_t last_nack_cmd;
@@ -48,6 +48,33 @@ typedef struct {
 } app_ch32_link_ctx_t;
 
 static app_ch32_link_ctx_t s_ctx = {0};
+
+static uint32_t app_ch32_link_lock_timeout_ms(uint32_t timeout_ms)
+{
+    const uint32_t guard_ms = 100U;
+    if (timeout_ms > (UINT32_MAX - guard_ms))
+    {
+        return UINT32_MAX;
+    }
+    return timeout_ms + guard_ms;
+}
+
+static bool app_ch32_link_lock_tx(uint32_t timeout_ms)
+{
+    if (s_ctx.tx_mutex == NULL)
+    {
+        return false;
+    }
+    return xSemaphoreTake(s_ctx.tx_mutex, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
+}
+
+static void app_ch32_link_unlock_tx(void)
+{
+    if (s_ctx.tx_mutex != NULL)
+    {
+        xSemaphoreGive(s_ctx.tx_mutex);
+    }
+}
 
 /* -------------------- CRC16 -------------------- */
 static uint16_t app_ch32_crc16_ibm(const uint8_t *data, size_t len)
@@ -184,8 +211,6 @@ static void app_ch32_apply_common_side_effects(const app_ch32_line_t *msg)
     /* STATUS 类型统一承载: 状态/事件/错误/心跳 */
     if (msg->type == APP_CH32_LINE_PROTO_STATUS && msg->payload_len >= 8U)
     {
-        s_ctx.last_weight_g = msg->proto_weight_g;
-        s_ctx.has_weight = true;
         s_ctx.ready = app_ch32_proto_stage_indicates_ready(msg->proto_stage, msg->proto_flags);
         if (s_ctx.ready)
             xEventGroupSetBits(s_ctx.event_group, CH32_EVT_READY);
@@ -387,7 +412,7 @@ static esp_err_t app_ch32_link_prepare_tx_idle(void)
  * 帧格式: SOF1 SOF2 TYPE_CMD cmd seq len [payload] CRC16
  * CRC 覆盖前 6+payload_len 字节
  */
-esp_err_t app_ch32_link_send_proto(app_ch32_proto_cmd_t cmd,
+static esp_err_t app_ch32_link_send_proto(app_ch32_proto_cmd_t cmd,
     const void *payload, uint8_t payload_len, uint8_t *out_seq)
 {
     ESP_RETURN_ON_FALSE(s_ctx.inited, ESP_ERR_INVALID_STATE, TAG, "not initialized");
@@ -474,7 +499,6 @@ esp_err_t app_ch32_link_init(app_ch32_line_cb_t cb, void *user_ctx)
     s_ctx.cb = cb;
     s_ctx.user_ctx = user_ctx;
     s_ctx.ready = false;
-    s_ctx.has_weight = false;
     app_ch32_reset_ack_state();
     s_ctx.next_seq = 0;
     s_ctx.last_rx_tick = 0;
@@ -500,6 +524,8 @@ esp_err_t app_ch32_link_init(app_ch32_line_cb_t cb, void *user_ctx)
 
     s_ctx.event_group = xEventGroupCreate();
     ESP_RETURN_ON_FALSE(s_ctx.event_group != NULL, ESP_ERR_NO_MEM, TAG, "event group create failed");
+    s_ctx.tx_mutex = xSemaphoreCreateMutex();
+    ESP_RETURN_ON_FALSE(s_ctx.tx_mutex != NULL, ESP_ERR_NO_MEM, TAG, "tx mutex create failed");
 
     BaseType_t ok = xTaskCreate(app_ch32_link_rx_task, "ch32_rx", 4096, NULL, 8, &s_ctx.rx_task);
     ESP_RETURN_ON_FALSE(ok == pdPASS, ESP_ERR_NO_MEM, TAG, "rx task create failed");
@@ -517,39 +543,48 @@ esp_err_t app_ch32_link_send_cmd_and_wait_ack(char cmd, uint32_t timeout_ms)
     const app_ch32_proto_cmd_t proto_cmd = app_ch32_char_cmd_to_proto(cmd);
     ESP_RETURN_ON_FALSE(proto_cmd != APP_CH32_PROTO_CMD_NONE,
         ESP_ERR_INVALID_ARG, TAG, "unknown cmd: %c", cmd);
+    if (!app_ch32_link_lock_tx(app_ch32_link_lock_timeout_ms(timeout_ms)))
+    {
+        return ESP_ERR_TIMEOUT;
+    }
 
     xEventGroupClearBits(s_ctx.event_group, CH32_EVT_ACK | CH32_EVT_NACK);
     app_ch32_reset_ack_state();
 
     uint8_t seq = 0;
-    ESP_RETURN_ON_ERROR(app_ch32_link_send_proto(proto_cmd, NULL, 0, &seq), TAG, "proto send failed");
-    return app_ch32_link_wait_ack_for_cmd(proto_cmd, seq, timeout_ms);
+    esp_err_t ret = app_ch32_link_send_proto(proto_cmd, NULL, 0, &seq);
+    if (ret == ESP_OK)
+    {
+        ret = app_ch32_link_wait_ack_for_cmd(proto_cmd, seq, timeout_ms);
+    }
+    app_ch32_link_unlock_tx();
+    return ret;
 }
 
 esp_err_t app_ch32_link_probe_ready(uint32_t timeout_ms)
 {
     ESP_RETURN_ON_FALSE(s_ctx.inited, ESP_ERR_INVALID_STATE, TAG, "not initialized");
     if (app_ch32_ready_is_fresh()) return ESP_OK;
+    if (!app_ch32_link_lock_tx(app_ch32_link_lock_timeout_ms(timeout_ms)))
+    {
+        return ESP_ERR_TIMEOUT;
+    }
 
     s_ctx.ready = false;
     xEventGroupClearBits(s_ctx.event_group, CH32_EVT_READY);
 
-    ESP_RETURN_ON_ERROR(app_ch32_link_send_proto(APP_CH32_PROTO_CMD_PROBE_READY, NULL, 0, NULL),
-        TAG, "proto probe send failed");
-
-    EventBits_t bits = xEventGroupWaitBits(s_ctx.event_group, CH32_EVT_READY,
-        pdFALSE, pdFALSE, pdMS_TO_TICKS(timeout_ms));
-    return ((bits & CH32_EVT_READY) != 0U) ? ESP_OK : ESP_ERR_TIMEOUT;
+    esp_err_t ret = app_ch32_link_send_proto(APP_CH32_PROTO_CMD_PROBE_READY, NULL, 0, NULL);
+    if (ret == ESP_OK)
+    {
+        EventBits_t bits = xEventGroupWaitBits(s_ctx.event_group, CH32_EVT_READY,
+            pdFALSE, pdFALSE, pdMS_TO_TICKS(timeout_ms));
+        ret = ((bits & CH32_EVT_READY) != 0U) ? ESP_OK : ESP_ERR_TIMEOUT;
+    }
+    app_ch32_link_unlock_tx();
+    return ret;
 }
 
 bool app_ch32_link_is_ready(void)
 {
     return app_ch32_ready_is_fresh();
-}
-
-bool app_ch32_link_last_weight(int32_t *out_weight_g)
-{
-    if (!s_ctx.has_weight || out_weight_g == NULL) return false;
-    *out_weight_g = s_ctx.last_weight_g;
-    return true;
 }
