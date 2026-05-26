@@ -10,6 +10,7 @@
 #include "sdkconfig.h"
 #include "app_apriltag.h"
 #include "app_ai_capture.h"
+#include "app_image_utils.h"
 #include "app_ui.h"
 #define VISION_TASK_STACK_SIZE         (16 * 1024)
 #define VISION_TASK_PRIORITY           4
@@ -70,57 +71,6 @@ static inline uint32_t app_vision_now_ms(void)
 {
     return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
 }
-static inline uint8_t app_rgb565_to_gray(uint16_t pixel)
-{
-    uint32_t r = (pixel >> 11) & 0x1F;
-    uint32_t g = (pixel >> 5) & 0x3F;
-    uint32_t b = pixel & 0x1F;
-    r = (r << 3) | (r >> 2);
-    g = (g << 2) | (g >> 4);
-    b = (b << 3) | (b >> 2);
-    return (uint8_t)((r * 77U + g * 150U + b * 29U) >> 8);
-}
-static void app_vision_calc_center_crop(uint32_t src_width,
-    uint32_t src_height,
-    uint32_t dst_width,
-    uint32_t dst_height,
-    uint32_t *crop_x,
-    uint32_t *crop_y,
-    uint32_t *crop_w,
-    uint32_t *crop_h)
-{
-    uint32_t x = 0;
-    uint32_t y = 0;
-    uint32_t w = src_width;
-    uint32_t h = src_height;
-    if (src_width == 0U || src_height == 0U || dst_width == 0U || dst_height == 0U)
-    {
-        w = 0;
-        h = 0;
-    }
-    else if (((uint64_t)src_width * dst_height) > ((uint64_t)src_height * dst_width))
-    {
-        w = (uint32_t)(((uint64_t)src_height * dst_width) / dst_height);
-        if (w == 0U || w > src_width)
-        {
-            w = src_width;
-        }
-        x = (src_width - w) / 2U;
-    }
-    else if (((uint64_t)src_width * dst_height) < ((uint64_t)src_height * dst_width))
-    {
-        h = (uint32_t)(((uint64_t)src_width * dst_height) / dst_width);
-        if (h == 0U || h > src_height)
-        {
-            h = src_height;
-        }
-        y = (src_height - h) / 2U;
-    }
-    if (crop_x) *crop_x = x;
-    if (crop_y) *crop_y = y;
-    if (crop_w) *crop_w = w;
-    if (crop_h) *crop_h = h;
-}
 static void app_vision_prepare_sample_map(uint32_t width, uint32_t height)
 {
     if (s_sample_map_width == width && s_sample_map_height == height)
@@ -131,7 +81,7 @@ static void app_vision_prepare_sample_map(uint32_t width, uint32_t height)
     uint32_t crop_y = 0;
     uint32_t crop_w = width;
     uint32_t crop_h = height;
-    app_vision_calc_center_crop(width,
+    app_image_calc_center_crop(width,
         height,
         VISION_GRAY_WIDTH,
         VISION_GRAY_HEIGHT,
@@ -656,7 +606,7 @@ esp_err_t app_vision_submit_frame(const uint8_t *rgb565,
         uint8_t *dst_row = &write_slot->gray[gy * VISION_GRAY_WIDTH];
         for (uint32_t gx = 0; gx < VISION_GRAY_WIDTH; gx++) {
             uint16_t pixel = src_row[s_sample_x[gx]];
-            dst_row[gx] = app_rgb565_to_gray(pixel);
+            dst_row[gx] = app_image_rgb565_to_gray(pixel);
         }
     }
     taskENTER_CRITICAL(&s_vision_mux);

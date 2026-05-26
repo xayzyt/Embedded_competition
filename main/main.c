@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/task.h"
 #include "esp_err.h"
 #include "esp_log.h"
@@ -18,6 +19,8 @@
 #include "app_vision.h"
 #include "bsp_display_port.h"
 static const char *TAG = "main";
+
+// 演示默认参数集中放在入口处，方便按一次启动流程阅读。
 #define APP_TARGET_TAG_ID            (1U)
 #define APP_TAG_SIZE_MM              (60)
 #define APP_DISTANCE_GATE_ENABLE     (0)
@@ -26,9 +29,20 @@ static const char *TAG = "main";
 #define APP_MAX_DISTANCE_MM          (700)
 #define APP_CLOUD_START_TASK_STACK   (8 * 1024)
 #define APP_CLOUD_START_TASK_PRIO    4
+#define APP_TASK_EVENT_QUEUE_LEN      8
+#define APP_TASK_EVENT_TASK_STACK     (8 * 1024)
+#define APP_TASK_EVENT_TASK_PRIO      5
 #define APP_WEATHER_EMERGENCY_TASK_STACK (12 * 1024)
 #define APP_WEATHER_EMERGENCY_TASK_PRIO  5
+
+// 任务状态回调可能来自 MQTT 或控制任务，UI 切换统一交给本地 worker 处理。
+typedef struct {
+    app_task_event_t event;
+    app_task_snapshot_t snap;
+} app_main_task_event_msg_t;
 static TaskHandle_t s_weather_emergency_task = NULL;
+static TaskHandle_t s_task_event_task = NULL;
+static QueueHandle_t s_task_event_queue = NULL;
 static portMUX_TYPE s_weather_emergency_mux = portMUX_INITIALIZER_UNLOCKED;
 static bool s_weather_emergency_running = false;
 static void app_init_nvs(void)
@@ -181,6 +195,7 @@ static void app_show_ready_status(const app_dock_judge_config_t *dock_cfg)
     {
         app_ui_set_status("task: configured / demo loose");
     }
+    app_ui_main_screen_set_task_state(APP_UI_MAIN_TASK_CONFIGURED);
     snprintf(vision_text,
              sizeof(vision_text),
              "task:configured target:%u src:local",
@@ -189,6 +204,8 @@ static void app_show_ready_status(const app_dock_judge_config_t *dock_cfg)
 }
 static bool s_camera_started = false;
 static bool s_cloud_start_requested = false;
+
+// 云端启动会等待 ESP-Hosted 和 Wi-Fi，放到后台避免阻塞主屏。
 static void app_cloud_start_task(void *arg)
 {
     (void)arg;
@@ -200,6 +217,7 @@ static void app_cloud_start_task(void *arg)
                  "cloud init failed (%s), continue with local vision/control",
                  esp_err_to_name(ret));
         app_ui_set_status("task: local mode / cloud offline");
+        app_ui_main_screen_set_task_state(APP_UI_MAIN_TASK_LOCAL_WAIT);
     }
     else
     {
@@ -225,6 +243,7 @@ static void app_start_cloud_async(void)
         s_cloud_start_requested = false;
         ESP_LOGE(TAG, "create cloud start task failed");
         app_ui_set_status("task: local mode / cloud start failed");
+        app_ui_main_screen_set_task_state(APP_UI_MAIN_TASK_LOCAL_WAIT);
     }
 }
 static void app_camera_start_task(void *arg)
@@ -234,6 +253,7 @@ static void app_camera_start_task(void *arg)
     if (ret == ESP_OK)
     {
         app_ui_set_status("task: active");
+        app_ui_main_screen_set_task_state(APP_UI_MAIN_TASK_ACTIVE);
     }
     else
     {
@@ -242,10 +262,13 @@ static void app_camera_start_task(void *arg)
         app_camera_pause();
         app_ui_hide_loading();
         app_ui_set_status("task: camera start failed");
+        app_ui_main_screen_set_task_state(APP_UI_MAIN_TASK_CAMERA_FAILED);
         app_ui_show_main_screen();
     }
     vTaskDelete(NULL);
 }
+
+// 摄像头资源较重，只有任务进入视觉阶段时才启动。
 static void app_start_camera_if_needed(void)
 {
     if (s_camera_started)
@@ -259,15 +282,13 @@ static void app_start_camera_if_needed(void)
         s_camera_started = false;
         ESP_LOGE(TAG, "create camera start task failed");
         app_ui_set_status("task: camera start failed");
+        app_ui_main_screen_set_task_state(APP_UI_MAIN_TASK_CAMERA_FAILED);
         app_ui_show_main_screen();
     }
 }
-static void app_on_task_event(app_task_event_t event,
-                              const app_task_snapshot_t *snap,
-                              void *user_ctx)
+static void app_handle_task_state_changed(const app_task_snapshot_t *snap)
 {
-    (void)user_ctx;
-    if (event != APP_TASK_EVENT_STATE_CHANGED || snap == NULL)
+    if (snap == NULL)
     {
         return;
     }
@@ -280,6 +301,7 @@ static void app_on_task_event(app_task_event_t event,
     case APP_TASK_STATE_COMPLETED:
         app_camera_pause();
         app_ui_show_main_screen();
+        app_ui_main_screen_set_task_state(APP_UI_MAIN_TASK_COMPLETED);
         app_ui_main_screen_show_pickup(true);
         break;
     case APP_TASK_STATE_FAULT:
@@ -292,36 +314,103 @@ static void app_on_task_event(app_task_event_t event,
         break;
     }
 }
+static void app_task_event_task(void *arg)
+{
+    (void)arg;
+    app_main_task_event_msg_t msg = {0};
+    for (;;)
+    {
+        if (xQueueReceive(s_task_event_queue, &msg, portMAX_DELAY) != pdPASS)
+        {
+            continue;
+        }
+        if (msg.event == APP_TASK_EVENT_STATE_CHANGED)
+        {
+            app_handle_task_state_changed(&msg.snap);
+        }
+    }
+}
+
+static esp_err_t app_start_task_event_worker(void)
+{
+    if (s_task_event_queue == NULL)
+    {
+        s_task_event_queue = xQueueCreate(APP_TASK_EVENT_QUEUE_LEN, sizeof(app_main_task_event_msg_t));
+        if (s_task_event_queue == NULL)
+        {
+            return ESP_ERR_NO_MEM;
+        }
+    }
+    if (s_task_event_task != NULL)
+    {
+        return ESP_OK;
+    }
+    BaseType_t ok = xTaskCreate(app_task_event_task,
+        "main_task_evt",
+        APP_TASK_EVENT_TASK_STACK,
+        NULL,
+        APP_TASK_EVENT_TASK_PRIO,
+        &s_task_event_task);
+    if (ok != pdPASS)
+    {
+        s_task_event_task = NULL;
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+static void app_on_task_event(app_task_event_t event,
+                              const app_task_snapshot_t *snap,
+                              void *user_ctx)
+{
+    (void)user_ctx;
+    if (snap == NULL || s_task_event_queue == NULL)
+    {
+        return;
+    }
+    app_main_task_event_msg_t msg = {
+        .event = event,
+        .snap = *snap,
+    };
+    // 队列满时丢弃旧状态，主屏只需要按最新快照收敛。
+    if (xQueueSend(s_task_event_queue, &msg, 0) != pdPASS)
+    {
+        app_main_task_event_msg_t dropped = {0};
+        (void)xQueueReceive(s_task_event_queue, &dropped, 0);
+        (void)xQueueSend(s_task_event_queue, &msg, 0);
+    }
+}
 static void app_pickup_cb(void)
 {
     if (app_cloud_is_weather_docking_blocked())
     {
         app_ui_main_screen_show_pickup(false);
-        app_ui_main_screen_set_task_text("weather blocked");
+        app_ui_main_screen_set_task_state(APP_UI_MAIN_TASK_WEATHER_BLOCKED);
         return;
     }
     app_task_snapshot_t snap = {0};
     if (!app_task_peek_snapshot(&snap) || snap.state != APP_TASK_STATE_COMPLETED)
     {
         app_ui_main_screen_show_pickup(false);
-        app_ui_main_screen_set_task_text("pickup failed / retry");
+        app_ui_main_screen_set_task_state(APP_UI_MAIN_TASK_PICKUP_FAILED);
         return;
     }
-    esp_err_t ret = app_ch32_link_send_cmd_and_wait_ack('D', 2000);
+    esp_err_t ret = app_ch32_link_send_proto_cmd_and_wait_ack(APP_CH32_PROTO_CMD_OPEN_INNER_DOOR, 2000);
     if (ret != ESP_OK)
     {
         ESP_LOGW(TAG, "open inner door failed: %s", esp_err_to_name(ret));
         app_ui_main_screen_show_pickup(true);
-        app_ui_main_screen_set_task_text("pickup failed / retry");
+        app_ui_main_screen_set_task_state(APP_UI_MAIN_TASK_PICKUP_FAILED);
         return;
     }
     app_ui_main_screen_show_pickup(false);
-    app_ui_main_screen_set_task_text("waiting task");
+    app_ui_main_screen_set_task_state(APP_UI_MAIN_TASK_WAITING);
 }
 static void app_weather_sim_cb(void)
 {
     app_cloud_set_weather_simulated(!app_cloud_is_weather_simulated());
 }
+
+// 天气紧急保护可能被 UI 和云端共同触发，需要串行化。
 static bool app_weather_emergency_try_begin(void)
 {
     bool ok = false;
@@ -357,7 +446,7 @@ static void app_weather_emergency_cb(void)
     app_camera_pause();
     app_ui_show_main_screen();
     app_ui_main_screen_show_pickup(false);
-    app_ui_main_screen_set_task_text("weather blocked");
+    app_ui_main_screen_set_task_state(APP_UI_MAIN_TASK_WEATHER_BLOCKED);
     if (app_cloud_is_weather_docking_blocked())
     {
         return;
@@ -384,10 +473,10 @@ static void app_main_screen_status_task(void *arg)
     (void)arg;
     for (;;)
     {
-        bool wifi = app_cloud_is_wifi_connected();
-        bool mqtt = app_cloud_is_mqtt_connected();
+        app_cloud_status_t cloud = {0};
+        app_cloud_get_status(&cloud);
         bool ch32 = app_ch32_link_is_ready();
-        app_ui_main_screen_update_status(wifi, mqtt, ch32);
+        app_ui_main_screen_update_status(cloud.wifi_connected, cloud.mqtt_connected, ch32);
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
@@ -410,11 +499,22 @@ void app_main(void)
     app_ui_show_main_screen();
     app_ui_hide_loading();
     app_show_ready_status(&dock_cfg);
-    esp_err_t cb_ret = app_task_register_event_callback(app_on_task_event, NULL);
-    if (cb_ret != ESP_OK)
+
+    // UI 可见后再注册任务事件，并通过 main_task_evt 隔离调用栈。
+    esp_err_t evt_ret = app_start_task_event_worker();
+    if (evt_ret != ESP_OK)
     {
-        ESP_LOGE(TAG, "register task event callback failed: %s", esp_err_to_name(cb_ret));
-        app_ui_set_status("task: event callback failed");
+        ESP_LOGE(TAG, "start task event worker failed: %s", esp_err_to_name(evt_ret));
+        app_ui_set_status("task: event worker failed");
+    }
+    else
+    {
+        esp_err_t cb_ret = app_task_register_event_callback(app_on_task_event, NULL);
+        if (cb_ret != ESP_OK)
+        {
+            ESP_LOGE(TAG, "register task event callback failed: %s", esp_err_to_name(cb_ret));
+            app_ui_set_status("task: event callback failed");
+        }
     }
     app_start_cloud_async();
     BaseType_t status_task_ok = xTaskCreate(app_main_screen_status_task,

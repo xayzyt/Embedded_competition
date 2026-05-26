@@ -441,10 +441,16 @@ esp_err_t app_ch32_link_init(app_ch32_line_cb_t cb, void *user_ctx)
 }
 esp_err_t app_ch32_link_send_cmd_and_wait_ack(char cmd, uint32_t timeout_ms)
 {
-    ESP_RETURN_ON_FALSE(s_ctx.inited, ESP_ERR_INVALID_STATE, TAG, "not initialized");
     const app_ch32_proto_cmd_t proto_cmd = app_ch32_char_cmd_to_proto(cmd);
     ESP_RETURN_ON_FALSE(proto_cmd != APP_CH32_PROTO_CMD_NONE,
         ESP_ERR_INVALID_ARG, TAG, "unknown cmd: %c", cmd);
+    return app_ch32_link_send_proto_cmd_and_wait_ack(proto_cmd, timeout_ms);
+}
+esp_err_t app_ch32_link_send_proto_cmd_and_wait_ack(app_ch32_proto_cmd_t proto_cmd, uint32_t timeout_ms)
+{
+    ESP_RETURN_ON_FALSE(s_ctx.inited, ESP_ERR_INVALID_STATE, TAG, "not initialized");
+    ESP_RETURN_ON_FALSE(proto_cmd != APP_CH32_PROTO_CMD_NONE,
+        ESP_ERR_INVALID_ARG, TAG, "unknown proto cmd: %u", (unsigned)proto_cmd);
     if (!app_ch32_link_lock_tx(app_ch32_link_lock_timeout_ms(timeout_ms)))
     {
         return ESP_ERR_TIMEOUT;

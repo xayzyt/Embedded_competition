@@ -22,7 +22,7 @@ static const char *TAG = "app_ctrl";
 #define CTRL_TASK_CORE_ID               1
 #define CTRL_POLL_MS                    60U
 #define CTRL_READY_PROBE_INTERVAL_MS    1000U
-#define CTRL_DOCK_CMD                   ('A')
+#define CTRL_DOCK_CMD                   APP_CH32_PROTO_CMD_START_DOCK
 #define CTRL_ACK_WAIT_MS                2000U
 #define CTRL_BUSY_TIMEOUT_MS            20000U
 #define CTRL_NOTICE_SHOW_MS             1600U
@@ -64,6 +64,26 @@ typedef struct {
 static TaskHandle_t s_ctrl_task = NULL;
 static portMUX_TYPE s_ctrl_mux = portMUX_INITIALIZER_UNLOCKED;
 static app_ctrl_runtime_t s_rt = {0};
+static void app_ctrl_on_task_event(app_task_event_t event,
+    const app_task_snapshot_t *snap,
+    void *user_ctx)
+{
+    (void)user_ctx;
+    if (event != APP_TASK_EVENT_STATE_CHANGED || snap == NULL)
+    {
+        return;
+    }
+    switch (snap->state) {
+    case APP_TASK_STATE_WAIT_APPROACH:
+    case APP_TASK_STATE_COMPLETED:
+    case APP_TASK_STATE_FAULT:
+    case APP_TASK_STATE_CANCELLED:
+        app_drone_ai_reset_gate();
+        break;
+    default:
+        break;
+    }
+}
 static inline uint32_t app_ctrl_now_ms(void)
 {
     return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
@@ -385,7 +405,7 @@ static void app_ctrl_try_auto_dock(uint32_t now_ms,
     {
         app_ctrl_set_notice("dock: blocked by weather", CTRL_NOTICE_SHOW_MS);
         app_task_cancel("blocked by severe weather");
-        app_ui_main_screen_set_task_text("weather blocked");
+        app_ui_main_screen_set_task_state(APP_UI_MAIN_TASK_WEATHER_BLOCKED);
         (void)app_task_get_snapshot(task);
         return;
     }
@@ -395,14 +415,13 @@ static void app_ctrl_try_auto_dock(uint32_t now_ms,
         return;
     }
     ESP_LOGI(TAG,
-        "READY rising edge -> send CH32 cmd %c (id=%u dx=%ld dy=%ld z=%ld score=%u)",
-        CTRL_DOCK_CMD,
+        "READY rising edge -> send CH32 cmd START_DOCK (id=%u dx=%ld dy=%ld z=%ld score=%u)",
         (unsigned)dock->tag_id,
         (long)dock->dx,
         (long)dock->dy,
         (long)dock->est_distance_mm,
         (unsigned)dock->hover_score);
-    esp_err_t ret = app_ch32_link_send_cmd_and_wait_ack(CTRL_DOCK_CMD, CTRL_ACK_WAIT_MS);
+    esp_err_t ret = app_ch32_link_send_proto_cmd_and_wait_ack(CTRL_DOCK_CMD, CTRL_ACK_WAIT_MS);
     if (ret == ESP_OK)
     {
         taskENTER_CRITICAL(&s_ctrl_mux);
@@ -421,7 +440,7 @@ static void app_ctrl_try_auto_dock(uint32_t now_ms,
         (void)app_task_get_snapshot(task);
         return;
     }
-    ESP_LOGW(TAG, "send CH32 cmd %c failed: %s", CTRL_DOCK_CMD, esp_err_to_name(ret));
+    ESP_LOGW(TAG, "send CH32 cmd START_DOCK failed: %s", esp_err_to_name(ret));
     const bool ch32_rejected = (ret == ESP_ERR_INVALID_RESPONSE);
     taskENTER_CRITICAL(&s_ctrl_mux);
     s_rt.last_proto_error = APP_CH32_ERR_INTERNAL;
@@ -647,6 +666,11 @@ esp_err_t app_ctrl_init(void)
     s_rt.last_proto_error = APP_CH32_ERR_NONE;
     s_rt.inited = true;
     taskEXIT_CRITICAL(&s_ctrl_mux);
+    esp_err_t cb_ret = app_task_register_event_callback(app_ctrl_on_task_event, NULL);
+    if (cb_ret != ESP_OK)
+    {
+        ESP_LOGW(TAG, "register ctrl task callback failed: %s", esp_err_to_name(cb_ret));
+    }
     ESP_LOGI(TAG, "ctrl init done (auto_dock=%d)", CTRL_AUTO_DOCK_ENABLE);
     return ESP_OK;
 }

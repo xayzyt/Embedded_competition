@@ -6,6 +6,8 @@ idf_component_register(
         "app_dock_judge.c"
         "app_task.c"
         "app_cloud.c"
+        "private/app_cloud_messaging.c"
+        "private/app_cloud_weather.c"
         "private/app_cloud_cmd.c"
         "app_ch32_link.c"
     INCLUDE_DIRS "."

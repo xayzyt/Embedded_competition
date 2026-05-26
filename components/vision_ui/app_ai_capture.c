@@ -10,6 +10,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "bsp/esp-bsp.h"
+#include "app_image_utils.h"
 #include "app_ui.h"
 #define CAPTURE_ROOT_DIR            BSP_SD_MOUNT_POINT "/CAP"
 #define CAPTURE_DRONE_DIR           CAPTURE_ROOT_DIR "/DRONE"
@@ -44,21 +45,6 @@ static QueueHandle_t s_free_queue = NULL;
 static QueueHandle_t s_write_queue = NULL;
 static app_ai_capture_slot_t s_slots[CAPTURE_SLOT_COUNT] = {0};
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
-static inline uint8_t app_ai_capture_rgb565_r(uint16_t pixel)
-{
-    uint8_t r = (uint8_t)((pixel >> 11) & 0x1F);
-    return (uint8_t)((r << 3) | (r >> 2));
-}
-static inline uint8_t app_ai_capture_rgb565_g(uint16_t pixel)
-{
-    uint8_t g = (uint8_t)((pixel >> 5) & 0x3F);
-    return (uint8_t)((g << 2) | (g >> 4));
-}
-static inline uint8_t app_ai_capture_rgb565_b(uint16_t pixel)
-{
-    uint8_t b = (uint8_t)(pixel & 0x1F);
-    return (uint8_t)((b << 3) | (b >> 2));
-}
 static void app_ai_capture_put_le16(uint8_t *dst, uint16_t value)
 {
     dst[0] = (uint8_t)(value & 0xFFU);
@@ -74,47 +60,6 @@ static void app_ai_capture_put_le32(uint8_t *dst, uint32_t value)
 static void app_ai_capture_put_le_i32(uint8_t *dst, int32_t value)
 {
     app_ai_capture_put_le32(dst, (uint32_t)value);
-}
-static void app_ai_capture_calc_center_crop(uint32_t src_width,
-                                            uint32_t src_height,
-                                            uint32_t dst_width,
-                                            uint32_t dst_height,
-                                            uint32_t *crop_x,
-                                            uint32_t *crop_y,
-                                            uint32_t *crop_w,
-                                            uint32_t *crop_h)
-{
-    uint32_t x = 0;
-    uint32_t y = 0;
-    uint32_t w = src_width;
-    uint32_t h = src_height;
-    if (src_width == 0U || src_height == 0U || dst_width == 0U || dst_height == 0U)
-    {
-        w = 0;
-        h = 0;
-    }
-    else if (((uint64_t)src_width * dst_height) > ((uint64_t)src_height * dst_width))
-    {
-        w = (uint32_t)(((uint64_t)src_height * dst_width) / dst_height);
-        if (w == 0U || w > src_width)
-        {
-            w = src_width;
-        }
-        x = (src_width - w) / 2U;
-    }
-    else if (((uint64_t)src_width * dst_height) < ((uint64_t)src_height * dst_width))
-    {
-        h = (uint32_t)(((uint64_t)src_width * dst_height) / dst_width);
-        if (h == 0U || h > src_height)
-        {
-            h = src_height;
-        }
-        y = (src_height - h) / 2U;
-    }
-    if (crop_x) *crop_x = x;
-    if (crop_y) *crop_y = y;
-    if (crop_w) *crop_w = w;
-    if (crop_h) *crop_h = h;
 }
 const char *app_ai_capture_mode_label(app_ai_capture_mode_t mode)
 {
@@ -279,7 +224,7 @@ static void app_ai_capture_downsample_rgb565_to_bgr(const uint8_t *rgb565,
     uint32_t crop_y = 0;
     uint32_t crop_w = src_width;
     uint32_t crop_h = src_height;
-    app_ai_capture_calc_center_crop(src_width,
+    app_image_calc_center_crop(src_width,
                                     src_height,
                                     CAPTURE_WIDTH,
                                     CAPTURE_HEIGHT,
@@ -305,9 +250,9 @@ static void app_ai_capture_downsample_rgb565_to_bgr(const uint8_t *rgb565,
             }
             uint16_t pixel = src_row[sx];
             uint8_t *p = dst_row + ((size_t)x * CAPTURE_CHANNELS);
-            p[0] = app_ai_capture_rgb565_b(pixel);
-            p[1] = app_ai_capture_rgb565_g(pixel);
-            p[2] = app_ai_capture_rgb565_r(pixel);
+            p[0] = app_image_rgb565_to_b(pixel);
+            p[1] = app_image_rgb565_to_g(pixel);
+            p[2] = app_image_rgb565_to_r(pixel);
         }
     }
 }

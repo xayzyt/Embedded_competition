@@ -18,8 +18,8 @@
 #include "app_video.h"
 #include "app_ai_capture.h"
 #include "app_drone_ai.h"
-#include "app_task.h"
 #include "app_vision.h"
+#include "app_camera_route.h"
 #if SOC_PPA_SUPPORTED
 #include "driver/ppa.h"
 #endif
@@ -30,9 +30,6 @@
 #define DISPLAY_TASK_PRIORITY    7
 #define DISPLAY_LOCK_TIMEOUT_MS  30
 #define DISPLAY_CREATE_LOCK_TIMEOUT_MS 200
-#define VISION_SAMPLE_INTERVAL   2
-#define DRONE_AI_SAMPLE_INTERVAL 8
-#define CAMERA_DIAG_INTERVAL_MS  2000U
 #define PREVIEW_PREFERRED_WIDTH  1024U
 #define PREVIEW_PREFERRED_HEIGHT 600U
 #define RECOGNITION_CAMERA_EXPOSURE_US      4000U
@@ -61,9 +58,6 @@ typedef enum {
 } disp_buf_state_t;
 static volatile int s_displayed_stage_index = -1;
 static volatile int s_pending_stage_index = -1;
-static uint32_t s_vision_sample_skip = 0;
-static uint32_t s_drone_ai_sample_skip = 0;
-static bool s_apriltag_gate_was_open = false;
 static uint32_t s_frame_count = 0;
 static volatile uint32_t s_display_count = 0;
 static bool s_ppa_error_logged = false;
@@ -72,19 +66,6 @@ static uint32_t s_stage_letterbox_w[STAGE_NUM_BUFS] = {0};
 static uint32_t s_stage_letterbox_h[STAGE_NUM_BUFS] = {0};
 static volatile int s_retained_stage_index = -1;
 static uint32_t s_stage_drop_count = 0;
-static uint32_t s_ai_submit_count = 0;
-static uint32_t s_vision_submit_count = 0;
-static uint32_t s_capture_submit_count = 0;
-static uint32_t s_diag_last_ms = 0;
-static uint32_t s_diag_last_frame_count = 0;
-static uint32_t s_diag_last_display_count = 0;
-static uint32_t s_diag_last_stage_drop_count = 0;
-static uint32_t s_diag_last_ai_submit_count = 0;
-static uint32_t s_diag_last_vision_submit_count = 0;
-static uint32_t s_diag_last_capture_submit_count = 0;
-static uint32_t s_diag_last_ai_infer_count = 0;
-static uint32_t s_diag_last_ai_drop_count = 0;
-static uint32_t s_diag_last_vision_drop_count = 0;
 #if SOC_PPA_SUPPORTED
 static ppa_client_handle_t s_ppa_srm_handle = NULL;
 #endif
@@ -129,6 +110,72 @@ static lv_obj_t *app_get_active_screen(void)
 #else
     return lv_scr_act();
 #endif
+}
+static void app_camera_preview_calc_aspect_fit(uint32_t src_w,
+    uint32_t src_h,
+    uint32_t dst_w,
+    uint32_t dst_h,
+    uint32_t *out_w,
+    uint32_t *out_h)
+{
+    if (out_w == NULL || out_h == NULL)
+    {
+        return;
+    }
+    if (src_w == 0U || src_h == 0U || dst_w == 0U || dst_h == 0U)
+    {
+        *out_w = 0U;
+        *out_h = 0U;
+        return;
+    }
+    const float src_aspect = (float)src_w / (float)src_h;
+    const float dst_aspect = (float)dst_w / (float)dst_h;
+    if (src_aspect > dst_aspect)
+    {
+        *out_w = dst_w;
+        *out_h = (uint32_t)(dst_w / src_aspect);
+    }
+    else
+    {
+        *out_h = dst_h;
+        *out_w = (uint32_t)(dst_h * src_aspect);
+    }
+}
+static esp_err_t app_camera_preview_scale_rgb565_cpu(const uint8_t *in_buf,
+    uint32_t in_width,
+    uint32_t in_height,
+    uint8_t *out_buf,
+    uint32_t out_width,
+    uint32_t out_height)
+{
+    if (in_buf == NULL || out_buf == NULL || in_width == 0 || in_height == 0 ||
+        out_width == 0 || out_height == 0 ||
+        out_width > BSP_LCD_H_RES || out_height > BSP_LCD_V_RES)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+    const uint16_t *src = (const uint16_t *)in_buf;
+    uint16_t *dst = (uint16_t *)out_buf;
+    const uint32_t x_off = (BSP_LCD_H_RES - out_width) / 2U;
+    const uint32_t y_off = (BSP_LCD_V_RES - out_height) / 2U;
+    for (uint32_t y = 0; y < out_height; y++) {
+        uint32_t src_y = (uint32_t)(((uint64_t)y * in_height) / out_height);
+        if (src_y >= in_height)
+        {
+            src_y = in_height - 1U;
+        }
+        const uint16_t *src_row = src + (size_t)src_y * in_width;
+        uint16_t *dst_row = dst + (size_t)(y + y_off) * BSP_LCD_H_RES + x_off;
+        for (uint32_t x = 0; x < out_width; x++) {
+            uint32_t src_x = (uint32_t)(((uint64_t)x * in_width) / out_width);
+            if (src_x >= in_width)
+            {
+                src_x = in_width - 1U;
+            }
+            dst_row[x] = src_row[src_x];
+        }
+    }
+    return ESP_OK;
 }
 static void app_camera_free_camera_buffers(void)
 {
@@ -257,23 +304,6 @@ static void app_ppa_init(void)
         ESP_LOGE(TAG, "ppa_register_client failed: 0x%x", ret);
     }
 }
-static void calc_aspect_fit(uint32_t src_w, uint32_t src_h,
-    uint32_t dst_w, uint32_t dst_h,
-    uint32_t *out_w, uint32_t *out_h)
-{
-    const float src_aspect = (float)src_w / (float)src_h;
-    const float dst_aspect = (float)dst_w / (float)dst_h;
-    if (src_aspect > dst_aspect)
-    {
-        *out_w = dst_w;
-        *out_h = (uint32_t)(dst_w / src_aspect);
-    }
-    else
-    {
-        *out_h = dst_h;
-        *out_w = (uint32_t)(dst_h * src_aspect);
-    }
-}
 static esp_err_t app_camera_clear_letterbox(uint8_t *out_buf,
     uint32_t out_width,
     uint32_t out_height)
@@ -397,42 +427,6 @@ static esp_err_t app_image_process_scale_crop(uint8_t *in_buf,
     };
     return ppa_do_scale_rotate_mirror(s_ppa_srm_handle, &srm_cfg);
 }
-static esp_err_t app_image_process_scale_cpu(const uint8_t *in_buf,
-    uint32_t in_width,
-    uint32_t in_height,
-    uint8_t *out_buf,
-    uint32_t out_width,
-    uint32_t out_height)
-{
-    if (in_buf == NULL || out_buf == NULL || in_width == 0 || in_height == 0 ||
-        out_width == 0 || out_height == 0 ||
-        out_width > BSP_LCD_H_RES || out_height > BSP_LCD_V_RES)
-    {
-        return ESP_ERR_INVALID_ARG;
-    }
-    const uint16_t *src = (const uint16_t *)in_buf;
-    uint16_t *dst = (uint16_t *)out_buf;
-    const uint32_t x_off = (BSP_LCD_H_RES - out_width) / 2U;
-    const uint32_t y_off = (BSP_LCD_V_RES - out_height) / 2U;
-    for (uint32_t y = 0; y < out_height; y++) {
-        uint32_t src_y = (uint32_t)(((uint64_t)y * in_height) / out_height);
-        if (src_y >= in_height)
-        {
-            src_y = in_height - 1U;
-        }
-        const uint16_t *src_row = src + (size_t)src_y * in_width;
-        uint16_t *dst_row = dst + (size_t)(y + y_off) * BSP_LCD_H_RES + x_off;
-        for (uint32_t x = 0; x < out_width; x++) {
-            uint32_t src_x = (uint32_t)(((uint64_t)x * in_width) / out_width);
-            if (src_x >= in_width)
-            {
-                src_x = in_width - 1U;
-            }
-            dst_row[x] = src_row[src_x];
-        }
-    }
-    return ESP_OK;
-}
 static ppa_srm_rotation_angle_t app_camera_ppa_rotation(void)
 {
     switch (BSP_CAMERA_ROTATION) {
@@ -450,11 +444,11 @@ static void app_camera_calc_preview_fit(uint32_t camera_width,
 {
     if ((BSP_CAMERA_ROTATION == 90) || (BSP_CAMERA_ROTATION == 270))
     {
-        calc_aspect_fit(camera_height, camera_width, BSP_LCD_H_RES, BSP_LCD_V_RES, out_w, out_h);
+        app_camera_preview_calc_aspect_fit(camera_height, camera_width, BSP_LCD_H_RES, BSP_LCD_V_RES, out_w, out_h);
     }
     else
     {
-        calc_aspect_fit(camera_width, camera_height, BSP_LCD_H_RES, BSP_LCD_V_RES, out_w, out_h);
+        app_camera_preview_calc_aspect_fit(camera_width, camera_height, BSP_LCD_H_RES, BSP_LCD_V_RES, out_w, out_h);
     }
 }
 #endif
@@ -626,117 +620,6 @@ static void app_camera_display_task(void *arg)
         }
     }
 }
-static bool app_camera_apriltag_gate_open(void)
-{
-    app_task_snapshot_t task = {0};
-    if (!app_task_peek_snapshot(&task))
-    {
-        return false;
-    }
-    return task.active &&
-           (task.state == APP_TASK_STATE_WAIT_APPROACH ||
-            task.state == APP_TASK_STATE_AUTH_PASSED) &&
-           app_drone_ai_is_drone_confirmed();
-}
-static bool app_camera_ai_gate_active(void)
-{
-    app_task_snapshot_t task = {0};
-    if (!app_task_peek_snapshot(&task))
-    {
-        return false;
-    }
-    return task.active &&
-           (task.state == APP_TASK_STATE_WAIT_APPROACH) &&
-           !app_drone_ai_is_drone_confirmed();
-}
-typedef struct {
-    bool ai_due;
-    bool vision_due;
-    bool capture_due;
-} app_camera_frame_route_t;
-static app_camera_frame_route_t app_camera_select_frame_route(void)
-{
-    app_camera_frame_route_t route = {0};
-    const bool capture_active = app_ai_capture_is_active();
-    const bool ai_gate_active = app_camera_ai_gate_active();
-    const bool apriltag_gate_open = app_camera_apriltag_gate_open();
-    if (!ai_gate_active)
-    {
-        s_drone_ai_sample_skip = 0;
-    }
-    else if (++s_drone_ai_sample_skip >= DRONE_AI_SAMPLE_INTERVAL)
-    {
-        s_drone_ai_sample_skip = 0;
-        route.ai_due = true;
-    }
-    if (capture_active || !apriltag_gate_open)
-    {
-        s_vision_sample_skip = 0;
-        s_apriltag_gate_was_open = false;
-    }
-    else if (!s_apriltag_gate_was_open)
-    {
-        s_vision_sample_skip = 0;
-        s_apriltag_gate_was_open = true;
-        route.vision_due = true;
-    }
-    else if (++s_vision_sample_skip >= VISION_SAMPLE_INTERVAL)
-    {
-        s_vision_sample_skip = 0;
-        route.vision_due = true;
-    }
-    route.capture_due = app_ai_capture_should_capture_frame();
-    return route;
-}
-static void app_camera_maybe_log_diag(void)
-{
-    const uint32_t now_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
-    app_drone_ai_stats_t ai = {0};
-    app_vision_stats_t vision = {0};
-    app_drone_ai_get_stats(&ai);
-    app_vision_get_stats(&vision);
-    const uint32_t vision_drop = vision.busy_drop + vision.overwrite;
-    if (s_diag_last_ms == 0U)
-    {
-        s_diag_last_ms = now_ms;
-        s_diag_last_frame_count = s_frame_count;
-        s_diag_last_display_count = s_display_count;
-        s_diag_last_stage_drop_count = s_stage_drop_count;
-        s_diag_last_ai_submit_count = s_ai_submit_count;
-        s_diag_last_vision_submit_count = s_vision_submit_count;
-        s_diag_last_capture_submit_count = s_capture_submit_count;
-        s_diag_last_ai_infer_count = ai.inferred;
-        s_diag_last_ai_drop_count = ai.dropped;
-        s_diag_last_vision_drop_count = vision_drop;
-        return;
-    }
-    if ((now_ms - s_diag_last_ms) < CAMERA_DIAG_INTERVAL_MS)
-    {
-        return;
-    }
-    ESP_LOGI(TAG,
-        "diag 2s: capture=%lu display=%lu stage_drop=%lu ai_submit=%lu ai_infer=%lu ai_drop=%lu vision_submit=%lu vision_drop=%lu save_submit=%lu confirmed=%d",
-        (unsigned long)(s_frame_count - s_diag_last_frame_count),
-        (unsigned long)(s_display_count - s_diag_last_display_count),
-        (unsigned long)(s_stage_drop_count - s_diag_last_stage_drop_count),
-        (unsigned long)(s_ai_submit_count - s_diag_last_ai_submit_count),
-        (unsigned long)(ai.inferred - s_diag_last_ai_infer_count),
-        (unsigned long)(ai.dropped - s_diag_last_ai_drop_count),
-        (unsigned long)(s_vision_submit_count - s_diag_last_vision_submit_count),
-        (unsigned long)(vision_drop - s_diag_last_vision_drop_count),
-        (unsigned long)(s_capture_submit_count - s_diag_last_capture_submit_count),
-        (int)ai.confirmed);
-    s_diag_last_ms = now_ms;
-    s_diag_last_frame_count = s_frame_count;
-    s_diag_last_display_count = s_display_count;
-    s_diag_last_stage_drop_count = s_stage_drop_count;
-    s_diag_last_ai_submit_count = s_ai_submit_count;
-    s_diag_last_vision_submit_count = s_vision_submit_count;
-    s_diag_last_capture_submit_count = s_capture_submit_count;
-    s_diag_last_ai_infer_count = ai.inferred;
-    s_diag_last_ai_drop_count = ai.dropped;
-    s_diag_last_vision_drop_count = vision_drop;
-}
 static void app_camera_frame_cb(uint8_t *camera_buf,
     uint8_t camera_buf_index,
     uint32_t camera_buf_hes,
@@ -761,9 +644,9 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
             (unsigned long)camera_buf_ves,
             (unsigned long)camera_buf_len);
     }
-    app_camera_maybe_log_diag();
+    app_camera_route_maybe_log_diag(s_frame_count, s_display_count, s_stage_drop_count);
     bool camera_synced_for_cpu = false;
-    app_camera_frame_route_t route = app_camera_select_frame_route();
+    app_camera_frame_route_t route = app_camera_route_select();
     if (route.ai_due || route.vision_due || route.capture_due)
     {
         if (app_camera_msync_m2c(camera_buf, camera_buf_len) == ESP_OK)
@@ -775,7 +658,7 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
                     camera_buf_hes,
                     camera_buf_ves,
                     camera_buf_len);
-                s_ai_submit_count++;
+                app_camera_route_note_ai_submit();
             }
             if (route.vision_due)
             {
@@ -783,7 +666,7 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
                     camera_buf_hes,
                     camera_buf_ves,
                     camera_buf_len);
-                s_vision_submit_count++;
+                app_camera_route_note_vision_submit();
             }
             if (route.capture_due)
             {
@@ -791,7 +674,7 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
                     camera_buf_hes,
                     camera_buf_ves,
                     camera_buf_len);
-                s_capture_submit_count++;
+                app_camera_route_note_capture_submit();
             }
         }
     }
@@ -843,7 +726,7 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
                 app_camera_abandon_stage_buffer(stage_index);
                 return;
             }
-            if (app_image_process_scale_cpu(camera_buf,
+            if (app_camera_preview_scale_rgb565_cpu(camera_buf,
                     camera_buf_hes,
                     camera_buf_ves,
                     out_buf,
@@ -1004,13 +887,7 @@ esp_err_t app_camera_preview_start(void)
     s_display_count = 0;
     s_frame_count = 0;
     s_stage_drop_count = 0;
-    s_ai_submit_count = 0;
-    s_vision_submit_count = 0;
-    s_capture_submit_count = 0;
-    s_vision_sample_skip = 0;
-    s_drone_ai_sample_skip = 0;
-    s_apriltag_gate_was_open = false;
-    s_diag_last_ms = 0;
+    app_camera_route_reset();
     ret = app_video_stream_task_start(s_video_fd, 0);
     if (ret != ESP_OK)
     {

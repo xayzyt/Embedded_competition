@@ -22,6 +22,17 @@ bool app_ui_show_main_screen(void);
 void app_ui_hide_main_screen(void);
 void app_ui_main_screen_show_pickup(bool show);
 void app_ui_main_screen_update_status(bool wifi_ok, bool mqtt_ok, bool ch32_ok);
+typedef enum {
+    APP_UI_MAIN_TASK_WAITING = 0,
+    APP_UI_MAIN_TASK_ACTIVE,
+    APP_UI_MAIN_TASK_CONFIGURED,
+    APP_UI_MAIN_TASK_LOCAL_WAIT,
+    APP_UI_MAIN_TASK_CAMERA_FAILED,
+    APP_UI_MAIN_TASK_WEATHER_BLOCKED,
+    APP_UI_MAIN_TASK_PICKUP_FAILED,
+    APP_UI_MAIN_TASK_COMPLETED,
+} app_ui_main_task_state_t;
+void app_ui_main_screen_set_task_state(app_ui_main_task_state_t state);
 void app_ui_main_screen_set_task_text(const char *text);
 void app_ui_main_screen_set_weather(const char *text, int weather_code);
 void app_ui_main_screen_set_weather_simulated(bool simulated);
