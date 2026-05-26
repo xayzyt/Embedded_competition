@@ -1,11 +1,4 @@
-/*
- * app_ch32_link.c - ESP32-P4 与 CH32 串口通信 (精简版)
- *
- * 已砍掉: VER 版本号、老协议 ASCII、EVENT/ERROR/HEARTBEAT 独立类型
- * 帧格式: SOF1 SOF2 TYPE CMD SEQ LEN [PAYLOAD] CRC16
- */
-
-#include "app_ch32_link.h"
+﻿#include "app_ch32_link.h"
 #include <stdio.h>
 #include <string.h>
 #include "freertos/FreeRTOS.h"
@@ -16,19 +9,13 @@
 #include "driver/uart.h"
 #include "esp_check.h"
 #include "esp_log.h"
-
 static const char *TAG = "app_ch32_link";
-
-/* -------------------- 内部常量 -------------------- */
 #define CH32_EVT_READY           BIT0
 #define CH32_EVT_ACK             BIT1
 #define CH32_EVT_NACK            BIT2
-
 #ifndef APP_CH32_LINK_READY_STALE_MS
 #define APP_CH32_LINK_READY_STALE_MS (3000U)
 #endif
-
-/* -------------------- 运行上下文 -------------------- */
 typedef struct {
     uart_port_t uart_num;
     EventGroupHandle_t event_group;
@@ -46,9 +33,7 @@ typedef struct {
     uint8_t next_seq;
     TickType_t last_rx_tick;
 } app_ch32_link_ctx_t;
-
 static app_ch32_link_ctx_t s_ctx = {0};
-
 static uint32_t app_ch32_link_lock_timeout_ms(uint32_t timeout_ms)
 {
     const uint32_t guard_ms = 100U;
@@ -58,7 +43,6 @@ static uint32_t app_ch32_link_lock_timeout_ms(uint32_t timeout_ms)
     }
     return timeout_ms + guard_ms;
 }
-
 static bool app_ch32_link_lock_tx(uint32_t timeout_ms)
 {
     if (s_ctx.tx_mutex == NULL)
@@ -67,7 +51,6 @@ static bool app_ch32_link_lock_tx(uint32_t timeout_ms)
     }
     return xSemaphoreTake(s_ctx.tx_mutex, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
 }
-
 static void app_ch32_link_unlock_tx(void)
 {
     if (s_ctx.tx_mutex != NULL)
@@ -75,8 +58,6 @@ static void app_ch32_link_unlock_tx(void)
         xSemaphoreGive(s_ctx.tx_mutex);
     }
 }
-
-/* -------------------- CRC16 -------------------- */
 static uint16_t app_ch32_crc16_ibm(const uint8_t *data, size_t len)
 {
     uint16_t crc = 0xFFFFU;
@@ -91,8 +72,6 @@ static uint16_t app_ch32_crc16_ibm(const uint8_t *data, size_t len)
     }
     return crc;
 }
-
-/* -------------------- 字节序辅助 -------------------- */
 static int32_t app_ch32_read_i32_le(const uint8_t *p)
 {
     return (int32_t)((uint32_t)p[0] |
@@ -100,13 +79,10 @@ static int32_t app_ch32_read_i32_le(const uint8_t *p)
         ((uint32_t)p[2] << 16) |
         ((uint32_t)p[3] << 24));
 }
-
 static uint16_t app_ch32_read_u16_le(const uint8_t *p)
 {
     return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
 }
-
-/* 兼容字符→命令码映射 (app_ctrl 使用) */
 static app_ch32_proto_cmd_t app_ch32_char_cmd_to_proto(char cmd)
 {
     switch (cmd) {
@@ -121,7 +97,6 @@ static app_ch32_proto_cmd_t app_ch32_char_cmd_to_proto(char cmd)
     default:  return APP_CH32_PROTO_CMD_NONE;
     }
 }
-
 static void app_ch32_reset_ack_state(void)
 {
     s_ctx.last_ack_cmd = APP_CH32_PROTO_CMD_NONE;
@@ -130,9 +105,6 @@ static void app_ch32_reset_ack_state(void)
     s_ctx.last_nack_seq = 0;
     s_ctx.last_nack_error = APP_CH32_ERR_NONE;
 }
-
-/* -------------------- 名称辅助 -------------------- */
-
 const char *app_ch32_link_proto_stage_name(app_ch32_proto_stage_t stage)
 {
     switch (stage) {
@@ -154,7 +126,6 @@ const char *app_ch32_link_proto_stage_name(app_ch32_proto_stage_t stage)
     default:                             return "UNKNOWN";
     }
 }
-
 const char *app_ch32_link_proto_error_name(uint8_t err)
 {
     switch ((app_ch32_proto_error_t)err) {
@@ -172,7 +143,6 @@ const char *app_ch32_link_proto_error_name(uint8_t err)
     default:                       return "UNKNOWN";
     }
 }
-
 static bool app_ch32_proto_stage_indicates_ready(app_ch32_proto_stage_t stage, uint16_t flags)
 {
     if ((flags & APP_CH32_FLAG_READY) != 0U) return true;
@@ -186,8 +156,6 @@ static bool app_ch32_proto_stage_indicates_ready(app_ch32_proto_stage_t stage, u
         return false;
     }
 }
-
-/* -------------------- Ready 过期判断 -------------------- */
 static bool app_ch32_ready_is_fresh(void)
 {
     if (!s_ctx.ready) return false;
@@ -201,14 +169,10 @@ static bool app_ch32_ready_is_fresh(void)
     }
     return true;
 }
-
-/* -------------------- 接收副作用 + 分发 -------------------- */
 static void app_ch32_apply_common_side_effects(const app_ch32_line_t *msg)
 {
     if (msg == NULL) return;
     s_ctx.last_rx_tick = xTaskGetTickCount();
-
-    /* STATUS 类型统一承载: 状态/事件/错误/心跳 */
     if (msg->type == APP_CH32_LINE_PROTO_STATUS && msg->payload_len >= 8U)
     {
         s_ctx.ready = app_ch32_proto_stage_indicates_ready(msg->proto_stage, msg->proto_flags);
@@ -217,14 +181,12 @@ static void app_ch32_apply_common_side_effects(const app_ch32_line_t *msg)
         else
             xEventGroupClearBits(s_ctx.event_group, CH32_EVT_READY);
     }
-
     if (msg->type == APP_CH32_LINE_PROTO_ACK)
     {
         s_ctx.last_ack_cmd = (app_ch32_proto_cmd_t)msg->proto_cmd;
         s_ctx.last_ack_seq = msg->proto_seq;
         xEventGroupSetBits(s_ctx.event_group, CH32_EVT_ACK);
     }
-
     if (msg->type == APP_CH32_LINE_PROTO_NACK)
     {
         s_ctx.last_nack_cmd = (app_ch32_proto_cmd_t)msg->proto_cmd;
@@ -233,7 +195,6 @@ static void app_ch32_apply_common_side_effects(const app_ch32_line_t *msg)
         xEventGroupSetBits(s_ctx.event_group, CH32_EVT_NACK);
     }
 }
-
 static void app_ch32_dispatch_msg(const app_ch32_line_t *msg)
 {
     if (msg == NULL) return;
@@ -242,24 +203,13 @@ static void app_ch32_dispatch_msg(const app_ch32_line_t *msg)
         s_ctx.cb(msg, s_ctx.user_ctx);
     ESP_LOGD(TAG, "CH32 rx: %s", msg->line);
 }
-
-/* -------------------- 协议帧解析 -------------------- */
-
-/*
- * 解析一帧二进制协议帧。帧格式 :
- *   [0]=SOF1 [1]=SOF2 [2]=TYPE [3]=CMD [4]=SEQ [5]=LEN
- *   [6..5+LEN]=PAYLOAD [6+LEN]=CRC_L [7+LEN]=CRC_H
- */
 static bool app_ch32_parse_proto_frame(const uint8_t *frame, size_t frame_len, app_ch32_line_t *out)
 {
     if (frame == NULL || out == NULL) return false;
     if (frame_len < APP_CH32_PROTO_MIN_FRAME) return false;
     if (frame[0] != APP_CH32_PROTO_SOF1 || frame[1] != APP_CH32_PROTO_SOF2) return false;
-
     const uint8_t payload_len = frame[5];
     if ((size_t)(APP_CH32_PROTO_OVERHEAD + payload_len) != frame_len) return false;
-
-    /* CRC 校验: 覆盖 SOF1 到 PAYLOAD 末尾 (6+payload_len 字节) */
     const uint16_t crc_expect = app_ch32_read_u16_le(&frame[6 + payload_len]);
     const uint16_t crc_actual = app_ch32_crc16_ibm(frame, (size_t)(6U + payload_len));
     if (crc_expect != crc_actual)
@@ -267,7 +217,6 @@ static bool app_ch32_parse_proto_frame(const uint8_t *frame, size_t frame_len, a
         ESP_LOGD(TAG, "proto crc mismatch, expect=0x%04x actual=0x%04x", crc_expect, crc_actual);
         return false;
     }
-
     memset(out, 0, sizeof(*out));
     out->proto_type = frame[2];
     out->proto_cmd  = frame[3];
@@ -275,14 +224,12 @@ static bool app_ch32_parse_proto_frame(const uint8_t *frame, size_t frame_len, a
     out->payload_len = payload_len;
     if (payload_len > 0U)
         memcpy(out->payload, &frame[6], payload_len);
-
     switch ((app_ch32_proto_type_t)out->proto_type) {
     case APP_CH32_PROTO_TYPE_ACK:
         out->type = APP_CH32_LINE_PROTO_ACK;
         snprintf(out->line, sizeof(out->line),
             "ACK cmd=0x%02X seq=%u", out->proto_cmd, (unsigned)out->proto_seq);
         break;
-
     case APP_CH32_PROTO_TYPE_NACK:
         out->type = APP_CH32_LINE_PROTO_NACK;
         out->proto_detail = (payload_len >= 1U) ? out->payload[0] : APP_CH32_ERR_INTERNAL;
@@ -291,14 +238,12 @@ static bool app_ch32_parse_proto_frame(const uint8_t *frame, size_t frame_len, a
             out->proto_cmd, (unsigned)out->proto_seq,
             app_ch32_link_proto_error_name(out->proto_detail));
         break;
-
     case APP_CH32_PROTO_TYPE_STATUS:
-        /* STATUS 统一承载: 状态/事件/错误/心跳 */
         out->type = APP_CH32_LINE_PROTO_STATUS;
         if (payload_len >= 8U)
         {
             out->proto_stage   = (app_ch32_proto_stage_t)out->payload[0];
-            out->proto_detail  = out->payload[1];  /* 0=正常, 非0=错误码 */
+            out->proto_detail  = out->payload[1];
             out->proto_flags   = app_ch32_read_u16_le(&out->payload[2]);
             out->proto_weight_g = app_ch32_read_i32_le(&out->payload[4]);
         }
@@ -318,15 +263,12 @@ static bool app_ch32_parse_proto_frame(const uint8_t *frame, size_t frame_len, a
                 (unsigned)out->proto_flags, (long)out->proto_weight_g);
         }
         break;
-
     default:
         out->type = APP_CH32_LINE_UNKNOWN;
         break;
     }
     return true;
 }
-
-/* -------------------- UART 接收任务 -------------------- */
 static void app_ch32_link_rx_task(void *arg)
 {
     uint8_t ch = 0;
@@ -334,11 +276,9 @@ static void app_ch32_link_rx_task(void *arg)
     size_t proto_len = 0;
     size_t proto_expect = 0;
     (void)arg;
-
     while (1) {
         int len = uart_read_bytes(s_ctx.uart_num, &ch, 1, pdMS_TO_TICKS(100));
         if (len <= 0) continue;
-
         if (proto_len == 0U)
         {
             if (ch != APP_CH32_PROTO_SOF1) continue;
@@ -366,8 +306,6 @@ static void app_ch32_link_rx_task(void *arg)
             proto_expect = 0;
             continue;
         }
-
-        /* 收到第 6 字节 (LEN) 后计算期望帧长 */
         if (proto_len == 6U)
         {
             const uint8_t payload_len = proto_buf[5];
@@ -380,7 +318,6 @@ static void app_ch32_link_rx_task(void *arg)
             }
             proto_expect = APP_CH32_PROTO_OVERHEAD + payload_len;
         }
-
         if (proto_expect >= APP_CH32_PROTO_MIN_FRAME && proto_len == proto_expect)
         {
             app_ch32_line_t msg = {0};
@@ -391,8 +328,6 @@ static void app_ch32_link_rx_task(void *arg)
         }
     }
 }
-
-/* -------------------- UART 发送路径 -------------------- */
 static esp_err_t app_ch32_link_prepare_tx_idle(void)
 {
     gpio_config_t io_conf = {
@@ -406,12 +341,6 @@ static esp_err_t app_ch32_link_prepare_tx_idle(void)
     ESP_RETURN_ON_ERROR(gpio_set_level(APP_CH32_LINK_TX_GPIO, 1), TAG, "gpio_set_level tx idle failed");
     return ESP_OK;
 }
-
-/*
- * 组装并发送一帧二进制协议命令。
- * 帧格式: SOF1 SOF2 TYPE_CMD cmd seq len [payload] CRC16
- * CRC 覆盖前 6+payload_len 字节
- */
 static esp_err_t app_ch32_link_send_proto(app_ch32_proto_cmd_t cmd,
     const void *payload, uint8_t payload_len, uint8_t *out_seq)
 {
@@ -420,59 +349,45 @@ static esp_err_t app_ch32_link_send_proto(app_ch32_proto_cmd_t cmd,
         ESP_ERR_INVALID_ARG, TAG, "payload too large");
     ESP_RETURN_ON_FALSE((payload_len == 0U) || (payload != NULL),
         ESP_ERR_INVALID_ARG, TAG, "payload is null");
-
     uint8_t frame[APP_CH32_PROTO_OVERHEAD + APP_CH32_LINK_PROTO_MAX_PAYLOAD];
     const uint8_t seq = ++s_ctx.next_seq;
     size_t idx = 0;
-
     frame[idx++] = APP_CH32_PROTO_SOF1;
     frame[idx++] = APP_CH32_PROTO_SOF2;
     frame[idx++] = (uint8_t)APP_CH32_PROTO_TYPE_CMD;
     frame[idx++] = (uint8_t)cmd;
     frame[idx++] = seq;
     frame[idx++] = payload_len;
-
     if (payload_len > 0U && payload != NULL)
     {
         memcpy(&frame[idx], payload, payload_len);
         idx += payload_len;
     }
-
-    /* CRC 覆盖 SOF1 到 PAYLOAD 末尾 = 6+payload_len 字节 */
     const uint16_t crc = app_ch32_crc16_ibm(frame, idx);
     frame[idx++] = (uint8_t)(crc & 0xFFU);
     frame[idx++] = (uint8_t)((crc >> 8) & 0xFFU);
-
     int written = uart_write_bytes(s_ctx.uart_num, (const char *)frame, idx);
     ESP_RETURN_ON_FALSE(written == (int)idx, ESP_FAIL, TAG, "uart_write_bytes proto failed");
     if (out_seq != NULL) *out_seq = seq;
-
     ESP_LOGD(TAG, "ESP32 => CH32 proto: cmd=0x%02X seq=%u len=%u",
         (unsigned)cmd, (unsigned)seq, (unsigned)payload_len);
     return ESP_OK;
 }
-
-/* -------------------- ACK 等待 -------------------- */
 static esp_err_t app_ch32_link_wait_ack_for_cmd(app_ch32_proto_cmd_t cmd, uint8_t seq, uint32_t timeout_ms)
 {
     uint32_t elapsed_ms = 0;
     uint32_t slice_ms = APP_CH32_LINK_ACK_POLL_MS;
     if (slice_ms == 0U) slice_ms = 50U;
-
     while (elapsed_ms < timeout_ms) {
         uint32_t this_wait = slice_ms;
         if ((elapsed_ms + this_wait) > timeout_ms)
             this_wait = timeout_ms - elapsed_ms;
-
         EventBits_t bits = xEventGroupWaitBits(s_ctx.event_group,
             CH32_EVT_ACK | CH32_EVT_NACK, pdTRUE, pdFALSE, pdMS_TO_TICKS(this_wait));
         elapsed_ms += this_wait;
-
         if ((bits & (CH32_EVT_ACK | CH32_EVT_NACK)) == 0U) continue;
-
         if ((bits & CH32_EVT_ACK) != 0U && s_ctx.last_ack_cmd == cmd && s_ctx.last_ack_seq == seq)
             return ESP_OK;
-
         if ((bits & CH32_EVT_NACK) != 0U && s_ctx.last_nack_cmd == cmd && s_ctx.last_nack_seq == seq)
         {
             ESP_LOGW(TAG, "CH32 rejected cmd=0x%02X seq=%u err=%s",
@@ -481,20 +396,14 @@ static esp_err_t app_ch32_link_wait_ack_for_cmd(app_ch32_proto_cmd_t cmd, uint8_
             s_ctx.last_nack_cmd = APP_CH32_PROTO_CMD_NONE;
             return ESP_ERR_INVALID_RESPONSE;
         }
-
-        /* 不匹配的旧事件，丢弃继续等 */
         if ((bits & CH32_EVT_ACK) != 0U) s_ctx.last_ack_cmd = APP_CH32_PROTO_CMD_NONE;
         if ((bits & CH32_EVT_NACK) != 0U) s_ctx.last_nack_cmd = APP_CH32_PROTO_CMD_NONE;
     }
     return ESP_ERR_TIMEOUT;
 }
-
-/* -------------------- 公开接口 -------------------- */
-
 esp_err_t app_ch32_link_init(app_ch32_line_cb_t cb, void *user_ctx)
 {
     ESP_RETURN_ON_FALSE(!s_ctx.inited, ESP_ERR_INVALID_STATE, TAG, "already initialized");
-
     s_ctx.uart_num = APP_CH32_LINK_UART_PORT;
     s_ctx.cb = cb;
     s_ctx.user_ctx = user_ctx;
@@ -502,7 +411,6 @@ esp_err_t app_ch32_link_init(app_ch32_line_cb_t cb, void *user_ctx)
     app_ch32_reset_ack_state();
     s_ctx.next_seq = 0;
     s_ctx.last_rx_tick = 0;
-
     uart_config_t uart_cfg = {
         .baud_rate = APP_CH32_LINK_BAUD_RATE,
         .data_bits = UART_DATA_8_BITS,
@@ -511,7 +419,6 @@ esp_err_t app_ch32_link_init(app_ch32_line_cb_t cb, void *user_ctx)
         .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
         .source_clk = UART_SCLK_DEFAULT,
     };
-
     ESP_RETURN_ON_ERROR(app_ch32_link_prepare_tx_idle(), TAG, "prepare tx idle failed");
     ESP_RETURN_ON_ERROR(uart_driver_install(s_ctx.uart_num, APP_CH32_LINK_RX_BUF_SIZE, 0, 0, NULL, 0),
         TAG, "uart_driver_install failed");
@@ -521,25 +428,20 @@ esp_err_t app_ch32_link_init(app_ch32_line_cb_t cb, void *user_ctx)
         TAG, "uart_set_pin failed");
     ESP_RETURN_ON_ERROR(gpio_set_pull_mode(APP_CH32_LINK_RX_GPIO, GPIO_PULLUP_ONLY),
         TAG, "set rx pull-up failed");
-
     s_ctx.event_group = xEventGroupCreate();
     ESP_RETURN_ON_FALSE(s_ctx.event_group != NULL, ESP_ERR_NO_MEM, TAG, "event group create failed");
     s_ctx.tx_mutex = xSemaphoreCreateMutex();
     ESP_RETURN_ON_FALSE(s_ctx.tx_mutex != NULL, ESP_ERR_NO_MEM, TAG, "tx mutex create failed");
-
     BaseType_t ok = xTaskCreate(app_ch32_link_rx_task, "ch32_rx", 4096, NULL, 8, &s_ctx.rx_task);
     ESP_RETURN_ON_FALSE(ok == pdPASS, ESP_ERR_NO_MEM, TAG, "rx task create failed");
-
     s_ctx.inited = true;
     ESP_LOGI(TAG, "uart%d init ok, tx=%d rx=%d baud=%d",
         s_ctx.uart_num, APP_CH32_LINK_TX_GPIO, APP_CH32_LINK_RX_GPIO, APP_CH32_LINK_BAUD_RATE);
     return ESP_OK;
 }
-
 esp_err_t app_ch32_link_send_cmd_and_wait_ack(char cmd, uint32_t timeout_ms)
 {
     ESP_RETURN_ON_FALSE(s_ctx.inited, ESP_ERR_INVALID_STATE, TAG, "not initialized");
-
     const app_ch32_proto_cmd_t proto_cmd = app_ch32_char_cmd_to_proto(cmd);
     ESP_RETURN_ON_FALSE(proto_cmd != APP_CH32_PROTO_CMD_NONE,
         ESP_ERR_INVALID_ARG, TAG, "unknown cmd: %c", cmd);
@@ -547,10 +449,8 @@ esp_err_t app_ch32_link_send_cmd_and_wait_ack(char cmd, uint32_t timeout_ms)
     {
         return ESP_ERR_TIMEOUT;
     }
-
     xEventGroupClearBits(s_ctx.event_group, CH32_EVT_ACK | CH32_EVT_NACK);
     app_ch32_reset_ack_state();
-
     uint8_t seq = 0;
     esp_err_t ret = app_ch32_link_send_proto(proto_cmd, NULL, 0, &seq);
     if (ret == ESP_OK)
@@ -560,7 +460,6 @@ esp_err_t app_ch32_link_send_cmd_and_wait_ack(char cmd, uint32_t timeout_ms)
     app_ch32_link_unlock_tx();
     return ret;
 }
-
 esp_err_t app_ch32_link_probe_ready(uint32_t timeout_ms)
 {
     ESP_RETURN_ON_FALSE(s_ctx.inited, ESP_ERR_INVALID_STATE, TAG, "not initialized");
@@ -569,10 +468,8 @@ esp_err_t app_ch32_link_probe_ready(uint32_t timeout_ms)
     {
         return ESP_ERR_TIMEOUT;
     }
-
     s_ctx.ready = false;
     xEventGroupClearBits(s_ctx.event_group, CH32_EVT_READY);
-
     esp_err_t ret = app_ch32_link_send_proto(APP_CH32_PROTO_CMD_PROBE_READY, NULL, 0, NULL);
     if (ret == ESP_OK)
     {
@@ -583,7 +480,6 @@ esp_err_t app_ch32_link_probe_ready(uint32_t timeout_ms)
     app_ch32_link_unlock_tx();
     return ret;
 }
-
 bool app_ch32_link_is_ready(void)
 {
     return app_ch32_ready_is_fresh();

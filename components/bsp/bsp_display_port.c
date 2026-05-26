@@ -1,26 +1,11 @@
-/* 实现说明：显示初始化和背光打开拆开，避免上电时先闪白屏。 */
-/*
- * bsp_display_port.c - 显示 BSP 适配封装模块
- *
- * 这个文件对乐鑫官方 BSP 显示接口做了一层项目级封装。
- * main.c 不直接调用 bsp_display_start_with_config()，而是调用 app_display_init()，
- * 这样后续如果你换屏幕、改 LVGL buffer、改背光或触摸初始化，只需要改这个文件，不需要改业务层。
- *
- * UI 和摄像头模块会直接使用 BSP/LVGL 的锁接口；这里保留显示初始化入口，
- * 让业务层不依赖具体屏幕启动配置。
- */
-
-#include "bsp_display_port.h"
+﻿#include "bsp_display_port.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "bsp/esp32_p4_function_ev_board.h"
 #include "bsp/display.h"
 #include "lvgl.h"
-
 static const char *TAG = "display_port";
 static lv_display_t *s_disp = NULL;
-
-/* 初始化项目使用的 LVGL 显示端口和屏幕驱动。 */
 bool app_display_init(void)
 {
     if (s_disp != NULL)
@@ -53,8 +38,6 @@ bool app_display_init(void)
     ESP_LOGI(TAG, "display init done");
     return true;
 }
-
-/* 打开 LCD 背光，通常在首帧 UI 已经绘制之后调用。 */
 void app_display_backlight_on(void)
 {
     bsp_display_backlight_on();

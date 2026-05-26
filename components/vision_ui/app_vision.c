@@ -1,17 +1,4 @@
-/* 实现说明：AprilTag 检测在后台任务中运行，不放在摄像头回调里。 */
-/*
- * app_vision.c - 视觉识别任务调度模块
- *
- * 这个文件位于 app_camera.c 和 app_apriltag.c 之间：
- * - app_camera.c 提交 RGB565 帧；
- * - 本文件把 RGB565 缩小/转成灰度图；
- * - 后台 FreeRTOS 任务调用 app_apriltag_detect_tag36h11()；
- * - 把识别结果缓存起来，并更新 UI 上的视觉文本。
- *
- * 设计重点是“不要卡住摄像头预览和 LVGL”：提交帧时只做轻量拷贝/转换，真正耗时的 AprilTag 检测放到后台任务里跑。
- */
-
-#include "app_vision.h"
+﻿#include "app_vision.h"
 #include <stdio.h>
 #include <string.h>
 #include "freertos/FreeRTOS.h"
@@ -24,11 +11,6 @@
 #include "app_apriltag.h"
 #include "app_ai_capture.h"
 #include "app_ui.h"
-
-/* -------------------------------------------------------------------------- */
-/* 视觉任务配置                                                   */
-/* -------------------------------------------------------------------------- */
-
 #define VISION_TASK_STACK_SIZE         (16 * 1024)
 #define VISION_TASK_PRIORITY           4
 #define VISION_TASK_CORE_ID            1
@@ -43,14 +25,9 @@
 #define VISION_TAG_LOG_INTERVAL_MS     1000U
 #define VISION_MISS_LOG_INTERVAL_MS    2000U
 static const char *TAG = "app_vision";
-
-/* -------------------------------------------------------------------------- */
-/* 运行状态                                                               */
-/* -------------------------------------------------------------------------- */
-
 typedef struct {
-    app_vision_gray_frame_info_t info;    /* 灰度帧的尺寸、序号和时间戳信息。 */
-    uint8_t gray[VISION_GRAY_BUF_SIZE];   /* 供 AprilTag 检测使用的灰度图数据。 */
+    app_vision_gray_frame_info_t info;
+    uint8_t gray[VISION_GRAY_BUF_SIZE];
 } app_vision_gray_slot_t;
 static TaskHandle_t s_vision_task = NULL;
 static bool s_vision_inited = false;
@@ -59,7 +36,6 @@ static app_vision_frame_info_t s_latest_frame = {0};
 static app_vision_gray_slot_t s_slot_a = {0};
 static app_vision_gray_slot_t s_slot_b = {0};
 static app_vision_gray_slot_t s_slot_c = {0};
-/* 三个槽位各司其职：pending 等待检测任务领取，detect 正在被检测，write 供摄像头回调写入新灰度帧。 */
 static app_vision_gray_slot_t *s_pending_slot = &s_slot_a;
 static app_vision_gray_slot_t *s_detect_slot = &s_slot_b;
 static app_vision_gray_slot_t *s_write_slot = &s_slot_c;
@@ -80,7 +56,6 @@ static uint32_t s_last_tag_info_log_ms = 0;
 static uint32_t s_last_tag_info_seq = 0;
 static uint16_t s_last_tag_info_id = UINT16_MAX;
 static uint32_t s_last_miss_info_log_ms = 0;
-
 static void app_vision_log_heap(const char *stage)
 {
     ESP_LOGI(TAG,
@@ -91,17 +66,10 @@ static void app_vision_log_heap(const char *stage)
         (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
         (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
 }
-
-/* -------------------------------------------------------------------------- */
-/* 时间、颜色和采样映射辅助函数                                         */
-/* -------------------------------------------------------------------------- */
-
-/* 获取当前系统毫秒时间，用作帧时间戳。 */
 static inline uint32_t app_vision_now_ms(void)
 {
     return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
 }
-/* 将一个 RGB565 像素转换成 8 位灰度值。 */
 static inline uint8_t app_rgb565_to_gray(uint16_t pixel)
 {
     uint32_t r = (pixel >> 11) & 0x1F;
@@ -112,7 +80,6 @@ static inline uint8_t app_rgb565_to_gray(uint16_t pixel)
     b = (b << 3) | (b >> 2);
     return (uint8_t)((r * 77U + g * 150U + b * 29U) >> 8);
 }
-/* 按目标宽高比计算居中裁剪区域。 */
 static void app_vision_calc_center_crop(uint32_t src_width,
     uint32_t src_height,
     uint32_t dst_width,
@@ -126,7 +93,6 @@ static void app_vision_calc_center_crop(uint32_t src_width,
     uint32_t y = 0;
     uint32_t w = src_width;
     uint32_t h = src_height;
-
     if (src_width == 0U || src_height == 0U || dst_width == 0U || dst_height == 0U)
     {
         w = 0;
@@ -150,20 +116,17 @@ static void app_vision_calc_center_crop(uint32_t src_width,
         }
         y = (src_height - h) / 2U;
     }
-
     if (crop_x) *crop_x = x;
     if (crop_y) *crop_y = y;
     if (crop_w) *crop_w = w;
     if (crop_h) *crop_h = h;
 }
-/* 为当前输入尺寸预计算灰度图采样坐标表。 */
 static void app_vision_prepare_sample_map(uint32_t width, uint32_t height)
 {
     if (s_sample_map_width == width && s_sample_map_height == height)
     {
         return;
     }
-
     uint32_t crop_x = 0;
     uint32_t crop_y = 0;
     uint32_t crop_w = width;
@@ -176,7 +139,6 @@ static void app_vision_prepare_sample_map(uint32_t width, uint32_t height)
         &crop_y,
         &crop_w,
         &crop_h);
-
     for (uint32_t gx = 0; gx < VISION_GRAY_WIDTH; gx++) {
         uint32_t sx = crop_x +
             (uint32_t)((((uint64_t)(2U * gx + 1U)) * crop_w) / (2U * VISION_GRAY_WIDTH));
@@ -186,7 +148,6 @@ static void app_vision_prepare_sample_map(uint32_t width, uint32_t height)
         }
         s_sample_x[gx] = (uint16_t)sx;
     }
-
     for (uint32_t gy = 0; gy < VISION_GRAY_HEIGHT; gy++) {
         uint32_t sy = crop_y +
             (uint32_t)((((uint64_t)(2U * gy + 1U)) * crop_h) / (2U * VISION_GRAY_HEIGHT));
@@ -196,7 +157,6 @@ static void app_vision_prepare_sample_map(uint32_t width, uint32_t height)
         }
         s_sample_y[gy] = (uint16_t)sy;
     }
-
     s_sample_map_width = width;
     s_sample_map_height = height;
     s_sample_crop_x = crop_x;
@@ -204,17 +164,10 @@ static void app_vision_prepare_sample_map(uint32_t width, uint32_t height)
     s_sample_crop_w = crop_w;
     s_sample_crop_h = crop_h;
 }
-
-/* -------------------------------------------------------------------------- */
-/* 共享帧和结果快照                                               */
-/* -------------------------------------------------------------------------- */
-
-/* 从提交队列取出一帧灰度图快照给检测任务使用。 */
 static app_vision_gray_slot_t *app_vision_take_snapshot(app_vision_frame_info_t *meta_out,
     uint32_t *overwrite_out)
 {
     app_vision_gray_slot_t *slot = NULL;
-
     taskENTER_CRITICAL(&s_vision_mux);
     *meta_out = s_latest_frame;
     *overwrite_out = s_submit_overwrite;
@@ -226,74 +179,52 @@ static app_vision_gray_slot_t *app_vision_take_snapshot(app_vision_frame_info_t 
         memset(&s_pending_slot->info, 0, sizeof(s_pending_slot->info));
     }
     slot = s_detect_slot;
-
     taskEXIT_CRITICAL(&s_vision_mux);
     return slot;
 }
-
-/* 背压入口：如果还有一帧在排队，就跳过新帧，避免把 CPU 花在马上会被丢弃的灰度转换上。 */
-/* 判断当前是否还能接收一帧新图像，避免无意义转换。 */
 static bool app_vision_can_accept_frame(void)
 {
     bool ready = false;
-
     taskENTER_CRITICAL(&s_vision_mux);
     ready = (s_pending_slot->info.seq == 0);
     taskEXIT_CRITICAL(&s_vision_mux);
     return ready;
 }
-
-/* 记录一次因为检测任务来不及消费而跳过的帧。 */
 static void app_vision_mark_busy_drop(void)
 {
     taskENTER_CRITICAL(&s_vision_mux);
     s_submit_busy_drop++;
     taskEXIT_CRITICAL(&s_vision_mux);
 }
-
-/* 在临界区内保存最新 AprilTag 检测结果。 */
 static void app_vision_store_result(const app_vision_result_t *result)
 {
-
     taskENTER_CRITICAL(&s_vision_mux);
     s_latest_result = *result;
-
     taskEXIT_CRITICAL(&s_vision_mux);
 }
-/* 读取最新检测结果快照，返回值表示当前结果是否有效。 */
 bool app_vision_get_latest_result(app_vision_result_t *out)
 {
     if (out == NULL)
     {
         return false;
     }
-
     taskENTER_CRITICAL(&s_vision_mux);
     *out = s_latest_result;
-
     taskEXIT_CRITICAL(&s_vision_mux);
     return out->valid;
 }
-
 void app_vision_get_stats(app_vision_stats_t *out)
 {
     if (out == NULL)
     {
         return;
     }
-
     taskENTER_CRITICAL(&s_vision_mux);
     out->submitted = s_submit_seq;
     out->busy_drop = s_submit_busy_drop;
     out->overwrite = s_submit_overwrite;
     taskEXIT_CRITICAL(&s_vision_mux);
 }
-
-/* -------------------------------------------------------------------------- */
-/* 检测结果处理                                                   */
-/* -------------------------------------------------------------------------- */
-
-/* 在没有新检测结果时更新等待帧提示。 */
 static void app_vision_set_wait_text(uint32_t heartbeat)
 {
     if (app_ai_capture_is_active())
@@ -304,7 +235,6 @@ static void app_vision_set_wait_text(uint32_t heartbeat)
     snprintf(buf, sizeof(buf), "tag: wait #%lu", (unsigned long)heartbeat);
     app_ui_set_vision_text(buf);
 }
-/* 把灰度裁剪图元数据填入检测结果。 */
 static void app_vision_fill_result_geometry(app_vision_result_t *result,
     const app_vision_gray_frame_info_t *info)
 {
@@ -321,7 +251,6 @@ static void app_vision_fill_result_geometry(app_vision_result_t *result,
     result->gray_width = info->gray_width;
     result->gray_height = info->gray_height;
 }
-/* 根据检测输出更新稳定计数、丢失计数、最新结果和 UI 文本。 */
 static void app_vision_update_result(const app_vision_gray_slot_t *slot,
     const app_apriltag_result_t *tag,
     uint32_t detect_ms,
@@ -481,12 +410,6 @@ static void app_vision_update_result(const app_vision_gray_slot_t *slot,
         s_last_miss_info_log_ms = now_ms;
     }
 }
-
-/* -------------------------------------------------------------------------- */
-/* 任务和公开接口                                                         */
-/* -------------------------------------------------------------------------- */
-
-/* 视觉后台任务，领取灰度帧并运行 AprilTag 检测。 */
 static void app_vision_task(void *arg)
 {
     (void)arg;
@@ -501,12 +424,10 @@ static void app_vision_task(void *arg)
     uint16_t stable_count = 0;
     uint16_t lost_count = 0;
     uint16_t last_tag_id = 0;
-
     if (!app_ai_capture_is_active())
     {
         app_ui_set_vision_text("tag: wait frame");
     }
-
     while (1) {
         app_vision_frame_info_t meta;
         uint32_t overwrite = 0;
@@ -601,11 +522,9 @@ static void app_vision_task(void *arg)
                 last_heartbeat_tick = now;
             }
         }
-
         (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(VISION_POLL_PERIOD_MS));
     }
 }
-/* 初始化 AprilTag 检测器、三缓冲槽位和统计计数。 */
 esp_err_t app_vision_init(void)
 {
     if (s_vision_inited)
@@ -618,7 +537,6 @@ esp_err_t app_vision_init(void)
         ESP_LOGE(TAG, "app_apriltag_init failed: %s", esp_err_to_name(ret));
         return ret;
     }
-
     taskENTER_CRITICAL(&s_vision_mux);
     memset(&s_latest_frame, 0, sizeof(s_latest_frame));
     memset(&s_slot_a, 0, sizeof(s_slot_a));
@@ -642,13 +560,11 @@ esp_err_t app_vision_init(void)
     s_last_tag_info_seq = 0;
     s_last_tag_info_id = UINT16_MAX;
     s_last_miss_info_log_ms = 0;
-
     taskEXIT_CRITICAL(&s_vision_mux);
     ESP_LOGI(TAG, "vision init done, gray=%dx%d", VISION_GRAY_WIDTH, VISION_GRAY_HEIGHT);
     s_vision_inited = true;
     return ESP_OK;
 }
-/* 创建视觉检测 FreeRTOS 任务，重复启动会直接成功返回。 */
 esp_err_t app_vision_start(void)
 {
     if (!s_vision_inited)
@@ -659,9 +575,7 @@ esp_err_t app_vision_start(void)
     {
         return ESP_OK;
     }
-
     app_vision_log_heap("before vision task start");
-
 #if defined(CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY) && CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY
     BaseType_t ret = xTaskCreatePinnedToCoreWithCaps(app_vision_task,
         "app_vision",
@@ -701,7 +615,6 @@ esp_err_t app_vision_start(void)
     ESP_LOGI(TAG, "vision task started");
     return ESP_OK;
 }
-/* 摄像头回调侧提交帧：转换为灰度采样图后交给后台检测任务。 */
 esp_err_t app_vision_submit_frame(const uint8_t *rgb565,
     uint32_t width,
     uint32_t height,
@@ -709,7 +622,6 @@ esp_err_t app_vision_submit_frame(const uint8_t *rgb565,
 {
     if (rgb565 == NULL || width == 0 || height == 0)
     {
-
         return ESP_ERR_INVALID_ARG;
     }
     const size_t min_len = (size_t)width * (size_t)height * 2U;
@@ -722,13 +634,11 @@ esp_err_t app_vision_submit_frame(const uint8_t *rgb565,
         app_vision_mark_busy_drop();
         return ESP_OK;
     }
-
     app_vision_gray_slot_t *write_slot = s_write_slot;
     if (write_slot == NULL)
     {
         return ESP_ERR_INVALID_STATE;
     }
-
     memset(&write_slot->info, 0, sizeof(write_slot->info));
     write_slot->info.src_width = width;
     write_slot->info.src_height = height;
@@ -749,7 +659,6 @@ esp_err_t app_vision_submit_frame(const uint8_t *rgb565,
             dst_row[gx] = app_rgb565_to_gray(pixel);
         }
     }
-
     taskENTER_CRITICAL(&s_vision_mux);
     if (s_pending_slot->info.seq != 0)
     {
@@ -767,13 +676,11 @@ esp_err_t app_vision_submit_frame(const uint8_t *rgb565,
     s_pending_slot = write_slot;
     s_write_slot = old_pending_slot;
     memset(&s_write_slot->info, 0, sizeof(s_write_slot->info));
-
     taskEXIT_CRITICAL(&s_vision_mux);
     if (s_vision_task != NULL)
     {
         xTaskNotifyGive(s_vision_task);
     }
-
     if (!s_first_submit_logged)
     {
         ESP_LOGD(TAG,

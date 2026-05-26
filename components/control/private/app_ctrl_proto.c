@@ -1,10 +1,4 @@
-/*
- * app_ctrl_proto.c - 控制模块 CH32 协议辅助判断函数实现。
- * 提供阶段分类、状态文本、软错误判断等纯函数。
- */
-#include "app_ctrl_proto.h"
-
-/* 接驳过程中舱门、托盘、货物检测等阶段均视为忙碌。 */
+﻿#include "app_ctrl_proto.h"
 bool app_ctrl_proto_stage_is_busy(app_ch32_proto_stage_t stage)
 {
     switch (stage) {
@@ -22,28 +16,20 @@ bool app_ctrl_proto_stage_is_busy(app_ch32_proto_stage_t stage)
         return false;
     }
 }
-
-/* 托盘已伸出或正在等待放货时视为等待放货窗口。 */
 bool app_ctrl_proto_stage_is_cargo_wait_window(app_ch32_proto_stage_t stage)
 {
     return (stage == APP_CH32_STAGE_TRAY_EXTENDED) ||
     (stage == APP_CH32_STAGE_WAITING_CARGO);
 }
-
-/* 检查 LIMIT_TRAY_OUT 标志位。 */
 bool app_ctrl_proto_flags_indicate_tray_out(uint16_t flags)
 {
     return (flags & APP_CH32_FLAG_LIMIT_TRAY_OUT) != 0U;
 }
-
-/* 超时和重量错误在等待放货场景下视为软错误，不触发硬故障。 */
 bool app_ctrl_proto_error_is_cargo_wait_soft(uint8_t proto_error)
 {
     return (proto_error == APP_CH32_ERR_TIMEOUT) ||
     (proto_error == APP_CH32_ERR_WEIGHT);
 }
-
-/* 将 CH32 协议阶段转换为 UI 友好的状态文本。 */
 const char *app_ctrl_proto_stage_status_text(app_ch32_proto_stage_t stage)
 {
     switch (stage) {
@@ -65,14 +51,10 @@ const char *app_ctrl_proto_stage_status_text(app_ch32_proto_stage_t stage)
     default:                             return "dock: CH32 online";
     }
 }
-
-/* 等待放货窗口阶段不需要超时截止，其余忙碌阶段需要。 */
 bool app_ctrl_proto_stage_uses_busy_deadline(app_ch32_proto_stage_t stage)
 {
     return !app_ctrl_proto_stage_is_cargo_wait_window(stage);
 }
-
-/* 综合当前和上一帧的阶段、flags、错误码和已见放货窗口判断是否为软错误。 */
 bool app_ctrl_is_soft_waiting_cargo_error(app_ch32_proto_stage_t prev_stage,
     uint16_t prev_flags,
     app_ch32_proto_stage_t stage,

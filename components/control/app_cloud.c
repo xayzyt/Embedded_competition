@@ -1,19 +1,4 @@
-/* 实现说明：云端启动失败时允许本地视觉和控制继续运行。 */
-/*
- * app_cloud.c - Wi-Fi / MQTT 云端通信模块
- *
- * 这个文件负责把设备接入云端：
- * - 初始化 esp_netif、事件循环和 Wi-Fi STA；
- * - 建立 MQTT 客户端连接；
- * - 根据设备 ID 生成命令、应答、状态等 topic；
- * - 解析云端/小程序下发的 JSON 命令；
- * - 将 app_task.c 的任务状态快照发布到 MQTT。
- *
- * 在你的项目中，小程序或云端并不是直接控制电机，而是通过 MQTT 发任务命令给 ESP32-P4，
- * 再由 app_task/app_ctrl/app_ch32_link 分层处理，这样能保证“联网控制”和“本地安全状态机”分开。
- */
-
-#include "app_cloud.h"
+﻿#include "app_cloud.h"
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -41,13 +26,7 @@
 #include "app_cloud_cmd.h"
 #include "app_task.h"
 #include "app_ui.h"
-
 static const char *TAG = "app_cloud";
-
-/* -------------------------------------------------------------------------- */
-/* 网络、MQTT 和载荷尺寸                                           */
-/* -------------------------------------------------------------------------- */
-
 #define APP_CLOUD_WIFI_CONNECTED_BIT   BIT0
 #define APP_CLOUD_MQTT_CONNECTED_BIT   BIT1
 #define APP_CLOUD_START_MQTT_BIT       BIT2
@@ -76,50 +55,42 @@ static const char *TAG = "app_cloud";
 #define APP_CLOUD_ABORT_WAIT_MS        800
 #define APP_CLOUD_WEATHER_TOGGLE_DEBOUNCE_MS (800)
 #define APP_CLOUD_WEATHER_RESTORE_REFETCH_MIN_MS (30 * 1000)
-
 typedef enum {
     APP_CLOUD_WEATHER_MODE_NORMAL = 0,
     APP_CLOUD_WEATHER_MODE_CLOUD_GUARD,
     APP_CLOUD_WEATHER_MODE_EMERGENCY,
 } app_cloud_weather_mode_t;
-
-/* -------------------------------------------------------------------------- */
-/* 运行状态                                                               */
-/* -------------------------------------------------------------------------- */
-
 typedef struct {
-    bool inited;                                      /* 云端模块是否完成初始化。 */
-    bool mqtt_started;                                /* MQTT 客户端是否已经启动。 */
-    bool mqtt_connected;                              /* MQTT 当前是否已连接。 */
-    bool sntp_started;                                /* SNTP 时间同步是否已经启动。 */
-    bool weather_simulated;                           /* 是否启用恶劣天气模拟。 */
-    bool weather_docking_blocked;                     /* 当前天气是否禁止接驳。 */
-    bool weather_docking_policy_applied;              /* 是否已经执行过天气阻止动作。 */
-    bool weather_restore_pending;                     /* 是否需要从禁止接驳状态回到等待任务。 */
-    bool have_cached_weather;                         /* 是否缓存了最近一次真实/兜底天气。 */
-    bool have_last_snapshot;                          /* 是否缓存了最近一次任务快照。 */
-    uint32_t msg_seq;                                 /* 发布状态消息时递增的本地序号。 */
-    TickType_t weather_cache_tick;                    /* 最近一次正常天气缓存时间。 */
-    TickType_t weather_last_toggle_tick;              /* 天气模拟按钮上次有效切换时间。 */
-    EventGroupHandle_t event_group;                   /* Wi-Fi/MQTT 状态同步事件组。 */
-    esp_netif_t *sta_netif;                           /* Wi-Fi STA 网络接口句柄。 */
-    esp_mqtt_client_handle_t mqtt_client;             /* MQTT 客户端句柄。 */
-    app_task_snapshot_t last_snapshot;                /* 最近一次任务状态快照。 */
-    char current_request_id[32];                      /* 当前正在处理的云端请求 ID。 */
-    char current_order_id[48];                        /* 当前正在处理的真实订单 ID。 */
-    char current_order_name[32];                      /* 当前订单的短展示名。 */
-    char topic_cmd[APP_CLOUD_TOPIC_BUF_LEN];          /* 订阅云端命令的 topic。 */
-    char topic_ack[APP_CLOUD_TOPIC_BUF_LEN];          /* 发布命令应答的 topic。 */
-    char topic_state[APP_CLOUD_TOPIC_BUF_LEN];        /* 发布任务状态的 topic。 */
-    char cached_weather_text[APP_CLOUD_WEATHER_TEXT_LEN]; /* 最近一次正常天气文本。 */
-    int cached_weather_code;                          /* 最近一次正常天气 code。 */
+    bool inited;
+    bool mqtt_started;
+    bool mqtt_connected;
+    bool sntp_started;
+    bool weather_simulated;
+    bool weather_docking_blocked;
+    bool weather_docking_policy_applied;
+    bool weather_restore_pending;
+    bool have_cached_weather;
+    bool have_last_snapshot;
+    uint32_t msg_seq;
+    TickType_t weather_cache_tick;
+    TickType_t weather_last_toggle_tick;
+    EventGroupHandle_t event_group;
+    esp_netif_t *sta_netif;
+    esp_mqtt_client_handle_t mqtt_client;
+    app_task_snapshot_t last_snapshot;
+    char current_request_id[32];
+    char current_order_id[48];
+    char current_order_name[32];
+    char topic_cmd[APP_CLOUD_TOPIC_BUF_LEN];
+    char topic_ack[APP_CLOUD_TOPIC_BUF_LEN];
+    char topic_state[APP_CLOUD_TOPIC_BUF_LEN];
+    char cached_weather_text[APP_CLOUD_WEATHER_TEXT_LEN];
+    int cached_weather_code;
     app_cloud_weather_mode_t weather_mode;
 } app_cloud_runtime_t;
 static app_cloud_runtime_t s_cloud = {0};
 static TaskHandle_t s_cloud_task = NULL;
 static TaskHandle_t s_weather_task = NULL;
-
-/* MQTT 事件处理函数需要先声明，创建客户端时会注册它。 */
 static void app_cloud_mqtt_event_handler(void *handler_args,
     esp_event_base_t base,
     int32_t event_id,
@@ -129,14 +100,12 @@ static esp_err_t app_cloud_publish_raw(const char *topic,
     int qos,
     int retain);
 static void app_cloud_publish_current_state(void);
-
 typedef struct {
     char *buf;
     int len;
     int cap;
     bool truncated;
 } app_cloud_http_buf_t;
-
 static void app_cloud_log_heap(const char *stage)
 {
     ESP_LOGI(TAG,
@@ -147,35 +116,26 @@ static void app_cloud_log_heap(const char *stage)
         (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
         (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
 }
-
-/* -------------------------------------------------------------------------- */
-/* JSON 小工具                                                          */
-/* -------------------------------------------------------------------------- */
-
 static bool app_cloud_json_add_string(cJSON *root, const char *key, const char *value)
 {
     return cJSON_AddStringToObject(root, key, (value != NULL) ? value : "") != NULL;
 }
-
 static bool app_cloud_json_add_number(cJSON *root, const char *key, double value)
 {
     return cJSON_AddNumberToObject(root, key, value) != NULL;
 }
-
 static void app_cloud_make_order_name(const char *order_id, char *out, size_t out_size)
 {
     if (out == NULL || out_size == 0U)
     {
         return;
     }
-
     out[0] = '\0';
     if (order_id == NULL || order_id[0] == '\0')
     {
         strlcpy(out, "SKY-ORDER", out_size);
         return;
     }
-
     const char *suffix = strrchr(order_id, '-');
     suffix = (suffix != NULL && suffix[1] != '\0') ? (suffix + 1) : order_id;
     size_t suffix_len = strlen(suffix);
@@ -185,7 +145,6 @@ static void app_cloud_make_order_name(const char *order_id, char *out, size_t ou
     }
     snprintf(out, out_size, "SKY-%s", suffix);
 }
-
 static const char *app_cloud_order_id_from_cmd(const app_cloud_cmd_t *cmd)
 {
     if (cmd == NULL)
@@ -198,7 +157,6 @@ static const char *app_cloud_order_id_from_cmd(const app_cloud_cmd_t *cmd)
     }
     return cmd->request_id;
 }
-
 static void app_cloud_order_name_from_cmd(const app_cloud_cmd_t *cmd,
     char *out,
     size_t out_size)
@@ -214,7 +172,6 @@ static void app_cloud_order_name_from_cmd(const app_cloud_cmd_t *cmd,
     }
     app_cloud_make_order_name(app_cloud_order_id_from_cmd(cmd), out, out_size);
 }
-
 static const char *app_cloud_weather_mode_text(app_cloud_weather_mode_t mode)
 {
     switch (mode) {
@@ -227,43 +184,32 @@ static const char *app_cloud_weather_mode_text(app_cloud_weather_mode_t mode)
         return "normal";
     }
 }
-
 static bool app_cloud_snapshot_is_active_task(const app_task_snapshot_t *snap)
 {
     if (snap == NULL)
     {
         return false;
     }
-
     return snap->active ||
         snap->state == APP_TASK_STATE_WAIT_APPROACH ||
         snap->state == APP_TASK_STATE_AUTH_PASSED ||
         snap->state == APP_TASK_STATE_DOCKING;
 }
-
 static esp_err_t app_cloud_publish_json(const char *topic, cJSON *root, int retain)
 {
     if (topic == NULL || root == NULL)
     {
         return ESP_ERR_INVALID_ARG;
     }
-
     char *json = cJSON_PrintUnformatted(root);
     if (json == NULL)
     {
         return ESP_ERR_NO_MEM;
     }
-
     esp_err_t ret = app_cloud_publish_raw(topic, json, CONFIG_SKY_MQTT_QOS, retain);
     cJSON_free(json);
     return ret;
 }
-
-/* -------------------------------------------------------------------------- */
-/* Wi-Fi / MQTT 初始化辅助函数                                                  */
-/* -------------------------------------------------------------------------- */
-
-/* 初始化 esp_netif，已初始化时视为成功。 */
 static esp_err_t app_cloud_init_netif_once(void)
 {
     esp_err_t ret = esp_netif_init();
@@ -273,7 +219,6 @@ static esp_err_t app_cloud_init_netif_once(void)
     }
     return ret;
 }
-/* 创建默认事件循环，已创建时视为成功。 */
 static esp_err_t app_cloud_init_event_loop_once(void)
 {
     esp_err_t ret = esp_event_loop_create_default();
@@ -283,7 +228,6 @@ static esp_err_t app_cloud_init_event_loop_once(void)
     }
     return ret;
 }
-/* 根据 topic 前缀和设备名生成命令、应答和状态 topic。 */
 static void app_cloud_build_topics(void)
 {
     snprintf(s_cloud.topic_cmd,
@@ -302,7 +246,6 @@ static void app_cloud_build_topics(void)
         CONFIG_SKY_MQTT_TOPIC_PREFIX,
         CONFIG_SKY_MQTT_DEVICE_NAME);
 }
-/* 打印当前 MQTT topic，方便联调订阅路径。 */
 static void app_cloud_log_topics_once(void)
 {
     ESP_LOGD(TAG,
@@ -311,7 +254,6 @@ static void app_cloud_log_topics_once(void)
         s_cloud.topic_ack,
         s_cloud.topic_state);
 }
-/* 检查 Wi-Fi 和 MQTT menuconfig 配置是否完整有效。 */
 static void app_cloud_request_wifi_connect(const char *reason)
 {
     esp_err_t ret = esp_wifi_connect();
@@ -323,7 +265,6 @@ static void app_cloud_request_wifi_connect(const char *reason)
             esp_err_to_name(ret));
     }
 }
-
 static void app_cloud_log_dns_info(const char *label, const esp_netif_dns_info_t *dns)
 {
     if (dns == NULL || dns->ip.u_addr.ip4.addr == 0)
@@ -331,21 +272,18 @@ static void app_cloud_log_dns_info(const char *label, const esp_netif_dns_info_t
         ESP_LOGW(TAG, "%s dns: not configured", label);
         return;
     }
-
     char ip[16] = {0};
     ESP_LOGI(TAG,
         "%s dns: %s",
         label,
         esp_ip4addr_ntoa(&dns->ip.u_addr.ip4, ip, sizeof(ip)));
 }
-
 static void app_cloud_ensure_dns_after_ip(void)
 {
     if (s_cloud.sta_netif == NULL)
     {
         return;
     }
-
     esp_netif_dns_info_t dns = {0};
     esp_err_t ret = esp_netif_get_dns_info(s_cloud.sta_netif, ESP_NETIF_DNS_MAIN, &dns);
     if (ret == ESP_OK && dns.ip.u_addr.ip4.addr != 0)
@@ -353,7 +291,6 @@ static void app_cloud_ensure_dns_after_ip(void)
         app_cloud_log_dns_info("main", &dns);
         return;
     }
-
     ESP_LOGW(TAG,
         "main dns missing (%s), setting fallback %u.%u.%u.%u",
         esp_err_to_name(ret),
@@ -361,7 +298,6 @@ static void app_cloud_ensure_dns_after_ip(void)
         APP_CLOUD_FALLBACK_DNS_B,
         APP_CLOUD_FALLBACK_DNS_C,
         APP_CLOUD_FALLBACK_DNS_D);
-
     esp_netif_dns_info_t fallback = {0};
     fallback.ip.type = ESP_IPADDR_TYPE_V4;
     esp_netif_set_ip4_addr(&fallback.ip.u_addr.ip4,
@@ -377,35 +313,27 @@ static void app_cloud_ensure_dns_after_ip(void)
     }
     app_cloud_log_dns_info("fallback", &fallback);
 }
-
 static void app_cloud_time_sync_cb(struct timeval *tv)
 {
     (void)tv;
-
     time_t now = 0;
     time(&now);
-
     struct tm tm_now;
     localtime_r(&now, &tm_now);
-
     char time_buf[32] = {0};
     strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", &tm_now);
     ESP_LOGI(TAG, "time synced: %s", time_buf);
 }
-
 static void app_cloud_start_sntp_once(void)
 {
     if (s_cloud.sntp_started)
     {
         return;
     }
-
     setenv("TZ", APP_CLOUD_TIMEZONE, 1);
     tzset();
-
     esp_sntp_config_t sntp_config = ESP_NETIF_SNTP_DEFAULT_CONFIG(APP_CLOUD_NTP_SERVER);
     sntp_config.sync_cb = app_cloud_time_sync_cb;
-
     esp_err_t ret = esp_netif_sntp_init(&sntp_config);
     if (ret == ESP_ERR_INVALID_STATE)
     {
@@ -418,31 +346,26 @@ static void app_cloud_start_sntp_once(void)
         ESP_LOGW(TAG, "SNTP start failed: %s", esp_err_to_name(ret));
         return;
     }
-
     s_cloud.sntp_started = true;
     ESP_LOGI(TAG, "SNTP started, server=%s", APP_CLOUD_NTP_SERVER);
 }
-
 static esp_err_t app_cloud_weather_http_event_cb(esp_http_client_event_t *evt)
 {
     if (evt == NULL || evt->event_id != HTTP_EVENT_ON_DATA)
     {
         return ESP_OK;
     }
-
     app_cloud_http_buf_t *rx = (app_cloud_http_buf_t *)evt->user_data;
     if (rx == NULL || rx->buf == NULL || rx->cap <= 0 || evt->data == NULL || evt->data_len <= 0)
     {
         return ESP_OK;
     }
-
     int free_len = rx->cap - rx->len;
     if (free_len <= 0)
     {
         rx->truncated = true;
         return ESP_OK;
     }
-
     int copy_len = evt->data_len;
     if (copy_len > free_len)
     {
@@ -454,7 +377,6 @@ static esp_err_t app_cloud_weather_http_event_cb(esp_http_client_event_t *evt)
     rx->buf[rx->len] = '\0';
     return ESP_OK;
 }
-
 static const char *app_cloud_json_get_string(cJSON *obj, const char *key)
 {
     if (obj == NULL || key == NULL)
@@ -468,7 +390,6 @@ static const char *app_cloud_json_get_string(cJSON *obj, const char *key)
     }
     return NULL;
 }
-
 static esp_err_t app_cloud_parse_weather_response(const char *json,
     char *weather_text,
     size_t weather_text_size,
@@ -478,18 +399,15 @@ static esp_err_t app_cloud_parse_weather_response(const char *json,
     {
         return ESP_ERR_INVALID_ARG;
     }
-
     cJSON *root = cJSON_Parse(json);
     if (root == NULL)
     {
         return ESP_ERR_INVALID_RESPONSE;
     }
-
     esp_err_t ret = ESP_ERR_INVALID_RESPONSE;
     cJSON *results = cJSON_GetObjectItemCaseSensitive(root, "results");
     cJSON *first = cJSON_IsArray(results) ? cJSON_GetArrayItem(results, 0) : NULL;
     cJSON *now = first ? cJSON_GetObjectItemCaseSensitive(first, "now") : NULL;
-
     const char *text = app_cloud_json_get_string(now, "text");
     const char *code = app_cloud_json_get_string(now, "code");
     const char *temp = app_cloud_json_get_string(now, "temperature");
@@ -503,11 +421,9 @@ static esp_err_t app_cloud_parse_weather_response(const char *json,
             temp);
         ret = ESP_OK;
     }
-
     cJSON_Delete(root);
     return ret;
 }
-
 static void app_cloud_cache_weather(const char *text, int weather_code)
 {
     if (text == NULL)
@@ -519,7 +435,6 @@ static void app_cloud_cache_weather(const char *text, int weather_code)
     s_cloud.have_cached_weather = true;
     s_cloud.weather_cache_tick = xTaskGetTickCount();
 }
-
 static bool app_cloud_cached_weather_is_fresh(TickType_t max_age_ticks)
 {
     if (!s_cloud.have_cached_weather)
@@ -528,7 +443,6 @@ static bool app_cloud_cached_weather_is_fresh(TickType_t max_age_ticks)
     }
     return (xTaskGetTickCount() - s_cloud.weather_cache_tick) < max_age_ticks;
 }
-
 static void app_cloud_notify_weather_task(void)
 {
     if (s_weather_task != NULL)
@@ -536,7 +450,6 @@ static void app_cloud_notify_weather_task(void)
         xTaskNotifyGive(s_weather_task);
     }
 }
-
 static void app_cloud_show_weather_fallback(void)
 {
     const char *fallback = "多云\n--℃";
@@ -546,20 +459,17 @@ static void app_cloud_show_weather_fallback(void)
         false,
         NULL);
 }
-
 static void app_cloud_send_weather_protection(void)
 {
     if (!app_ch32_link_is_ready())
     {
         ESP_LOGW(TAG, "CH32 not ready, try SAFE_CLOSE anyway");
     }
-
     esp_err_t ret = app_ch32_link_send_cmd_and_wait_ack('C', 3000);
     if (ret == ESP_OK)
     {
         return;
     }
-
     ESP_LOGW(TAG, "SAFE_CLOSE failed, fallback abort: %s", esp_err_to_name(ret));
     ret = app_ch32_link_send_cmd_and_wait_ack('S', APP_CLOUD_ABORT_WAIT_MS);
     if (ret != ESP_OK)
@@ -567,23 +477,19 @@ static void app_cloud_send_weather_protection(void)
         ESP_LOGW(TAG, "abort dock for severe weather failed: %s", esp_err_to_name(ret));
     }
 }
-
 static void app_cloud_apply_weather_docking_policy(bool simulated)
 {
     s_cloud.weather_docking_blocked = simulated;
-
     if (!simulated)
     {
         s_cloud.weather_docking_policy_applied = false;
         return;
     }
-
     if (s_cloud.weather_docking_policy_applied)
     {
         return;
     }
     s_cloud.weather_docking_policy_applied = true;
-
     app_task_snapshot_t snap = {0};
     const bool active_task = app_task_peek_snapshot(&snap) && app_cloud_snapshot_is_active_task(&snap);
     if (active_task)
@@ -597,7 +503,6 @@ static void app_cloud_apply_weather_docking_policy(bool simulated)
             app_task_cancel("blocked by simulated severe weather");
         }
     }
-
     if (s_cloud.weather_mode == APP_CLOUD_WEATHER_MODE_EMERGENCY)
     {
         app_cloud_send_weather_protection();
@@ -611,7 +516,6 @@ static void app_cloud_apply_weather_docking_policy(bool simulated)
         }
     }
 }
-
 static void app_cloud_show_simulated_weather_ui(void)
 {
     app_ui_main_screen_apply_weather_state("台风\n28℃",
@@ -619,13 +523,11 @@ static void app_cloud_show_simulated_weather_ui(void)
         true,
         "weather blocked");
 }
-
 static void app_cloud_show_simulated_severe_weather(void)
 {
     app_cloud_show_simulated_weather_ui();
     app_cloud_apply_weather_docking_policy(true);
 }
-
 static void app_cloud_show_restored_weather_ui(bool update_task_text)
 {
     const char *task_text = update_task_text ? "waiting task" : NULL;
@@ -639,14 +541,12 @@ static void app_cloud_show_restored_weather_ui(bool update_task_text)
     }
     app_ui_main_screen_apply_weather_state("同步中", 99, false, task_text);
 }
-
 static void app_cloud_show_restored_weather(bool update_task_text)
 {
     app_cloud_apply_weather_docking_policy(false);
     s_cloud.weather_mode = APP_CLOUD_WEATHER_MODE_NORMAL;
     app_cloud_show_restored_weather_ui(update_task_text);
 }
-
 static esp_err_t app_cloud_fetch_weather_once(void)
 {
     if (s_cloud.weather_simulated)
@@ -654,7 +554,6 @@ static esp_err_t app_cloud_fetch_weather_once(void)
         app_cloud_show_simulated_severe_weather();
         return ESP_OK;
     }
-
     if (CONFIG_SKY_WEATHER_API_KEY[0] == '\0')
     {
         ESP_LOGW(TAG, "CONFIG_SKY_WEATHER_API_KEY is empty, show local weather fallback");
@@ -663,14 +562,12 @@ static esp_err_t app_cloud_fetch_weather_once(void)
         s_cloud.weather_mode = APP_CLOUD_WEATHER_MODE_NORMAL;
         return ESP_OK;
     }
-
     char url[APP_CLOUD_WEATHER_URL_LEN] = {0};
     snprintf(url,
         sizeof(url),
         "https://api.seniverse.com/v3/weather/now.json?key=%s&location=%s&language=zh-Hans&unit=c",
         CONFIG_SKY_WEATHER_API_KEY,
         APP_CLOUD_WEATHER_CITY);
-
     char response[APP_CLOUD_WEATHER_RESP_LEN] = {0};
     app_cloud_http_buf_t rx = {
         .buf = response,
@@ -688,18 +585,15 @@ static esp_err_t app_cloud_fetch_weather_once(void)
         .timeout_ms = 10000,
         .buffer_size = 1024,
     };
-
     esp_http_client_handle_t client = esp_http_client_init(&http_cfg);
     if (client == NULL)
     {
         app_ui_main_screen_set_weather("同步失败", 99);
         return ESP_ERR_NO_MEM;
     }
-
     esp_err_t ret = esp_http_client_perform(client);
     int status = esp_http_client_get_status_code(client);
     esp_http_client_cleanup(client);
-
     if (ret != ESP_OK || status != 200 || rx.len <= 0 || rx.truncated)
     {
         ESP_LOGW(TAG,
@@ -711,7 +605,6 @@ static esp_err_t app_cloud_fetch_weather_once(void)
         app_ui_main_screen_set_weather("同步失败", 99);
         return (ret != ESP_OK) ? ret : ESP_FAIL;
     }
-
     char weather_text[APP_CLOUD_WEATHER_TEXT_LEN] = {0};
     int weather_code = 99;
     ret = app_cloud_parse_weather_response(response,
@@ -724,13 +617,11 @@ static esp_err_t app_cloud_fetch_weather_once(void)
         app_ui_main_screen_set_weather("同步失败", 99);
         return ret;
     }
-
     if (s_cloud.weather_simulated)
     {
         app_cloud_show_simulated_severe_weather();
         return ESP_OK;
     }
-
     app_cloud_cache_weather(weather_text, weather_code);
     s_cloud.weather_docking_blocked = false;
     s_cloud.weather_mode = APP_CLOUD_WEATHER_MODE_NORMAL;
@@ -738,23 +629,19 @@ static esp_err_t app_cloud_fetch_weather_once(void)
     ESP_LOGI(TAG, "weather updated: %s code=%d", weather_text, weather_code);
     return ESP_OK;
 }
-
 static void app_cloud_weather_task(void *arg)
 {
     (void)arg;
     app_cloud_show_restored_weather_ui(false);
-
     for (;;)
     {
         bool skip_fetch_once = false;
-
         if (s_cloud.weather_simulated)
         {
             app_cloud_show_simulated_severe_weather();
             (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(APP_CLOUD_WEATHER_REFRESH_MS));
             continue;
         }
-
         const bool restore_pending = s_cloud.weather_restore_pending;
         s_cloud.weather_restore_pending = false;
         if (restore_pending)
@@ -767,33 +654,28 @@ static void app_cloud_weather_task(void *arg)
         {
             app_ui_main_screen_set_weather_simulated(false);
         }
-
         if (skip_fetch_once)
         {
             (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(APP_CLOUD_WEATHER_RESTORE_REFETCH_MIN_MS));
             continue;
         }
-
         if (!app_cloud_is_wifi_connected())
         {
             (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000));
             continue;
         }
-
         esp_err_t ret = app_cloud_fetch_weather_once();
         (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS((ret == ESP_OK) ?
             APP_CLOUD_WEATHER_REFRESH_MS :
             APP_CLOUD_WEATHER_RETRY_MS));
     }
 }
-
 static void app_cloud_start_weather_task_once(void)
 {
     if (s_weather_task != NULL)
     {
         return;
     }
-
     BaseType_t ok = xTaskCreate(app_cloud_weather_task,
         "weather",
         APP_CLOUD_WEATHER_TASK_STACK,
@@ -806,7 +688,6 @@ static void app_cloud_start_weather_task_once(void)
         s_weather_task = NULL;
     }
 }
-
 void app_cloud_set_weather_simulated(bool simulated)
 {
     const TickType_t now = xTaskGetTickCount();
@@ -816,7 +697,6 @@ void app_cloud_set_weather_simulated(bool simulated)
         ESP_LOGD(TAG, "ignore weather toggle debounce");
         return;
     }
-
     const bool was_simulated = s_cloud.weather_simulated;
     if (was_simulated == simulated)
     {
@@ -832,11 +712,9 @@ void app_cloud_set_weather_simulated(bool simulated)
         app_cloud_notify_weather_task();
         return;
     }
-
     s_cloud.weather_last_toggle_tick = now;
     s_cloud.weather_simulated = simulated;
     const bool restore_pending = !simulated && (was_simulated || s_cloud.weather_docking_blocked);
-
     if (simulated)
     {
         s_cloud.weather_docking_blocked = true;
@@ -854,11 +732,9 @@ void app_cloud_set_weather_simulated(bool simulated)
         app_cloud_show_restored_weather_ui(true);
         ESP_LOGI(TAG, "restore weather requested");
     }
-
     app_cloud_publish_current_state();
     app_cloud_notify_weather_task();
 }
-
 void app_cloud_trigger_weather_emergency(void)
 {
     s_cloud.weather_simulated = true;
@@ -866,24 +742,20 @@ void app_cloud_trigger_weather_emergency(void)
     s_cloud.weather_docking_policy_applied = false;
     s_cloud.weather_restore_pending = false;
     s_cloud.weather_mode = APP_CLOUD_WEATHER_MODE_EMERGENCY;
-
     app_cloud_show_simulated_weather_ui();
     app_cloud_publish_current_state();
     app_cloud_apply_weather_docking_policy(true);
     app_cloud_publish_current_state();
     app_cloud_notify_weather_task();
 }
-
 bool app_cloud_is_weather_simulated(void)
 {
     return s_cloud.weather_simulated;
 }
-
 bool app_cloud_is_weather_docking_blocked(void)
 {
     return s_cloud.weather_docking_blocked;
 }
-
 static esp_err_t app_cloud_validate_config(void)
 {
     if (CONFIG_SKY_WIFI_SSID[0] == '\0')
@@ -923,12 +795,6 @@ static esp_err_t app_cloud_validate_config(void)
     }
     return ESP_OK;
 }
-
-/* -------------------------------------------------------------------------- */
-/* 发布辅助函数                                                             */
-/* -------------------------------------------------------------------------- */
-
-/* 向指定 MQTT topic 发布原始 payload。 */
 static esp_err_t app_cloud_publish_raw(const char *topic,
     const char *payload,
     int qos,
@@ -936,14 +802,12 @@ static esp_err_t app_cloud_publish_raw(const char *topic,
 {
     if (topic == NULL || payload == NULL)
     {
-
         return ESP_ERR_INVALID_ARG;
     }
     if (s_cloud.mqtt_client == NULL || !s_cloud.mqtt_connected)
     {
         return ESP_ERR_INVALID_STATE;
     }
-
     int msg_id = esp_mqtt_client_publish(s_cloud.mqtt_client, topic, payload, 0, qos, retain);
     if (msg_id < 0)
     {
@@ -953,7 +817,6 @@ static esp_err_t app_cloud_publish_raw(const char *topic,
     ESP_LOGD(TAG, "mqtt tx topic=%s msg_id=%d", topic, msg_id);
     return ESP_OK;
 }
-/* 发布云端命令处理结果 ACK。 */
 static esp_err_t app_cloud_publish_ack(const app_cloud_cmd_t *cmd,
     int code,
     const char *msg,
@@ -961,7 +824,6 @@ static esp_err_t app_cloud_publish_ack(const app_cloud_cmd_t *cmd,
 {
     if (cmd == NULL)
     {
-
         return ESP_ERR_INVALID_ARG;
     }
     cJSON *root = cJSON_CreateObject();
@@ -969,7 +831,6 @@ static esp_err_t app_cloud_publish_ack(const app_cloud_cmd_t *cmd,
     {
         return ESP_ERR_NO_MEM;
     }
-
     const char *order_id = (cmd->order_id[0] != '\0') ? cmd->order_id : s_cloud.current_order_id;
     char order_name[sizeof(s_cloud.current_order_name)] = {0};
     if (cmd->order_name[0] != '\0')
@@ -984,7 +845,6 @@ static esp_err_t app_cloud_publish_ack(const app_cloud_cmd_t *cmd,
     {
         app_cloud_make_order_name(order_id, order_name, sizeof(order_name));
     }
-
     bool ok = app_cloud_json_add_string(root, "request_id", cmd->request_id) &&
         app_cloud_json_add_string(root, "order_id", order_id) &&
         app_cloud_json_add_string(root, "order_name", order_name) &&
@@ -996,7 +856,6 @@ static esp_err_t app_cloud_publish_ack(const app_cloud_cmd_t *cmd,
     cJSON_Delete(root);
     return ret;
 }
-/* 将任务快照组装成 JSON 并发布到状态 topic。 */
 static void app_cloud_publish_task_snapshot_internal(const app_task_snapshot_t *snap)
 {
     if (snap == NULL)
@@ -1014,7 +873,6 @@ static void app_cloud_publish_task_snapshot_internal(const app_task_snapshot_t *
         ESP_LOGW(TAG, "task snapshot not sent yet: no memory");
         return;
     }
-
     bool ok = app_cloud_json_add_number(root, "msg_id", seq) &&
         app_cloud_json_add_number(root, "ts", (double)now) &&
         app_cloud_json_add_string(root, "request_id", s_cloud.current_request_id) &&
@@ -1033,7 +891,6 @@ static void app_cloud_publish_task_snapshot_internal(const app_task_snapshot_t *
         app_cloud_json_add_string(root, "weather_mode", app_cloud_weather_mode_text(s_cloud.weather_mode)) &&
         app_cloud_json_add_string(root, "source", snap->source) &&
         app_cloud_json_add_string(root, "note", snap->note);
-
     esp_err_t ret = ok ? app_cloud_publish_json(s_cloud.topic_state, root, 1) : ESP_ERR_NO_MEM;
     cJSON_Delete(root);
     if (ret != ESP_OK)
@@ -1041,7 +898,6 @@ static void app_cloud_publish_task_snapshot_internal(const app_task_snapshot_t *
         ESP_LOGW(TAG, "task snapshot not sent yet: %s", esp_err_to_name(ret));
     }
 }
-
 static void app_cloud_publish_current_state(void)
 {
     app_task_snapshot_t snap = {0};
@@ -1052,18 +908,11 @@ static void app_cloud_publish_current_state(void)
         app_cloud_publish_task_snapshot_internal(&snap);
         return;
     }
-
     if (s_cloud.have_last_snapshot)
     {
         app_cloud_publish_task_snapshot_internal(&s_cloud.last_snapshot);
     }
 }
-
-/* -------------------------------------------------------------------------- */
-/* 任务和云端命令处理                                             */
-/* -------------------------------------------------------------------------- */
-
-/* app_task 状态变化回调，用于缓存并发布最新任务快照。 */
 static void app_cloud_on_task_event(app_task_event_t event,
     const app_task_snapshot_t *snap,
     void *user_ctx)
@@ -1078,7 +927,6 @@ static void app_cloud_on_task_event(app_task_event_t event,
     s_cloud.have_last_snapshot = true;
     app_cloud_publish_task_snapshot_internal(snap);
 }
-/* 创建 MQTT 客户端实例并填入连接、认证和证书配置。 */
 static esp_err_t app_cloud_create_mqtt_client(void)
 {
     if (s_cloud.mqtt_client != NULL)
@@ -1102,13 +950,11 @@ static esp_err_t app_cloud_create_mqtt_client(void)
     s_cloud.mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
     if (s_cloud.mqtt_client == NULL)
     {
-
         ESP_LOGE(TAG, "esp_mqtt_client_init failed");
         return ESP_FAIL;
     }
     return ESP_OK;
 }
-/* 销毁 MQTT 客户端并清理连接状态。 */
 static void app_cloud_destroy_mqtt_client(void)
 {
     if (s_cloud.mqtt_client != NULL)
@@ -1119,7 +965,6 @@ static void app_cloud_destroy_mqtt_client(void)
     s_cloud.mqtt_started = false;
     s_cloud.mqtt_connected = false;
 }
-/* Wi-Fi 已连上时启动 MQTT 客户端。 */
 static esp_err_t app_cloud_start_mqtt_if_needed(void)
 {
     if (s_cloud.mqtt_client == NULL && app_cloud_create_mqtt_client() != ESP_OK)
@@ -1139,7 +984,6 @@ static esp_err_t app_cloud_start_mqtt_if_needed(void)
         ESP_LOGW(TAG, "register mqtt event failed: %s", esp_err_to_name(ret));
         return ret;
     }
-
     app_cloud_log_heap("before mqtt start");
     ret = esp_mqtt_client_start(s_cloud.mqtt_client);
     if (ret != ESP_OK)
@@ -1152,18 +996,15 @@ static esp_err_t app_cloud_start_mqtt_if_needed(void)
     ESP_LOGI(TAG, "EMQX mqtt client started");
     return ESP_OK;
 }
-/* 处理云端 set_target 命令。 */
 static esp_err_t app_cloud_receive_set_target(uint16_t target_id)
 {
     ESP_LOGI(TAG, "cloud rx: set_target=%u", (unsigned)target_id);
     return app_task_set_target_id(target_id, true);
 }
-/* 处理云端 start_task 命令，并记录 request_id。 */
 static esp_err_t app_cloud_receive_start_task(const app_cloud_cmd_t *cmd)
 {
     if (cmd == NULL)
     {
-
         return ESP_ERR_INVALID_ARG;
     }
     if (s_cloud.weather_docking_blocked)
@@ -1193,7 +1034,6 @@ static esp_err_t app_cloud_receive_start_task(const app_cloud_cmd_t *cmd)
         (unsigned)cmd->target_id,
         (cmd->request_id[0] != '\0') ? cmd->request_id : "-",
         (s_cloud.current_order_name[0] != '\0') ? s_cloud.current_order_name : "-");
-
     esp_err_t ret = app_task_submit_remote_request(cmd->target_id, "emqx");
     if (ret != ESP_OK)
     {
@@ -1203,20 +1043,17 @@ static esp_err_t app_cloud_receive_start_task(const app_cloud_cmd_t *cmd)
     }
     return ret;
 }
-/* 处理云端 cancel 命令。 */
 static esp_err_t app_cloud_receive_cancel(void)
 {
     ESP_LOGI(TAG, "cloud rx: cancel");
     app_task_cancel("cancelled by cloud");
     return ESP_OK;
 }
-/* 解析并分发云端 MQTT 命令 payload。 */
 static esp_err_t app_cloud_handle_command(const char *payload, size_t payload_len)
 {
     char json[APP_CLOUD_CMD_PAYLOAD_LEN];
     if (payload == NULL || payload_len == 0U)
     {
-
         return ESP_ERR_INVALID_ARG;
     }
     size_t copy_len = payload_len;
@@ -1242,7 +1079,6 @@ static esp_err_t app_cloud_handle_command(const char *payload, size_t payload_le
     if (strcmp(cmd.cmd, "start_task") == 0)
     {
         ret = app_cloud_receive_start_task(&cmd);
-
         (void)app_cloud_publish_ack(&cmd,
             (ret == ESP_OK) ? 0 : ((ret == ESP_ERR_INVALID_STATE && s_cloud.weather_docking_blocked) ? -3 : -1),
             (ret == ESP_OK) ? "accepted" :
@@ -1253,7 +1089,6 @@ static esp_err_t app_cloud_handle_command(const char *payload, size_t payload_le
     if (strcmp(cmd.cmd, "set_target") == 0)
     {
         ret = app_cloud_receive_set_target(cmd.target_id);
-
         (void)app_cloud_publish_ack(&cmd,
             (ret == ESP_OK) ? 0 : -1,
             (ret == ESP_OK) ? "accepted" : "set_failed",
@@ -1263,7 +1098,6 @@ static esp_err_t app_cloud_handle_command(const char *payload, size_t payload_le
     if (strcmp(cmd.cmd, "cancel") == 0)
     {
         ret = app_cloud_receive_cancel();
-
         (void)app_cloud_publish_ack(&cmd,
             (ret == ESP_OK) ? 0 : -1,
             (ret == ESP_OK) ? "accepted" : "cancel_failed",
@@ -1271,19 +1105,15 @@ static esp_err_t app_cloud_handle_command(const char *payload, size_t payload_le
         return ret;
     }
     ESP_LOGW(TAG, "unknown cmd=%s", cmd.cmd);
-
     (void)app_cloud_publish_ack(&cmd, -2, "unknown_cmd", cmd.target_id);
     return ESP_ERR_NOT_SUPPORTED;
 }
-
-/* 将 MQTT 事件中的非零结尾片段复制成 C 字符串。 */
 static int app_cloud_copy_event_slice(char *dst, size_t dst_size, const char *src, int src_len)
 {
     if ((dst == NULL) || (dst_size == 0U))
     {
         return 0;
     }
-
     int copy_len = src_len;
     if ((src == NULL) || (copy_len < 0))
     {
@@ -1300,12 +1130,6 @@ static int app_cloud_copy_event_slice(char *dst, size_t dst_size, const char *sr
     dst[copy_len] = '\0';
     return copy_len;
 }
-
-/* -------------------------------------------------------------------------- */
-/* MQTT 和 Wi-Fi 事件回调                                              */
-/* -------------------------------------------------------------------------- */
-
-/* 处理 MQTT DATA 事件，筛选命令 topic 并解析命令。 */
 static void app_cloud_handle_mqtt_data_event(esp_mqtt_event_handle_t event)
 {
     if (event == NULL || event->topic == NULL || event->data == NULL)
@@ -1314,12 +1138,10 @@ static void app_cloud_handle_mqtt_data_event(esp_mqtt_event_handle_t event)
     }
     char topic[APP_CLOUD_TOPIC_BUF_LEN];
     char payload[APP_CLOUD_JSON_BUF_LEN];
-
     if (event->topic_len <= 0)
     {
         return;
     }
-
     (void)app_cloud_copy_event_slice(topic, sizeof(topic), event->topic, event->topic_len);
     const int data_len = app_cloud_copy_event_slice(payload, sizeof(payload), event->data, event->data_len);
     ESP_LOGD(TAG, "mqtt rx topic=%s len=%d", topic, data_len);
@@ -1328,7 +1150,6 @@ static void app_cloud_handle_mqtt_data_event(esp_mqtt_event_handle_t event)
         (void)app_cloud_handle_command(payload, (size_t)data_len);
     }
 }
-/* 云端后台任务，等待 Wi-Fi 事件通知后启动 MQTT。 */
 static void app_cloud_task(void *arg)
 {
     (void)arg;
@@ -1351,7 +1172,6 @@ static void app_cloud_task(void *arg)
         }
     }
 }
-/* Wi-Fi/IP 事件回调，负责联网、重连和触发 MQTT 启动。 */
 static void app_cloud_wifi_event_handler(void *arg,
     esp_event_base_t event_base,
     int32_t event_id,
@@ -1363,23 +1183,19 @@ static void app_cloud_wifi_event_handler(void *arg,
         switch (event_id) {
         case WIFI_EVENT_STA_START:
             ESP_LOGD(TAG, "wifi sta start -> connect");
-
             app_cloud_request_wifi_connect("sta_start");
             break;
         case WIFI_EVENT_STA_DISCONNECTED: {
-
                 wifi_event_sta_disconnected_t *disc = (wifi_event_sta_disconnected_t *)event_data;
                 ESP_LOGW(TAG,
                     "wifi disconnected -> reconnect, reason=%d",
                     disc ? disc->reason : -1);
-
                 xEventGroupClearBits(s_cloud.event_group,
                     APP_CLOUD_WIFI_CONNECTED_BIT |
                     APP_CLOUD_MQTT_CONNECTED_BIT |
                     APP_CLOUD_START_MQTT_BIT);
                 s_cloud.mqtt_connected = false;
                 app_cloud_destroy_mqtt_client();
-
                 app_cloud_request_wifi_connect("sta_disconnected");
                 break;
             }
@@ -1394,12 +1210,10 @@ static void app_cloud_wifi_event_handler(void *arg,
         app_cloud_start_sntp_once();
         app_cloud_start_weather_task_once();
         app_cloud_notify_weather_task();
-
         xEventGroupSetBits(s_cloud.event_group,
             APP_CLOUD_WIFI_CONNECTED_BIT | APP_CLOUD_START_MQTT_BIT);
     }
 }
-/* MQTT 事件回调，维护连接状态、订阅命令并处理数据。 */
 static void app_cloud_mqtt_event_handler(void *handler_args,
     esp_event_base_t base,
     int32_t event_id,
@@ -1412,10 +1226,8 @@ static void app_cloud_mqtt_event_handler(void *handler_args,
     case MQTT_EVENT_CONNECTED:
         ESP_LOGI(TAG, "EMQX mqtt connected");
         s_cloud.mqtt_connected = true;
-
         xEventGroupSetBits(s_cloud.event_group, APP_CLOUD_MQTT_CONNECTED_BIT);
         {
-
             int sub_cmd = esp_mqtt_client_subscribe(s_cloud.mqtt_client,
                 s_cloud.topic_cmd,
                 CONFIG_SKY_MQTT_QOS);
@@ -1423,14 +1235,12 @@ static void app_cloud_mqtt_event_handler(void *handler_args,
         }
         if (s_cloud.have_last_snapshot)
         {
-
             app_cloud_publish_task_snapshot_internal(&s_cloud.last_snapshot);
         }
         break;
     case MQTT_EVENT_DISCONNECTED:
         ESP_LOGW(TAG, "EMQX mqtt disconnected");
         s_cloud.mqtt_connected = false;
-
         xEventGroupClearBits(s_cloud.event_group, APP_CLOUD_MQTT_CONNECTED_BIT);
         break;
     case MQTT_EVENT_SUBSCRIBED:
@@ -1440,7 +1250,6 @@ static void app_cloud_mqtt_event_handler(void *handler_args,
         ESP_LOGD(TAG, "mqtt published, msg_id=%d", event->msg_id);
         break;
     case MQTT_EVENT_DATA:
-
         app_cloud_handle_mqtt_data_event(event);
         break;
     case MQTT_EVENT_ERROR:
@@ -1450,25 +1259,16 @@ static void app_cloud_mqtt_event_handler(void *handler_args,
         break;
     }
 }
-
-/* -------------------------------------------------------------------------- */
-/* 公开接口                                                                  */
-/* -------------------------------------------------------------------------- */
-
-/* 初始化云端链路：配置网络、注册事件、创建任务并启动 Wi-Fi。 */
 esp_err_t app_cloud_init(void)
 {
     if (s_cloud.inited)
     {
         return ESP_OK;
     }
-
     ESP_RETURN_ON_ERROR(app_cloud_validate_config(), TAG, "invalid network/mqtt config");
-
     s_cloud.event_group = xEventGroupCreate();
     if (s_cloud.event_group == NULL)
     {
-
         return ESP_ERR_NO_MEM;
     }
     app_cloud_build_topics();
@@ -1488,14 +1288,12 @@ esp_err_t app_cloud_init(void)
     ESP_RETURN_ON_ERROR(esp_hosted_init(), TAG, "esp_hosted_init failed");
     wifi_init_config_t wifi_init_cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_RETURN_ON_ERROR(esp_wifi_init(&wifi_init_cfg), TAG, "esp_wifi_init failed");
-
     ESP_RETURN_ON_ERROR(esp_event_handler_register(WIFI_EVENT,
         ESP_EVENT_ANY_ID,
         &app_cloud_wifi_event_handler,
         NULL),
         TAG,
         "register wifi event failed");
-
     ESP_RETURN_ON_ERROR(esp_event_handler_register(IP_EVENT,
         IP_EVENT_STA_GOT_IP,
         &app_cloud_wifi_event_handler,
@@ -1504,7 +1302,6 @@ esp_err_t app_cloud_init(void)
         "register ip event failed");
     if (s_cloud_task == NULL)
     {
-
         BaseType_t ok = xTaskCreate(app_cloud_task,
             "app_cloud",
             APP_CLOUD_TASK_STACK_SIZE,
@@ -1514,7 +1311,6 @@ esp_err_t app_cloud_init(void)
         if (ok != pdPASS)
         {
             ESP_LOGE(TAG, "create app_cloud task failed");
-
             return ESP_ERR_NO_MEM;
         }
     }
@@ -1531,7 +1327,6 @@ esp_err_t app_cloud_init(void)
     ESP_RETURN_ON_ERROR(esp_wifi_set_storage(WIFI_STORAGE_RAM), TAG, "wifi set storage failed");
     ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_STA), TAG, "wifi set mode failed");
     ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg), TAG, "wifi set config failed");
-
     ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "wifi start failed");
     ESP_RETURN_ON_ERROR(esp_wifi_set_ps(WIFI_PS_NONE), TAG, "wifi set ps failed");
     ESP_LOGI(TAG, "wifi started, mqtt waits for ip");
@@ -1541,7 +1336,6 @@ esp_err_t app_cloud_init(void)
     ESP_LOGI(TAG, "EMQX init done (official host Wi-Fi path via ESP32-C6)");
     return ESP_OK;
 }
-
 bool app_cloud_is_wifi_connected(void)
 {
     if (!s_cloud.inited || s_cloud.event_group == NULL)
@@ -1550,7 +1344,6 @@ bool app_cloud_is_wifi_connected(void)
     }
     return (xEventGroupGetBits(s_cloud.event_group) & APP_CLOUD_WIFI_CONNECTED_BIT) != 0;
 }
-
 bool app_cloud_is_mqtt_connected(void)
 {
     return s_cloud.inited && s_cloud.mqtt_connected;
