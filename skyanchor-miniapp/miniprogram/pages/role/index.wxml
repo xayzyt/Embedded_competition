@@ -1,15 +1,63 @@
 ﻿<view class="page role-page">
   <view class="role-shell">
+    <view class="brand-visual">
+      <view class="mission-panel">
+        <view class="flow-line flow-line-cloud"></view>
+        <view class="flow-line flow-line-tag"></view>
+        <view class="flow-dot flow-dot-cloud"></view>
+        <view class="flow-dot flow-dot-tag"></view>
+
+        <view class="cloud-node">
+          <view class="cloud-mark"></view>
+          <view class="node-label">云端</view>
+        </view>
+
+        <view class="chip-node">
+          <view class="chip-core">P4</view>
+          <view class="shield-mark"></view>
+        </view>
+
+        <view class="drone-unit">
+          <view class="drone-axis drone-axis-a"></view>
+          <view class="drone-axis drone-axis-b"></view>
+          <view class="drone-rotor drone-rotor-a"></view>
+          <view class="drone-rotor drone-rotor-b"></view>
+          <view class="drone-rotor drone-rotor-c"></view>
+          <view class="drone-rotor drone-rotor-d"></view>
+          <view class="drone-body">
+            <view class="drone-light"></view>
+          </view>
+          <view class="drone-cargo"></view>
+        </view>
+
+        <view class="tag-target">
+          <view class="tag-frame"></view>
+          <view class="tag-text">Tag</view>
+        </view>
+      </view>
+    </view>
     <view class="title role-title">SkyAnchor</view>
-    <view class="subtitle role-subtitle">嵌入式智能配送演示系统</view>
-    <view class="role-copy">请选择当前身份进入系统</view>
+    <view class="subtitle role-subtitle">智能配送演示</view>
+    <view class="role-copy">选择身份</view>
     <view class="button-row role-button-row">
-      <button class="primary-btn role-btn" bindtap="openReceiverCenter">我是用户</button>
-      <button class="ghost-btn role-btn" bindtap="openSenderCenter">我是配送员</button>
+      <button class="primary-btn role-btn" bindtap="openReceiverCenter">
+        <view class="role-btn-icon role-btn-icon-user"></view>
+        <view class="role-btn-copy">
+          <view class="role-btn-title">我是用户</view>
+          <view class="role-btn-subtitle">提交配送订单</view>
+        </view>
+      </button>
+      <button class="ghost-btn role-btn" bindtap="openSenderCenter">
+        <view class="role-btn-icon role-btn-icon-dispatch"></view>
+        <view class="role-btn-copy">
+          <view class="role-btn-title">我是配送员</view>
+          <view class="role-btn-subtitle">分配 Tag 并调度</view>
+        </view>
+      </button>
     </view>
   </view>
   <view class="page-footnote">
-    <view>第九届（2026）全国大学生嵌入式芯片与系统设计竞赛</view>
     <view class="page-footnote-team">地线引力队</view>
+    <view>第九届（2026）全国大学生嵌入式芯片与系统设计竞赛</view>
   </view>
 </view>

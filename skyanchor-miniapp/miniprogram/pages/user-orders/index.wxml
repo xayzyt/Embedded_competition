@@ -1,55 +1,75 @@
-﻿<view class="page">
-  <view class="hero">
-    <view class="title">用户界面</view>
-    <view class="subtitle">先保存你的用户身份，然后提交订单并查看配送状态。</view>
+<view class="page">
+  <view class="hero hero-line page-hero">
+    <view class="hero-copy">
+      <view class="title">用户端</view>
+      <view class="hero-meta">{{receiverId ? receiverId : '未设置 ID'}}</view>
+    </view>
+    <button class="ghost-btn small-btn refresh-btn" loading="{{loading}}" bindtap="fetchOrders">刷新</button>
   </view>
 
   <view class="service-banner status-{{serviceState}}">
-    {{serviceMessage}}
+    <view class="service-dot"></view>
+    <view class="service-message">{{serviceMessage}}</view>
+    <view class="service-detail-btn" bindtap="showServiceDiagnostics">诊断</view>
   </view>
 
-  <view class="card">
-    <view class="section-title">用户信息</view>
+  <view class="card profile-card">
+    <view class="section-head">
+      <view class="section-title">用户信息</view>
+      <view class="count-pill">ID</view>
+    </view>
     <view class="field">
       <text class="field-label">用户 ID</text>
-      <input class="input" value="{{receiverId}}" bindinput="handleInput" />
-      <view class="field-help">默认已预填演示用户，你也可以改成自己的用户 ID 再保存。</view>
+      <input class="input" value="{{receiverId}}" placeholder="receiver" bindinput="handleInput" />
     </view>
 
     <view class="button-row compact">
-      <button class="ghost-btn" bindtap="saveReceiver">保存信息</button>
-      <button class="primary-btn" loading="{{creating}}" disabled="{{serviceWeatherBlocked}}" bindtap="openCreateOrder">我要下单</button>
-      <button class="ghost-btn" loading="{{loading}}" bindtap="fetchOrders">刷新订单</button>
+      <button class="ghost-btn" bindtap="saveReceiver">保存</button>
+      <button class="primary-btn" loading="{{creating}}" disabled="{{serviceActionBlocked}}" bindtap="openCreateOrder">提交订单</button>
     </view>
   </view>
 
   <view class="card">
-    <view class="section-title">我的订单</view>
-    <view class="section-caption">这里显示当前用户提交的订单，点击卡片即可进入订单详情。</view>
+    <view class="section-head">
+      <view class="section-title">我的订单</view>
+      <view class="count-pill">{{orders.length}} 单</view>
+    </view>
     <block wx:if="{{loadError}}">
-      <view class="empty">{{loadError}}</view>
+      <view class="empty empty-error">{{loadError}}</view>
     </block>
     <block wx:elif="{{!receiverId}}">
-      <view class="empty">请先填写并保存用户 ID，再查看与你相关的订单。</view>
+      <view class="empty empty-state">
+        <view class="empty-mark empty-mark-user"></view>
+        <view class="empty-title">先保存用户 ID</view>
+      </view>
     </block>
     <block wx:elif="{{loading && !orders.length}}">
-      <view class="empty">正在加载订单列表...</view>
+      <view class="empty empty-state">
+        <view class="empty-mark empty-mark-loading"></view>
+        <view class="empty-title">加载中...</view>
+      </view>
     </block>
     <block wx:elif="{{orders.length}}">
       <block wx:for="{{orders}}" wx:key="order_id">
-        <view class="list-item" data-order-id="{{item.order_id}}" bindtap="openOrder">
-          <view class="item-title">{{item.order_id}}</view>
-          <view class="item-subtitle">AprilTag号：{{item.apriltag_text}}</view>
-          <view class="item-meta">创建时间：{{item.created_at}}</view>
+        <view class="list-item order-row" data-order-id="{{item.order_id}}" bindtap="openOrder">
+          <view class="order-main">
+            <view class="item-title">{{item.order_name_text}}</view>
+            <view class="item-subtitle">Tag {{item.apriltag_text}}</view>
+            <view class="item-meta item-alert" wx:if="{{item.is_failed && item.note_text}}">失败原因：{{item.note_text}}</view>
+          </view>
           <view class="status-badge status-{{item.status}}">{{item.status_text}}</view>
         </view>
       </block>
     </block>
-    <view wx:else class="empty">还没有订单，去提交第一笔配送请求吧。</view>
+    <view wx:else class="empty empty-state">
+      <view class="empty-mark empty-mark-order"></view>
+      <view class="empty-title">暂无订单</view>
+      <view class="empty-copy">等待新的配送任务</view>
+    </view>
   </view>
 
   <view class="page-footnote">
-    <view>第九届（2026）全国大学生嵌入式芯片与系统设计竞赛</view>
     <view class="page-footnote-team">地线引力队</view>
+    <view>第九届（2026）全国大学生嵌入式芯片与系统设计竞赛</view>
   </view>
 </view>

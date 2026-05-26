@@ -1,5 +1,23 @@
 // 云开发版统一展示云端服务状态，页面层继续复用原来的状态结构。
-const DEFAULT_MESSAGE = '正在检查云端服务状态...';
+const DEFAULT_MESSAGE = '检查中...';
+
+function pad(value) {
+  return String(value).padStart(2, '0');
+}
+
+function formatClockTime(timestamp) {
+  const value = Number(timestamp || 0);
+  if (!value) {
+    return '未检查';
+  }
+
+  const date = new Date(value);
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function boolText(value) {
+  return value ? '正常' : '异常';
+}
 
 function defaultServiceStatus() {
   return {
@@ -8,10 +26,20 @@ function defaultServiceStatus() {
     serviceChecking: false,
     serviceMqttReady: false,
     serviceWeatherBlocked: false,
-    serviceAcceptOrders: true,
+    serviceAcceptOrders: false,
+    serviceDeviceNotReady: false,
+    serviceActionBlocked: true,
     serviceWeatherMode: 'normal',
     serviceState: 'checking',
-    serviceMessage: DEFAULT_MESSAGE
+    serviceMessage: DEFAULT_MESSAGE,
+    serviceBlockTitle: '服务暂不可用',
+    serviceBlockAdvice: '请稍后重试。',
+    serviceDeviceStateReady: false,
+    serviceDeviceStateText: '-',
+    serviceDefaultDevice: '-',
+    serviceMode: '-',
+    serviceLastCheckedAt: 0,
+    serviceLastCheckedText: '未检查'
   };
 }
 
@@ -26,57 +54,121 @@ function buildCheckingStatus(previousStatus) {
 }
 
 function buildReadyMessage(payload) {
+  if (payload && payload.device_state_ready === false) {
+    return '板端未上报';
+  }
   if (payload && payload.weather_blocked) {
-    return '恶劣天气管制中，暂时不能下单或开始配送。恢复天气后可重新操作。';
+    return '天气管制';
   }
-  if (payload && payload.accept_orders === false) {
-    return '板端状态未同步，暂时不能下单或开始配送。请确认设备在线后刷新。';
-  }
-
-  const mode = String(payload && payload.mode || '').trim();
-
-  // 这里按健康检查结果区分“真实 MQTT 闭环”与“演示模式”，避免页面继续误报为演示态。
-  if (mode === 'cloud-mqtt') {
-    return '云端调度与真实 MQTT 状态同步已就绪，可以直接联调建单、开始配送与识别回传。';
+  if (payload && payload.accept_orders !== undefined && Number(payload.accept_orders) === 0) {
+    return '设备未就绪';
   }
 
-  return '云端服务已就绪，当前为比赛演示模式，可以直接演示下单、分配与配送流程。';
+  return '云端正常';
 }
 
 function buildBackendOnlyMessage() {
-  return '云端服务已启动，但调度通道未就绪。可以先建单和分配 AprilTag，暂时无法开始配送。';
+  return '调度未就绪';
+}
+
+function buildBlockInfo(payload, mqttReady, deviceStateReady, weatherBlocked, acceptOrders) {
+  if (!mqttReady) {
+    return {
+      title: '云端调度未就绪',
+      advice: '云函数可访问，但 MQTT 未连通。请检查 EMQX、网络和云函数依赖部署。'
+    };
+  }
+
+  if (!deviceStateReady) {
+    return {
+      title: '未收到板端状态',
+      advice: '暂时不能下单和配送。请确认 ESP32 已联网、已连接 MQTT，并持续发布 retained state。'
+    };
+  }
+
+  if (weatherBlocked) {
+    return {
+      title: '恶劣天气管制',
+      advice: '板端处于天气保护状态，暂时不能下单或开始配送。'
+    };
+  }
+
+  if (!acceptOrders) {
+    return {
+      title: '设备未就绪',
+      advice: '板端已上报状态，但当前不接受订单。请检查任务状态、天气保护和板端运行状态。'
+    };
+  }
+
+  return {
+    title: '服务正常',
+    advice: '云端、MQTT 和板端状态检查通过。'
+  };
 }
 
 function buildServiceStatusFromHealth(payload) {
   const mqttReady = !!(payload && payload.mqtt_started);
+  const deviceStateReady = !!(payload && payload.device_state_ready);
   const weatherBlocked = !!(payload && payload.weather_blocked);
   const acceptOrders = payload && payload.accept_orders !== undefined
     ? Number(payload.accept_orders) !== 0
     : !weatherBlocked;
-  const ordersBlocked = weatherBlocked || !acceptOrders;
+  const deviceNotReady = deviceStateReady && !weatherBlocked && !acceptOrders;
+  const actionBlocked = !mqttReady || !deviceStateReady || weatherBlocked || !acceptOrders;
+  const blockInfo = buildBlockInfo(payload, mqttReady, deviceStateReady, weatherBlocked, acceptOrders);
+  const checkedAt = Number(payload && payload.checked_at) || Date.now();
+  let serviceState = 'ready';
+
+  if (!mqttReady) {
+    serviceState = 'backend-only';
+  } else if (!deviceStateReady) {
+    serviceState = 'device-state-missing';
+  } else if (weatherBlocked) {
+    serviceState = 'weather-blocked';
+  } else if (!acceptOrders) {
+    serviceState = 'device-not-ready';
+  }
 
   return {
     serviceChecked: true,
     serviceOnline: true,
     serviceChecking: false,
     serviceMqttReady: mqttReady,
-    serviceWeatherBlocked: ordersBlocked,
+    serviceWeatherBlocked: weatherBlocked,
     serviceAcceptOrders: acceptOrders,
+    serviceDeviceNotReady: deviceNotReady,
+    serviceActionBlocked: actionBlocked,
     serviceWeatherMode: String(payload && payload.weather_mode || 'normal'),
-    serviceState: ordersBlocked ? 'weather-blocked' : (mqttReady ? 'ready' : 'backend-only'),
-    serviceMessage: ordersBlocked ? buildReadyMessage(payload) :
-      (mqttReady ? buildReadyMessage(payload) : buildBackendOnlyMessage())
+    serviceState,
+    serviceMessage: !mqttReady ? buildBackendOnlyMessage() : buildReadyMessage(payload),
+    serviceBlockTitle: blockInfo.title,
+    serviceBlockAdvice: blockInfo.advice,
+    serviceDeviceStateReady: deviceStateReady,
+    serviceDeviceStateText: String(payload && payload.device_state || '').trim() || (deviceStateReady ? 'ready' : '-'),
+    serviceDefaultDevice: String(payload && payload.default_device || '-'),
+    serviceMode: String(payload && payload.mode || '-'),
+    serviceLastCheckedAt: checkedAt,
+    serviceLastCheckedText: formatClockTime(checkedAt)
   };
 }
 
 function buildServiceStatusFromError(err) {
+  const checkedAt = Date.now();
+  const errorMessage = String(err && err.message || '').trim();
+  const functionMissing = errorMessage.includes('云函数尚未部署');
   return {
     serviceChecked: true,
     serviceOnline: false,
     serviceChecking: false,
     serviceMqttReady: false,
+    serviceAcceptOrders: false,
+    serviceActionBlocked: true,
     serviceState: 'offline',
-    serviceMessage: (err && err.message) || '云端服务不可用，请检查云函数是否已经部署。'
+    serviceMessage: functionMissing ? '云函数未部署' : '服务离线',
+    serviceBlockTitle: functionMissing ? '云函数尚未部署' : '云端服务未连接',
+    serviceBlockAdvice: errorMessage || '请确认 skyanchorService 云函数已上传部署，体验版网络正常。',
+    serviceLastCheckedAt: checkedAt,
+    serviceLastCheckedText: formatClockTime(checkedAt)
   };
 }
 
@@ -105,11 +197,43 @@ async function syncServiceStatus(page, force) {
   return nextStatus;
 }
 
+function formatServiceDiagnostics(status) {
+  const current = {
+    ...defaultServiceStatus(),
+    ...(status || {})
+  };
+
+  const lines = [
+    `云函数：${boolText(current.serviceOnline)}`,
+    `MQTT：${boolText(current.serviceMqttReady)}`,
+    `板端状态：${current.serviceDeviceStateReady ? `可读（${current.serviceDeviceStateText}）` : '未读取到'}`,
+    `天气模式：${current.serviceWeatherMode || 'normal'}`,
+    `接单状态：${current.serviceAcceptOrders ? '接受订单' : '暂停接单'}`,
+    `默认设备：${current.serviceDefaultDevice || '-'}`,
+    `最近刷新：${current.serviceLastCheckedText || '未检查'}`,
+    '',
+    `建议：${current.serviceBlockAdvice || '请稍后重试。'}`
+  ];
+
+  return lines.join('\n');
+}
+
+function showServiceDiagnostics(status, title = '服务诊断') {
+  wx.showModal({
+    title,
+    content: formatServiceDiagnostics(status),
+    showCancel: false
+  });
+}
+
 module.exports = {
   defaultServiceStatus,
   buildCheckingStatus,
   buildServiceStatusFromHealth,
   buildServiceStatusFromError,
+  formatClockTime,
+  formatServiceDiagnostics,
   readServiceStatus,
+  showServiceDiagnostics,
   syncServiceStatus
 };

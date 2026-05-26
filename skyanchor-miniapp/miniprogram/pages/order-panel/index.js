@@ -1,11 +1,57 @@
 ﻿const api = require('../../services/api.js');
 const { statusLabel } = require('../../utils/order-status-labels.js');
-const { defaultServiceStatus, syncServiceStatus } = require('../../utils/service-status.js');
+const { defaultServiceStatus, formatClockTime, showServiceDiagnostics: showDiagnostics, syncServiceStatus } = require('../../utils/service-status.js');
 const { APRILTAG_OPTIONS, isAssignedApriltag, formatApriltagValue } = require('../../utils/apriltag.js');
+const { formatOrderName } = require('../../utils/order-display.js');
 
 const ACTIVE_STATUSES = ['created', 'pending_start', 'delivering', 'tag_matched', 'acting'];
 const TERMINAL_STATUSES = ['delivered', 'failed', 'cancelled'];
 const POLL_INTERVAL_MS = 2000;
+const ORDER_FLOW_STEPS = [
+  { key: 'created', label: '调度' },
+  { key: 'pending_start', label: '响应' },
+  { key: 'delivering', label: '识别' },
+  { key: 'acting', label: '执行' },
+  { key: 'delivered', label: '送达' }
+];
+const FLOW_INDEX_BY_STATUS = {
+  created: 0,
+  pending_start: 1,
+  delivering: 2,
+  tag_matched: 2,
+  acting: 3,
+  delivered: 4,
+  failed: 3,
+  cancelled: 0
+};
+const EVENT_TYPE_LABELS = {
+  created: '订单创建',
+  dispatch_assigned: '分配 Tag',
+  start_requested: '开始配送',
+  status_changed: '状态更新',
+  device_state: '板端上报'
+};
+
+function buildFlowSteps(status) {
+  const currentIndex = FLOW_INDEX_BY_STATUS[status] || 0;
+  const terminalDone = status === 'delivered';
+  const stopped = status === 'failed' || status === 'cancelled';
+
+  return ORDER_FLOW_STEPS.map((step, index) => {
+    let state = 'todo';
+    if (index < currentIndex || terminalDone) {
+      state = 'done';
+    } else if (index === currentIndex) {
+      state = stopped ? 'stop' : 'active';
+    }
+
+    return {
+      ...step,
+      num: index + 1,
+      state
+    };
+  });
+}
 
 function buildPrimaryAction(order) {
   const tagAssigned = isAssignedApriltag(order && order.target_id);
@@ -13,7 +59,7 @@ function buildPrimaryAction(order) {
   if (order.status === 'created' && !tagAssigned) {
     return {
       type: 'assign',
-      text: '选择 AprilTag',
+      text: '选 Tag',
       disabled: false
     };
   }
@@ -44,11 +90,13 @@ function decorateOrder(order) {
 
   return {
     ...order,
+    order_name_text: formatOrderName(order),
     status_text: statusLabel(order.status),
     apriltag_text: formatApriltagValue(order.target_id),
     note_text: noteText,
     note_label: order.status === 'failed' ? '失败原因' : '备注',
     last_device_state_text: deviceStateText,
+    flow_steps: buildFlowSteps(order.status),
     is_active: ACTIVE_STATUSES.includes(order.status),
     can_cancel: !TERMINAL_STATUSES.includes(order.status),
     primary_action: primaryAction.type,
@@ -57,12 +105,77 @@ function decorateOrder(order) {
   };
 }
 
+function buildEventTitle(event) {
+  const data = event && event.event_data || {};
+  const eventType = event && event.event_type || '';
+
+  if (eventType === 'dispatch_assigned') {
+    return data.target_id !== undefined ? `分配 Tag ${data.target_id}` : '分配 Tag';
+  }
+
+  if (eventType === 'status_changed') {
+    return `状态更新为 ${statusLabel(data.status)}`;
+  }
+
+  if (eventType === 'device_state') {
+    const payload = data.payload || {};
+    const state = String(payload.state || data.last_device_state || '').trim();
+    return state ? `板端上报 ${state}` : '板端上报';
+  }
+
+  return EVENT_TYPE_LABELS[eventType] || eventType || '事件';
+}
+
+function buildEventDetail(event) {
+  const data = event && event.event_data || {};
+  const eventType = event && event.event_type || '';
+
+  if (eventType === 'created') {
+    return data.order_name ? `订单 ${data.order_name}` : '订单已写入云端';
+  }
+
+  if (eventType === 'dispatch_assigned') {
+    return `设备 ${data.device_name || '-'} · Tag ${data.target_id}`;
+  }
+
+  if (eventType === 'start_requested') {
+    return `设备 ${data.device_name || '-'} · request ${data.request_id || '-'}`;
+  }
+
+  if (eventType === 'status_changed') {
+    return data.note || data.last_device_state || '状态已同步';
+  }
+
+  if (eventType === 'device_state') {
+    const payload = data.payload || {};
+    const state = String(payload.state || '').trim() || '-';
+    const fault = Number(payload.fault || 0);
+    const cargo = Number(payload.cargo_received || 0);
+    return `state=${state} · fault=${fault} · cargo=${cargo}`;
+  }
+
+  return '';
+}
+
+function decorateEvents(events) {
+  return (events || [])
+    .slice(-8)
+    .reverse()
+    .map((event) => ({
+      ...event,
+      time_text: formatClockTime(event.created_at),
+      title_text: buildEventTitle(event),
+      detail_text: buildEventDetail(event)
+    }));
+}
+
 Page({
   data: Object.assign({
     orderId: '',
     viewRole: 'sender',
     isReceiverView: false,
     order: null,
+    events: [],
     actionPending: false,
     loading: false,
     loadError: '',
@@ -135,6 +248,7 @@ Page({
       this.stopPolling();
       this.setData({
         order: null,
+        events: [],
         loadError: '缺少订单编号，无法查看详情。',
         hasLoaded: true,
         loading: false
@@ -163,6 +277,7 @@ Page({
 
       this.setData({
         order: decorateOrder(data.order || null),
+        events: decorateEvents(data.events || []),
         loadError: '',
         hasLoaded: true,
         loading: false
@@ -171,6 +286,7 @@ Page({
       const nextStatus = await syncServiceStatus(this, true);
       this.setData({
         order: null,
+        events: [],
         loadError: nextStatus.serviceOnline
           ? (err.message || '无法获取订单详情')
           : nextStatus.serviceMessage,
@@ -215,14 +331,17 @@ Page({
     this.stopPolling();
   },
 
+  showServiceDiagnostics() {
+    showDiagnostics(this.data);
+  },
+
   async ensureMessagingReady(actionLabel) {
     const serviceStatus = await syncServiceStatus(this, true);
 
     if (!serviceStatus.serviceOnline) {
       wx.showModal({
-        // 云开发版改为提示云端服务状态，避免继续指向本地 Python 后端。
-        title: '云端服务未连接',
-        content: serviceStatus.serviceMessage,
+        title: serviceStatus.serviceBlockTitle || '云端服务未连接',
+        content: serviceStatus.serviceBlockAdvice || serviceStatus.serviceMessage,
         showCancel: false
       });
       return false;
@@ -230,9 +349,17 @@ Page({
 
     if (!serviceStatus.serviceMqttReady) {
       wx.showModal({
-        // 这里沿用原有页面行为，但明确说明当前检查的是云端调度可用性。
-        title: '云端调度未就绪',
-        content: `云端调度通道当前未就绪，暂时无法${actionLabel}。请先确认云函数健康检查返回已就绪状态。`,
+        title: serviceStatus.serviceBlockTitle || '云端调度未就绪',
+        content: `${serviceStatus.serviceBlockAdvice || '请检查 MQTT 与板端状态。'}\n\n当前暂时无法${actionLabel}。`,
+        showCancel: false
+      });
+      return false;
+    }
+
+    if (!serviceStatus.serviceDeviceStateReady) {
+      wx.showModal({
+        title: serviceStatus.serviceBlockTitle || '未收到板端状态',
+        content: `${serviceStatus.serviceBlockAdvice || '请确认 ESP32 已联网并连接 MQTT。'}\n\n当前暂时无法${actionLabel}。`,
         showCancel: false
       });
       return false;
@@ -240,8 +367,17 @@ Page({
 
     if (serviceStatus.serviceWeatherBlocked) {
       wx.showModal({
-        title: '恶劣天气管制',
-        content: serviceStatus.serviceMessage,
+        title: serviceStatus.serviceBlockTitle || '服务暂不可用',
+        content: `${serviceStatus.serviceBlockAdvice || serviceStatus.serviceMessage}\n\n当前暂时无法${actionLabel}。`,
+        showCancel: false
+      });
+      return false;
+    }
+
+    if (!serviceStatus.serviceAcceptOrders) {
+      wx.showModal({
+        title: serviceStatus.serviceBlockTitle || '设备未就绪',
+        content: `${serviceStatus.serviceBlockAdvice || serviceStatus.serviceMessage}\n\n当前暂时无法${actionLabel}。`,
         showCancel: false
       });
       return false;

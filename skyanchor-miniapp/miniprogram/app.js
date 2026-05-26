@@ -1,4 +1,5 @@
 ﻿const api = require('./services/api.js');
+const config = require('./config/index.js');
 const { getDemoProfile } = require('./utils/demo-profile.js');
 const {
   defaultServiceStatus,
@@ -31,7 +32,7 @@ App({
     // 统一初始化云开发环境，后续接口全部改走云函数。
     if (wx.cloud) {
       wx.cloud.init({
-        env: 'cloud1-d5g90ikff6eed3f26',
+        env: config.envId,
         traceUser: true
       });
     } else {

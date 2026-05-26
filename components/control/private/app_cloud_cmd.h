@@ -17,6 +17,8 @@ typedef struct {
     char cmd[24];            /* 命令名，如 start_task、set_target、cancel。 */
     uint16_t target_id;      /* 目标 tag ID。 */
     char request_id[32];     /* 云端请求 ID，用于 ACK 回应匹配。 */
+    char order_id[48];       /* 真实订单 ID，用于状态回传精确关联。 */
+    char order_name[32];     /* 面向 UI 展示的短订单名。 */
 } app_cloud_cmd_t;
 
 /* 从 JSON payload 解析命令字段到 app_cloud_cmd_t。 */

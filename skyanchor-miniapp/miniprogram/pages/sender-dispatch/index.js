@@ -1,13 +1,16 @@
 ﻿const api = require('../../services/api.js');
 const { statusLabel } = require('../../utils/order-status-labels.js');
-const { defaultServiceStatus, syncServiceStatus } = require('../../utils/service-status.js');
+const { defaultServiceStatus, formatClockTime, showServiceDiagnostics: showDiagnostics, syncServiceStatus } = require('../../utils/service-status.js');
 const { formatApriltagValue } = require('../../utils/apriltag.js');
+const { formatOrderName } = require('../../utils/order-display.js');
 
 const ACTIVE_STATUSES = ['pending_start', 'delivering', 'tag_matched', 'acting'];
+const POLL_INTERVAL_MS = 5000;
 
 function decorateOrder(order) {
   return {
     ...order,
+    order_name_text: formatOrderName(order),
     status_text: statusLabel(order.status),
     apriltag_text: formatApriltagValue(order && order.target_id)
   };
@@ -19,21 +22,38 @@ Page({
     activeOrders: [],
     loading: false,
     loadError: '',
-    hasLoaded: false
+    hasLoaded: false,
+    lastRefreshText: '未刷新'
   }, defaultServiceStatus()),
 
   onLoad() {
     this._skipNextOnShow = true;
+    this._pageVisible = false;
+    this._pollTimer = null;
+    this._polling = false;
     this.initializePage();
   },
 
   async onShow() {
+    this._pageVisible = true;
+
     if (this._skipNextOnShow) {
       this._skipNextOnShow = false;
+      this.syncPollingState();
       return;
     }
 
     await this.fetchOrders();
+  },
+
+  onHide() {
+    this._pageVisible = false;
+    this.stopPolling();
+  },
+
+  onUnload() {
+    this._pageVisible = false;
+    this.stopPolling();
   },
 
   onPullDownRefresh() {
@@ -44,10 +64,12 @@ Page({
     await this.fetchOrders();
   },
 
-  async fetchOrders() {
+  async fetchOrders(options = {}) {
+    const silent = !!options.silent;
+
     this.setData({
-      loading: true,
-      loadError: ''
+      loading: silent ? this.data.loading : true,
+      loadError: silent ? this.data.loadError : ''
     });
 
     const serviceStatus = await syncServiceStatus(this, true);
@@ -57,8 +79,10 @@ Page({
         activeOrders: [],
         loadError: serviceStatus.serviceMessage,
         hasLoaded: true,
-        loading: false
+        loading: false,
+        lastRefreshText: formatClockTime(Date.now())
       });
+      this.syncPollingState();
       return;
     }
 
@@ -71,7 +95,8 @@ Page({
         activeOrders: decoratedOrders.filter((item) => ACTIVE_STATUSES.includes(item.status)),
         loadError: '',
         hasLoaded: true,
-        loading: false
+        loading: false,
+        lastRefreshText: formatClockTime(Date.now())
       });
     } catch (err) {
       const nextStatus = await syncServiceStatus(this, true);
@@ -82,9 +107,54 @@ Page({
           ? (err.message || '无法获取订单列表')
           : nextStatus.serviceMessage,
         hasLoaded: true,
-        loading: false
+        loading: false,
+        lastRefreshText: formatClockTime(Date.now())
       });
     }
+
+    this.syncPollingState();
+  },
+
+  startPolling() {
+    if (this._pollTimer || !this._pageVisible) {
+      return;
+    }
+
+    this._pollTimer = setInterval(() => {
+      if (this._polling) {
+        return;
+      }
+
+      this._polling = true;
+      this.fetchOrders({ silent: true }).finally(() => {
+        this._polling = false;
+      });
+    }, POLL_INTERVAL_MS);
+  },
+
+  stopPolling() {
+    if (this._pollTimer) {
+      clearInterval(this._pollTimer);
+      this._pollTimer = null;
+    }
+  },
+
+  syncPollingState() {
+    if (this._pageVisible) {
+      this.startPolling();
+      return;
+    }
+
+    this.stopPolling();
+  },
+
+  showServiceDiagnostics() {
+    showDiagnostics(this.data);
+  },
+
+  async runPreflightCheck() {
+    const serviceStatus = await syncServiceStatus(this, true);
+    showDiagnostics(serviceStatus, '演示自检');
   },
 
   openDetail(e) {

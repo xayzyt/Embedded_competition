@@ -1,58 +1,71 @@
-﻿<view class="page">
-  <view class="hero">
+<view class="page">
+  <view class="hero page-hero">
     <view class="title">订单详情</view>
-    <view class="subtitle">{{isReceiverView ? '这里显示当前订单状态，以及配送端为你分配的 AprilTag 号。' : '这里显示当前订单状态。配送端先手动选择 AprilTag 0 或 1，再开始配送；板端会收到对应目标号。'}}</view>
+    <view class="hero-meta">{{isReceiverView ? '用户端视图' : '调度台视图'}}</view>
   </view>
 
   <view class="service-banner status-{{serviceState}}">
-    {{serviceMessage}}
+    <view class="service-dot"></view>
+    <view class="service-message">{{serviceMessage}}</view>
+    <view class="service-detail-btn" bindtap="showServiceDiagnostics">诊断</view>
   </view>
 
   <view class="card" wx:if="{{loadError}}">
     <view class="section-title">订单状态</view>
-    <view class="empty">{{loadError}}</view>
+    <view class="empty empty-error">{{loadError}}</view>
     <view class="button-row">
-      <button class="primary-btn" loading="{{loading}}" bindtap="fetchDetail">重新加载</button>
+      <button class="primary-btn" loading="{{loading}}" bindtap="fetchDetail">重试</button>
     </view>
   </view>
 
   <view class="card" wx:elif="{{loading && !order}}">
     <view class="section-title">订单状态</view>
-    <view class="empty">正在加载订单详情...</view>
+    <view class="empty empty-state">
+      <view class="empty-mark empty-mark-loading"></view>
+      <view class="empty-title">加载中...</view>
+    </view>
   </view>
 
   <view class="card" wx:elif="{{order}}">
-    <view class="section-title">{{order.order_id}}</view>
-    <view class="section-caption">{{isReceiverView ? '你可以在这里查看订单状态变化。' : '配送端可在这里完成 AprilTag 选择、开始配送和取消订单。'}}</view>
+    <view class="detail-head">
+      <view class="detail-main">
+        <view class="detail-kicker">订单编号</view>
+        <view class="section-title">{{order.order_name_text}}</view>
+        <view class="detail-chip-row">
+          <view class="info-chip" wx:if="{{!isReceiverView}}">用户 {{order.receiver_id}}</view>
+          <view class="info-chip">Tag {{order.apriltag_text}}</view>
+        </view>
+      </view>
+      <view class="status-badge status-{{order.status}}">{{order.status_text}}</view>
+    </view>
 
-    <view class="kv">
-      <text class="kv-key">状态</text>
-      <text class="kv-value">{{order.status_text}}</text>
+    <view class="flow">
+      <block wx:for="{{order.flow_steps}}" wx:key="key">
+        <view class="flow-step flow-step-{{item.state}}">
+          <view class="flow-dot">{{item.num}}</view>
+          <view class="flow-label">{{item.label}}</view>
+        </view>
+      </block>
     </view>
-    <view class="kv" wx:if="{{order.note_text}}">
-      <text class="kv-key">{{order.note_label}}</text>
-      <text class="kv-value">{{order.note_text}}</text>
-    </view>
-    <view class="kv" wx:if="{{order.last_device_state_text}}">
-      <text class="kv-key">板端状态</text>
-      <text class="kv-value">{{order.last_device_state_text}}</text>
-    </view>
-    <view class="kv">
-      <text class="kv-key">AprilTag号</text>
-      <text class="kv-value">{{order.apriltag_text}}</text>
-    </view>
-    <view class="kv">
-      <text class="kv-key">用户 ID</text>
-      <text class="kv-value">{{order.receiver_id}}</text>
+
+    <view class="brief-lines" wx:if="{{order.note_text || order.last_device_state_text}}">
+      <view class="brief-line" wx:if="{{order.note_text}}">
+        <text class="brief-key">{{order.note_label}}</text>
+        <text class="brief-value">{{order.note_text}}</text>
+      </view>
+      <view class="brief-line" wx:if="{{order.last_device_state_text}}">
+        <text class="brief-key">板端</text>
+        <text class="brief-value">{{order.last_device_state_text}}</text>
+      </view>
     </view>
 
     <view class="button-row detail-action-row {{isReceiverView ? 'single-action-row' : ''}}">
-      <button class="ghost-btn" loading="{{loading}}" disabled="{{actionPending}}" bindtap="fetchDetail">刷新</button>
+      <button class="ghost-btn refresh-btn" loading="{{loading}}" disabled="{{actionPending}}" bindtap="fetchDetail">刷新</button>
       <button
         wx:if="{{!isReceiverView}}"
         class="primary-btn"
         loading="{{actionPending && !loading}}"
-        disabled="{{loading || actionPending || order.primary_action_disabled || (serviceWeatherBlocked && order.primary_action == 'start')}}"
+        disabled="{{loading || actionPending || order.primary_action_disabled || (serviceActionBlocked && order.primary_action == 'start')}}"
         bindtap="handlePrimaryAction"
       >
         {{order.primary_action_text}}
@@ -63,13 +76,32 @@
         disabled="{{loading || actionPending || !order.can_cancel}}"
         bindtap="cancelOrder"
       >
-        取消订单
+        取消
       </button>
     </view>
   </view>
 
+  <view class="card" wx:if="{{events.length}}">
+    <view class="section-head">
+      <view class="section-title">事件时间线</view>
+      <view class="count-pill">{{events.length}} 条</view>
+    </view>
+    <block wx:for="{{events}}" wx:key="id">
+      <view class="timeline-item">
+        <view class="timeline-dot"></view>
+        <view class="timeline-main">
+          <view class="timeline-head">
+            <view class="timeline-title">{{item.title_text}}</view>
+            <view class="timeline-time">{{item.time_text}}</view>
+          </view>
+          <view class="timeline-detail" wx:if="{{item.detail_text}}">{{item.detail_text}}</view>
+        </view>
+      </view>
+    </block>
+  </view>
+
   <view class="page-footnote">
-    <view>第九届（2026）全国大学生嵌入式芯片与系统设计竞赛</view>
     <view class="page-footnote-team">地线引力队</view>
+    <view>第九届（2026）全国大学生嵌入式芯片与系统设计竞赛</view>
   </view>
 </view>

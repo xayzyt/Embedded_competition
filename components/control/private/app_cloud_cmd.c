@@ -1,6 +1,6 @@
 /*
  * app_cloud_cmd.c - 云端 MQTT 命令 JSON 解析实现。
- * 使用 cJSON 从 MQTT payload 中提取 cmd、target_id、request_id 字段。
+ * 使用 cJSON 从 MQTT payload 中提取 cmd、target_id、request_id 和订单字段。
  */
 #include "app_cloud_cmd.h"
 
@@ -49,7 +49,7 @@ static bool app_cloud_cmd_get_u16(const cJSON *root, const char *key, uint16_t *
     return ok;
 }
 
-/* 解析云端 JSON 命令，提取 cmd（必选）、target_id 和 request_id（可选）。 */
+/* 解析云端 JSON 命令，提取 cmd（必选）、target_id、request_id 和订单字段（可选）。 */
 esp_err_t app_cloud_cmd_parse_json(const char *payload, app_cloud_cmd_t *out)
 {
     if (payload == NULL || out == NULL)
@@ -74,6 +74,8 @@ esp_err_t app_cloud_cmd_parse_json(const char *payload, app_cloud_cmd_t *out)
 
     (void)app_cloud_cmd_get_u16(root, "target_id", &out->target_id);
     (void)app_cloud_cmd_get_string(root, "request_id", out->request_id, sizeof(out->request_id));
+    (void)app_cloud_cmd_get_string(root, "order_id", out->order_id, sizeof(out->order_id));
+    (void)app_cloud_cmd_get_string(root, "order_name", out->order_name, sizeof(out->order_name));
 
     cJSON_Delete(root);
     return ESP_OK;

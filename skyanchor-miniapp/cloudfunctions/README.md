@@ -1,15 +1,10 @@
-# 云函数规划
+# SkyAnchor Cloud Functions
 
-当前项目为了满足“比赛演示的最小可运行版本”，先落地一个聚合型云函数：
+当前小程序只部署一个聚合云函数：
 
 - `skyanchorService`
-  - 承接当前小程序已经在用的 6 个核心接口：健康检查、建单、订单列表、订单详情、分配 AprilTag、开始配送、取消订单。
+  - 提供健康检查、建单、订单列表、订单详情、分配 AprilTag、开始配送、取消订单。
   - 使用微信云开发数据库保存 `orders` 与 `order_events`。
-  - 使用“云数据库状态推进”的演示方案替代原本本地常驻 MQTT 进程，保证不依赖本地电脑后端也能演示完整流程。
+  - 通过 EMQX MQTT 向 ESP32-P4 下发 `start_task` / `cancel`，并读取 retained state 更新订单状态。
 
-后续如果你们比赛现场还要接真实板端，再建议补两个方向：
-
-- `deviceBridge`
-  - 负责对接真实设备消息通道，把当前演示态推进替换成真实状态回传。
-- `notificationSync`
-  - 负责把终态通知单独沉淀出来，供后续新增通知页面使用。
+演示前请在微信开发者工具中右键 `cloudfunctions/skyanchorService`，选择“上传并部署：云端安装依赖”。

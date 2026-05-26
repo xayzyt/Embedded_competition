@@ -14,8 +14,6 @@ const TERMINAL_ORDER_STATUSES = ['delivered', 'failed', 'cancelled'];
 // 这里改成真实板子的逻辑设备名，避免继续沿用演示占位值。
 const DEFAULT_DEVICE_NAME = 'skyanchor-p4';
 const DEVICE_CANDIDATES = [DEFAULT_DEVICE_NAME];
-// 默认关闭演示版自动推进，避免把“开始配送”误当成“识别成功”。
-const DEMO_AUTO_PROGRESS = false;
 // 这里复用当前仓库里已经在板子侧生效的 MQTT 参数，先完成最小真实闭环。
 const MQTT_CONFIG = {
   brokerUrl: 'mqtts://cd29033a.ala.cn-hangzhou.emqxsl.cn:8883',
@@ -37,14 +35,6 @@ const STATUS_INDEX = {
   failed: 6,
   cancelled: 7
 };
-// 这里保留原先演示状态表，但是否启用完全受 DEMO_AUTO_PROGRESS 控制。
-const SIMULATION_STEPS = [
-  { afterMs: 0, status: 'pending_start', note: '云端已接收开始配送请求' },
-  { afterMs: 4000, status: 'delivering', note: '设备已进入配送阶段' },
-  { afterMs: 8000, status: 'tag_matched', note: '已识别到目标 AprilTag' },
-  { afterMs: 12000, status: 'acting', note: '设备正在执行动作' },
-  { afterMs: 16000, status: 'delivered', note: '演示流程已自动完成配送' }
-];
 const DEVICE_STATE_TO_ORDER_STATUS = {
   configured: 'pending_start',
   wait_approach: 'delivering',
@@ -81,6 +71,22 @@ function buildOrderId() {
   return `ORD-${stamp}-${suffix}`;
 }
 
+function buildOrderName(orderId) {
+  const text = String(orderId || '').trim();
+  const parts = text.split('-').filter(Boolean);
+  const lastPart = parts.length ? parts[parts.length - 1] : text;
+  const suffix = lastPart.replace(/[^0-9A-Za-z]/g, '').toUpperCase().slice(-6);
+  return suffix ? `SKY-${suffix}` : 'SKY-ORDER';
+}
+
+function getOrderName(order) {
+  const explicitName = String(order && order.order_name || '').trim();
+  if (explicitName) {
+    return explicitName;
+  }
+  return buildOrderName(order && order.order_id);
+}
+
 function normalizeTargetId(value) {
   if (value === undefined || value === null || value === '') {
     return null;
@@ -90,9 +96,9 @@ function normalizeTargetId(value) {
   return Number.isInteger(parsed) ? parsed : null;
 }
 
-function normalizePositiveInt(value) {
+function normalizeAssignedTargetId(value) {
   const parsed = normalizeTargetId(value);
-  return parsed !== null && parsed > 0 ? parsed : null;
+  return parsed !== null && VALID_TARGET_IDS.has(parsed) ? parsed : null;
 }
 
 function ensureString(value, fieldName) {
@@ -107,14 +113,9 @@ function isTerminalStatus(status) {
   return TERMINAL_ORDER_STATUSES.includes(status);
 }
 
-function canSimulateStatus(order) {
-  return !!order && !!order.started_at && !isTerminalStatus(order.status);
-}
-
 function normalizeDeviceName(deviceName) {
   const nextValue = String(deviceName || '').trim();
-  // 这里兼容之前演示版写入过的 cloud-demo-device，避免历史订单直接失联。
-  if (!nextValue || nextValue === 'cloud-demo-device') {
+  if (!nextValue) {
     return DEFAULT_DEVICE_NAME;
   }
   return nextValue;
@@ -408,17 +409,32 @@ function isDeviceWeatherBlocked(payload) {
   }
 
   const weatherBlocked = Number(payload.weather_blocked || 0) === 1;
-  const acceptOrdersValue = payload.accept_orders;
-  const acceptOrdersBlocked = acceptOrdersValue !== undefined && Number(acceptOrdersValue) === 0;
   const weatherMode = String(payload.weather_mode || '').trim();
-  return weatherBlocked || acceptOrdersBlocked || weatherMode === 'cloud_guard' || weatherMode === 'emergency';
+  return weatherBlocked || weatherMode === 'cloud_guard' || weatherMode === 'emergency';
 }
 
-async function fetchDefaultDeviceStateForWeather() {
+function isDeviceAcceptingOrders(payload) {
+  if (!payload) {
+    return false;
+  }
+
+  const acceptOrdersValue = payload.accept_orders;
+  if (acceptOrdersValue === undefined) {
+    return true;
+  }
+
+  if (acceptOrdersValue === true || acceptOrdersValue === false) {
+    return acceptOrdersValue;
+  }
+
+  return Number(acceptOrdersValue) !== 0;
+}
+
+async function fetchDefaultDeviceState() {
   try {
     return await fetchLatestDeviceState(DEFAULT_DEVICE_NAME);
   } catch (error) {
-    console.warn('[skyanchorService] 读取天气管制状态失败', {
+    console.warn('[skyanchorService] 读取板端状态失败', {
       message: error && error.message
     });
     return null;
@@ -426,12 +442,15 @@ async function fetchDefaultDeviceStateForWeather() {
 }
 
 async function assertOrdersAccepted() {
-  const deviceState = await fetchDefaultDeviceStateForWeather();
+  const deviceState = await fetchDefaultDeviceState();
   if (!deviceState) {
     throw new AppError('未收到板端状态，暂时不能下单和配送', 'DEVICE_STATE_UNAVAILABLE');
   }
   if (isDeviceWeatherBlocked(deviceState)) {
     throw new AppError('恶劣天气，暂停下单和配送', 'WEATHER_BLOCKED');
+  }
+  if (!isDeviceAcceptingOrders(deviceState)) {
+    throw new AppError('设备未就绪，暂时不能下单和配送', 'DEVICE_NOT_READY');
   }
   return deviceState;
 }
@@ -594,7 +613,7 @@ async function syncOrderWithRealDeviceState(order, deviceStateCache = null) {
     return order;
   }
 
-  const matchedTagId = normalizePositiveInt(deviceState.matched_tag_id);
+  const matchedTagId = normalizeAssignedTargetId(deviceState.matched_tag_id);
   const nextNote = String(deviceState.note || deviceState.state || order.note || '').trim();
   const nextDeviceState = String(deviceState.state || order.last_device_state || '').trim();
 
@@ -609,43 +628,8 @@ async function syncOrderWithRealDeviceState(order, deviceStateCache = null) {
   });
 }
 
-async function syncSimulatedOrderProgress(order) {
-  // 真实联调阶段不允许自动推进状态；只有显式开启演示开关时才执行这段逻辑。
-  if (!DEMO_AUTO_PROGRESS) {
-    return order;
-  }
-
-  if (!canSimulateStatus(order)) {
-    return order;
-  }
-
-  const elapsed = Math.max(0, now() - Number(order.started_at || 0));
-  let latestOrder = order;
-
-  for (const step of SIMULATION_STEPS) {
-    const currentIndex = STATUS_INDEX[latestOrder.status];
-    const nextIndex = STATUS_INDEX[step.status];
-
-    if (elapsed < step.afterMs || nextIndex <= currentIndex) {
-      continue;
-    }
-
-    latestOrder = await updateOrderStatus(latestOrder, step.status, step.note, {
-      matched_tag_id:
-        step.status === 'tag_matched' || step.status === 'acting' || step.status === 'delivered'
-          ? latestOrder.target_id
-          : latestOrder.matched_tag_id,
-      last_device_state: step.status
-    });
-  }
-
-  return latestOrder;
-}
-
 async function syncOrderProgress(order, deviceStateCache = null) {
-  let latestOrder = await syncOrderWithRealDeviceState(order, deviceStateCache);
-  latestOrder = await syncSimulatedOrderProgress(latestOrder);
-  return latestOrder;
+  return syncOrderWithRealDeviceState(order, deviceStateCache);
 }
 
 async function ensureCollectionsReady() {
@@ -655,24 +639,29 @@ async function ensureCollectionsReady() {
 
 async function handleHealth() {
   const mqttReady = await probeMqttReady();
-  const deviceState = mqttReady ? await fetchDefaultDeviceStateForWeather() : null;
+  const deviceState = mqttReady ? await fetchDefaultDeviceState() : null;
   const weatherBlocked = isDeviceWeatherBlocked(deviceState);
-  const acceptOrders = !!deviceState && !weatherBlocked;
+  const acceptOrders = !!deviceState && isDeviceAcceptingOrders(deviceState);
+  const checkedAt = now();
+  const deviceStateReady = !!deviceState;
 
   return {
     ok: true,
     app: 'SkyAnchor Cloud MQTT Service',
+    checked_at: checkedAt,
     mqtt_started: mqttReady,
     weather_blocked: weatherBlocked,
     accept_orders: acceptOrders,
-    device_state_ready: !!deviceState,
+    device_state_ready: deviceStateReady,
+    device_ready: deviceStateReady && acceptOrders && !weatherBlocked,
     weather_mode: String(deviceState && deviceState.weather_mode || 'normal'),
     device_state: String(deviceState && deviceState.state || ''),
     default_device: DEFAULT_DEVICE_NAME,
     device_candidates: DEVICE_CANDIDATES,
-    mode: 'cloud-mqtt',
-    // 返回演示开关状态，便于定位当前环境是否仍启用了自动推进。
-    demo_auto_progress: DEMO_AUTO_PROGRESS
+    state_topic: buildStateTopic(DEFAULT_DEVICE_NAME),
+    command_topic: buildCommandTopic(DEFAULT_DEVICE_NAME),
+    ack_topic: buildAckTopic(DEFAULT_DEVICE_NAME),
+    mode: 'cloud-mqtt'
   };
 }
 
@@ -682,11 +671,17 @@ async function handleCreateOrder(payload) {
 
   const senderId = String(payload.sender_id || '').trim() || receiverId;
   const targetId = normalizeTargetId(payload.target_id);
+  if (targetId !== null && !VALID_TARGET_IDS.has(targetId)) {
+    throw new AppError('target_id 仅支持 0 或 1');
+  }
+
   const orderId = buildOrderId();
+  const orderName = buildOrderName(orderId);
   const currentTime = now();
 
   const orderData = {
     order_id: orderId,
+    order_name: orderName,
     sender_id: senderId,
     receiver_id: receiverId,
     device_name: '',
@@ -694,7 +689,7 @@ async function handleCreateOrder(payload) {
     request_id: orderId,
     status: 'created',
     note: '',
-    matched_tag_id: 0,
+    matched_tag_id: -1,
     last_device_state: '',
     created_at: currentTime,
     started_at: null,
@@ -708,6 +703,7 @@ async function handleCreateOrder(payload) {
   });
 
   await addOrderEvent(orderId, 'created', {
+    order_name: orderName,
     target_id: orderData.target_id,
     device_name: orderData.device_name
   });
@@ -797,10 +793,11 @@ async function handleStartOrder(payload) {
     throw new AppError(`当前状态 ${order.status} 无法开始配送`);
   }
 
-  const deviceName = normalizeDeviceName(order.device_name);
-  if (!String(deviceName).trim()) {
+  const assignedDeviceName = String(order.device_name || '').trim();
+  if (!assignedDeviceName) {
     throw new AppError('订单还没有分配设备');
   }
+  const deviceName = normalizeDeviceName(assignedDeviceName);
 
   if (!VALID_TARGET_IDS.has(Number(order.target_id))) {
     throw new AppError('订单还没有分配有效的 AprilTag');
@@ -813,6 +810,7 @@ async function handleStartOrder(payload) {
     const ack = await publishMqttCommand(deviceName, {
       cmd: 'start_task',
       order_id: order.order_id,
+      order_name: getOrderName(order),
       target_id: Number(order.target_id),
       request_id: String(order.request_id || order.order_id)
     }, { waitAck: true });
@@ -836,7 +834,7 @@ async function handleStartOrder(payload) {
     device_name: deviceName,
     status: 'delivering',
     note: '已开始配送，等待识别成功信号',
-    matched_tag_id: 0,
+    matched_tag_id: -1,
     last_device_state: 'waiting_tag_match',
     started_at: startTime,
     updated_at: now()
@@ -877,6 +875,8 @@ async function handleCancelOrder(payload) {
       // 这里真实下发取消命令，避免页面显示取消而板子仍继续执行。
       await publishMqttCommand(deviceName, {
         cmd: 'cancel',
+        order_id: order.order_id,
+        order_name: getOrderName(order),
         target_id: Number(order.target_id),
         request_id: String(order.request_id || order.order_id)
       });

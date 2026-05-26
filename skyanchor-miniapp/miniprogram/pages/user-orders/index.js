@@ -1,22 +1,37 @@
 ﻿const api = require('../../services/api.js');
 const { getDemoProfile } = require('../../utils/demo-profile.js');
 const { statusLabel } = require('../../utils/order-status-labels.js');
-const { defaultServiceStatus, syncServiceStatus } = require('../../utils/service-status.js');
+const { defaultServiceStatus, showServiceDiagnostics: showDiagnostics, syncServiceStatus } = require('../../utils/service-status.js');
 const { formatApriltagValue } = require('../../utils/apriltag.js');
+const { formatOrderName } = require('../../utils/order-display.js');
 
 const POLL_INTERVAL_MS = 3000;
 const HIDDEN_STATUSES = ['cancelled'];
+const WEATHER_FAILURE_KEYWORDS = ['恶劣天气', '天气管制', '天气保护', '接收保护'];
 
 function decorateOrder(order) {
+  const noteText = String(order && order.note || '').trim();
+
   return {
     ...order,
+    order_name_text: formatOrderName(order),
     status_text: statusLabel(order.status),
-    apriltag_text: formatApriltagValue(order && order.target_id)
+    apriltag_text: formatApriltagValue(order && order.target_id),
+    note_text: noteText,
+    is_failed: order && order.status === 'failed'
   };
 }
 
 function filterVisibleOrders(orders) {
-  return (orders || []).filter((item) => !HIDDEN_STATUSES.includes(item.status));
+  return (orders || []).filter((item) => {
+    if (HIDDEN_STATUSES.includes(item.status)) {
+      return false;
+    }
+
+    const noteText = String(item && item.note_text || item && item.note || '').trim();
+    const weatherFailure = item.status === 'failed' && WEATHER_FAILURE_KEYWORDS.some((keyword) => noteText.includes(keyword));
+    return !weatherFailure;
+  });
 }
 
 Page({
@@ -115,6 +130,10 @@ Page({
     await this.fetchOrders();
   },
 
+  showServiceDiagnostics() {
+    showDiagnostics(this.data);
+  },
+
   async openCreateOrder() {
     const receiverId = this.data.receiverId.trim();
     if (!receiverId) {
@@ -144,18 +163,17 @@ Page({
     const serviceStatus = await syncServiceStatus(this, true);
     if (!serviceStatus.serviceOnline) {
       wx.showModal({
-        // 云开发版改为提示云端服务状态，避免继续引导启动本地服务。
-        title: '云端服务未连接',
-        content: serviceStatus.serviceMessage,
+        title: serviceStatus.serviceBlockTitle || '云端服务未连接',
+        content: serviceStatus.serviceBlockAdvice || serviceStatus.serviceMessage,
         showCancel: false
       });
       return;
     }
 
-    if (serviceStatus.serviceWeatherBlocked) {
+    if (serviceStatus.serviceActionBlocked) {
       wx.showModal({
-        title: '恶劣天气管制',
-        content: serviceStatus.serviceMessage,
+        title: serviceStatus.serviceBlockTitle || '服务暂不可用',
+        content: serviceStatus.serviceBlockAdvice || serviceStatus.serviceMessage,
         showCancel: false
       });
       return;

@@ -46,12 +46,47 @@ function withTimeout(promise, timeout) {
   });
 }
 
+function normalizeFunctionError(result) {
+  const code = String(result && result.code || '').trim();
+  const message = String(result && result.message || '').trim();
+
+  if (code === 'MQTT_ACK_TIMEOUT') {
+    return new Error('未收到板端确认。请检查 ESP32 是否在线、是否订阅 cmd topic，并确认 ack topic 正常上报。');
+  }
+
+  if (code === 'MQTT_UNAVAILABLE') {
+    return new Error('MQTT 调度通道不可用。请检查 EMQX 连接、云函数依赖和现场网络。');
+  }
+
+  if (code === 'DEVICE_STATE_UNAVAILABLE') {
+    return new Error('未收到板端状态，暂时不能下单和配送。请确认 ESP32 已联网并连接 MQTT。');
+  }
+
+  if (code === 'DEVICE_NOT_READY') {
+    return new Error(message || '设备未就绪，暂时不能下单和配送。请检查任务状态、天气保护和板端运行状态。');
+  }
+
+  if (code === 'WEATHER_BLOCKED') {
+    return new Error(message || '恶劣天气管制中，暂时不能下单或开始配送。');
+  }
+
+  if (code === 'DEVICE_REJECTED') {
+    return new Error(message || '板端拒绝执行命令，请查看板端状态和串口日志。');
+  }
+
+  if (code === 'NOT_FOUND') {
+    return new Error(message || '订单不存在，请返回列表刷新后重试。');
+  }
+
+  return new Error(message || '云函数返回失败');
+}
+
 function request(options) {
   if (!wx.cloud || typeof wx.cloud.callFunction !== 'function') {
     return Promise.reject(new Error('当前基础库不支持云开发，请升级微信开发者工具后重试。'));
   }
 
-  // 统一通过聚合云函数承接原本的本地后端接口，保持页面层调用方式稳定。
+  // 页面层统一通过聚合云函数访问云数据库、MQTT 调度和板端诊断。
   return withTimeout(
     wx.cloud.callFunction({
       name: config.serviceFunctionName,
@@ -65,7 +100,7 @@ function request(options) {
     .then((res) => {
       const result = (res && res.result) || {};
       if (!result.ok) {
-        throw new Error(result.message || '云函数返回失败');
+        throw normalizeFunctionError(result);
       }
       return result.data;
     })
@@ -76,5 +111,6 @@ function request(options) {
 
 module.exports = {
   normalizeRequestError,
+  normalizeFunctionError,
   request
 };

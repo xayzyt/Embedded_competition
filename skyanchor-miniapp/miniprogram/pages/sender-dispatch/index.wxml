@@ -1,62 +1,81 @@
-﻿<view class="page">
-  <view class="hero">
-    <view class="title">配送调度台</view>
-    <view class="subtitle">这里集中查看用户订单，配送端手动选择 AprilTag 0 或 1 后，再开始配送。</view>
+<view class="page">
+  <view class="hero page-hero dispatch-hero">
+    <view class="hero-copy">
+      <view class="title">调度台</view>
+      <view class="hero-meta">配送调度 · {{lastRefreshText}}</view>
+    </view>
+    <view class="hero-actions">
+      <button class="ghost-btn small-btn diagnostic-btn" bindtap="runPreflightCheck">自检</button>
+      <button class="ghost-btn small-btn refresh-btn" loading="{{loading}}" bindtap="fetchOrders">刷新</button>
+    </view>
   </view>
 
   <view class="service-banner status-{{serviceState}}">
-    {{serviceMessage}}
+    <view class="service-dot"></view>
+    <view class="service-message">{{serviceMessage}}</view>
+    <view class="service-detail-btn" bindtap="showServiceDiagnostics">诊断</view>
   </view>
 
   <view class="card">
-    <view class="section-title">调度操作</view>
-    <view class="section-caption">当前调度台只保留 AprilTag 选择。进入订单详情后，由配送端手动选择 0 或 1。</view>
-    <view class="button-row">
-      <button class="primary-btn" loading="{{loading}}" bindtap="fetchOrders">刷新订单</button>
+    <view class="section-head">
+      <view class="section-title">待调度</view>
+      <view class="count-pill">{{pendingOrders.length}} 单</view>
+    </view>
+    <block wx:if="{{loadError}}">
+      <view class="empty empty-error">{{loadError}}</view>
+    </block>
+    <block wx:elif="{{loading && !pendingOrders.length && !activeOrders.length}}">
+      <view class="empty empty-state">
+        <view class="empty-mark empty-mark-loading"></view>
+        <view class="empty-title">加载中...</view>
+      </view>
+    </block>
+    <block wx:elif="{{pendingOrders.length}}">
+      <block wx:for="{{pendingOrders}}" wx:key="order_id">
+        <view class="list-item order-row" data-order-id="{{item.order_id}}" bindtap="openDetail">
+          <view class="order-main">
+            <view class="item-title">{{item.order_name_text}}</view>
+            <view class="item-subtitle">用户 {{item.receiver_id}} · Tag {{item.apriltag_text}}</view>
+          </view>
+          <view class="status-badge status-{{item.status}}">{{item.status_text}}</view>
+        </view>
+      </block>
+    </block>
+    <view wx:else class="empty empty-state">
+      <view class="empty-mark empty-mark-queue"></view>
+      <view class="empty-title">暂无待调度</view>
+      <view class="empty-copy">等待新的配送任务</view>
     </view>
   </view>
 
   <view class="card">
-    <view class="section-title">待调度订单</view>
-    <view class="section-caption">新提交的订单会先出现在这里，进入详情后手动选择 AprilTag。</view>
+    <view class="section-head">
+      <view class="section-title">执行中</view>
+      <view class="count-pill">{{activeOrders.length}} 单</view>
+    </view>
     <block wx:if="{{loadError}}">
-      <view class="empty">{{loadError}}</view>
-    </block>
-    <block wx:elif="{{loading && !pendingOrders.length && !activeOrders.length}}">
-      <view class="empty">正在加载订单列表...</view>
-    </block>
-    <block wx:elif="{{pendingOrders.length}}">
-      <block wx:for="{{pendingOrders}}" wx:key="order_id">
-        <view class="list-item" data-order-id="{{item.order_id}}" bindtap="openDetail">
-          <view class="item-title">{{item.order_id}}</view>
-          <view class="item-subtitle">用户：{{item.receiver_id}} | AprilTag号：{{item.apriltag_text}}</view>
-          <view class="status-badge status-{{item.status}}">{{item.status_text}}</view>
-        </view>
-      </block>
-    </block>
-    <view wx:else class="empty">当前没有待处理订单。</view>
-  </view>
-
-  <view class="card">
-    <view class="section-title">执行中订单</view>
-    <view class="section-caption">已分配或正在配送中的订单会在这里持续更新状态。</view>
-    <block wx:if="{{loadError}}">
-      <view class="empty">{{loadError}}</view>
+      <view class="empty empty-error">{{loadError}}</view>
     </block>
     <block wx:elif="{{activeOrders.length}}">
       <block wx:for="{{activeOrders}}" wx:key="order_id">
-        <view class="list-item" data-order-id="{{item.order_id}}" bindtap="openDetail">
-          <view class="item-title">{{item.order_id}}</view>
-          <view class="item-subtitle">用户：{{item.receiver_id}} | AprilTag号：{{item.apriltag_text}}</view>
+        <view class="list-item order-row" data-order-id="{{item.order_id}}" bindtap="openDetail">
+          <view class="order-main">
+            <view class="item-title">{{item.order_name_text}}</view>
+            <view class="item-subtitle">用户 {{item.receiver_id}} · Tag {{item.apriltag_text}}</view>
+          </view>
           <view class="status-badge status-{{item.status}}">{{item.status_text}}</view>
         </view>
       </block>
     </block>
-    <view wx:else class="empty">当前没有执行中的订单。</view>
+    <view wx:else class="empty empty-state">
+      <view class="empty-mark empty-mark-active"></view>
+      <view class="empty-title">暂无执行中</view>
+      <view class="empty-copy">当前没有正在执行的任务</view>
+    </view>
   </view>
 
   <view class="page-footnote">
-    <view>第九届（2026）全国大学生嵌入式芯片与系统设计竞赛</view>
     <view class="page-footnote-team">地线引力队</view>
+    <view>第九届（2026）全国大学生嵌入式芯片与系统设计竞赛</view>
   </view>
 </view>

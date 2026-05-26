@@ -106,6 +106,8 @@ typedef struct {
     esp_mqtt_client_handle_t mqtt_client;             /* MQTT 客户端句柄。 */
     app_task_snapshot_t last_snapshot;                /* 最近一次任务状态快照。 */
     char current_request_id[32];                      /* 当前正在处理的云端请求 ID。 */
+    char current_order_id[48];                        /* 当前正在处理的真实订单 ID。 */
+    char current_order_name[32];                      /* 当前订单的短展示名。 */
     char topic_cmd[APP_CLOUD_TOPIC_BUF_LEN];          /* 订阅云端命令的 topic。 */
     char topic_ack[APP_CLOUD_TOPIC_BUF_LEN];          /* 发布命令应答的 topic。 */
     char topic_state[APP_CLOUD_TOPIC_BUF_LEN];        /* 发布任务状态的 topic。 */
@@ -158,6 +160,59 @@ static bool app_cloud_json_add_string(cJSON *root, const char *key, const char *
 static bool app_cloud_json_add_number(cJSON *root, const char *key, double value)
 {
     return cJSON_AddNumberToObject(root, key, value) != NULL;
+}
+
+static void app_cloud_make_order_name(const char *order_id, char *out, size_t out_size)
+{
+    if (out == NULL || out_size == 0U)
+    {
+        return;
+    }
+
+    out[0] = '\0';
+    if (order_id == NULL || order_id[0] == '\0')
+    {
+        strlcpy(out, "SKY-ORDER", out_size);
+        return;
+    }
+
+    const char *suffix = strrchr(order_id, '-');
+    suffix = (suffix != NULL && suffix[1] != '\0') ? (suffix + 1) : order_id;
+    size_t suffix_len = strlen(suffix);
+    if (suffix_len > 6U)
+    {
+        suffix += suffix_len - 6U;
+    }
+    snprintf(out, out_size, "SKY-%s", suffix);
+}
+
+static const char *app_cloud_order_id_from_cmd(const app_cloud_cmd_t *cmd)
+{
+    if (cmd == NULL)
+    {
+        return "";
+    }
+    if (cmd->order_id[0] != '\0')
+    {
+        return cmd->order_id;
+    }
+    return cmd->request_id;
+}
+
+static void app_cloud_order_name_from_cmd(const app_cloud_cmd_t *cmd,
+    char *out,
+    size_t out_size)
+{
+    if (out == NULL || out_size == 0U)
+    {
+        return;
+    }
+    if (cmd != NULL && cmd->order_name[0] != '\0')
+    {
+        strlcpy(out, cmd->order_name, out_size);
+        return;
+    }
+    app_cloud_make_order_name(app_cloud_order_id_from_cmd(cmd), out, out_size);
 }
 
 static const char *app_cloud_weather_mode_text(app_cloud_weather_mode_t mode)
@@ -915,7 +970,24 @@ static esp_err_t app_cloud_publish_ack(const app_cloud_cmd_t *cmd,
         return ESP_ERR_NO_MEM;
     }
 
+    const char *order_id = (cmd->order_id[0] != '\0') ? cmd->order_id : s_cloud.current_order_id;
+    char order_name[sizeof(s_cloud.current_order_name)] = {0};
+    if (cmd->order_name[0] != '\0')
+    {
+        strlcpy(order_name, cmd->order_name, sizeof(order_name));
+    }
+    else if (s_cloud.current_order_name[0] != '\0')
+    {
+        strlcpy(order_name, s_cloud.current_order_name, sizeof(order_name));
+    }
+    else
+    {
+        app_cloud_make_order_name(order_id, order_name, sizeof(order_name));
+    }
+
     bool ok = app_cloud_json_add_string(root, "request_id", cmd->request_id) &&
+        app_cloud_json_add_string(root, "order_id", order_id) &&
+        app_cloud_json_add_string(root, "order_name", order_name) &&
         app_cloud_json_add_string(root, "cmd", cmd->cmd) &&
         app_cloud_json_add_number(root, "code", code) &&
         app_cloud_json_add_string(root, "msg", (msg != NULL) ? msg : "-") &&
@@ -946,6 +1018,8 @@ static void app_cloud_publish_task_snapshot_internal(const app_task_snapshot_t *
     bool ok = app_cloud_json_add_number(root, "msg_id", seq) &&
         app_cloud_json_add_number(root, "ts", (double)now) &&
         app_cloud_json_add_string(root, "request_id", s_cloud.current_request_id) &&
+        app_cloud_json_add_string(root, "order_id", s_cloud.current_order_id) &&
+        app_cloud_json_add_string(root, "order_name", s_cloud.current_order_name) &&
         app_cloud_json_add_string(root, "device", CONFIG_SKY_MQTT_DEVICE_NAME) &&
         app_cloud_json_add_string(root, "state", app_task_state_to_text(snap->state)) &&
         app_cloud_json_add_number(root, "active", snap->active ? 1U : 0U) &&
@@ -1102,17 +1176,30 @@ static esp_err_t app_cloud_receive_start_task(const app_cloud_cmd_t *cmd)
         return ESP_ERR_INVALID_STATE;
     }
     char previous_request_id[sizeof(s_cloud.current_request_id)];
+    char previous_order_id[sizeof(s_cloud.current_order_id)];
+    char previous_order_name[sizeof(s_cloud.current_order_name)];
     strlcpy(previous_request_id, s_cloud.current_request_id, sizeof(previous_request_id));
+    strlcpy(previous_order_id, s_cloud.current_order_id, sizeof(previous_order_id));
+    strlcpy(previous_order_name, s_cloud.current_order_name, sizeof(previous_order_name));
     strlcpy(s_cloud.current_request_id, cmd->request_id, sizeof(s_cloud.current_request_id));
+    strlcpy(s_cloud.current_order_id,
+        app_cloud_order_id_from_cmd(cmd),
+        sizeof(s_cloud.current_order_id));
+    app_cloud_order_name_from_cmd(cmd,
+        s_cloud.current_order_name,
+        sizeof(s_cloud.current_order_name));
     ESP_LOGI(TAG,
-        "cloud rx: start_task target=%u request_id=%s",
+        "cloud rx: start_task target=%u request_id=%s order=%s",
         (unsigned)cmd->target_id,
-        (cmd->request_id[0] != '\0') ? cmd->request_id : "-");
+        (cmd->request_id[0] != '\0') ? cmd->request_id : "-",
+        (s_cloud.current_order_name[0] != '\0') ? s_cloud.current_order_name : "-");
 
     esp_err_t ret = app_task_submit_remote_request(cmd->target_id, "emqx");
     if (ret != ESP_OK)
     {
         strlcpy(s_cloud.current_request_id, previous_request_id, sizeof(s_cloud.current_request_id));
+        strlcpy(s_cloud.current_order_id, previous_order_id, sizeof(s_cloud.current_order_id));
+        strlcpy(s_cloud.current_order_name, previous_order_name, sizeof(s_cloud.current_order_name));
     }
     return ret;
 }
@@ -1147,10 +1234,11 @@ static esp_err_t app_cloud_handle_command(const char *payload, size_t payload_le
         return ret;
     }
     ESP_LOGD(TAG,
-        "EMQX cmd rx cmd=%s target=%u request_id=%s",
+        "EMQX cmd rx cmd=%s target=%u request_id=%s order=%s",
         cmd.cmd,
         (unsigned)cmd.target_id,
-        (cmd.request_id[0] != '\0') ? cmd.request_id : "-");
+        (cmd.request_id[0] != '\0') ? cmd.request_id : "-",
+        (cmd.order_name[0] != '\0') ? cmd.order_name : "-");
     if (strcmp(cmd.cmd, "start_task") == 0)
     {
         ret = app_cloud_receive_start_task(&cmd);
