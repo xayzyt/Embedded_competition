@@ -1,5 +1,7 @@
 #include "lvgl.h"
 
+// 天气图标索引表：把天气 API 的 code 映射到对应 LVGL 图片资源。
+
 LV_IMAGE_DECLARE(weather_0);
 LV_IMAGE_DECLARE(weather_1);
 LV_IMAGE_DECLARE(weather_2);

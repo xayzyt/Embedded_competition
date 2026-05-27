@@ -3,6 +3,7 @@
 #else
 #include "lvgl/lvgl.h"
 #endif
+// LVGL 生成字体：主屏中文标题使用，下面的大数组为字形位图和字距表。
 #ifndef FONT_MAIN_TITLE_CN
 #define FONT_MAIN_TITLE_CN 1
 #endif

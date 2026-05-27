@@ -7,6 +7,8 @@
 #include "bsp/esp-bsp.h"
 #include "bsp/display.h"
 
+// 主屏 UI：展示任务阶段、连接状态、天气、时钟和取货按钮。
+
 const lv_image_dsc_t *app_ui_weather_image_src(int weather_code);
 
 LV_FONT_DECLARE(font_loading_cn)
@@ -79,6 +81,7 @@ static lv_obj_t *app_ui_button_create(lv_obj_t *parent)
     return lv_btn_create(parent);
 #endif
 }
+// 主屏卡片面板统一样式。
 static lv_obj_t *app_ui_create_soft_panel(lv_obj_t *parent,
     int32_t w,
     int32_t h,
@@ -107,6 +110,7 @@ void app_ui_set_weather_sim_callback(app_ui_weather_sim_cb_t cb)
 {
     s_weather_sim_cb = cb;
 }
+// 取货按钮事件，具体开门动作由 main 注册的回调完成。
 static void app_ui_pickup_event_cb(lv_event_t *e)
 {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED)
@@ -118,6 +122,7 @@ static void app_ui_pickup_event_cb(lv_event_t *e)
         s_pickup_cb();
     }
 }
+// 天气模拟按钮事件，用于演示恶劣天气保护。
 static void app_ui_weather_sim_event_cb(lv_event_t *e)
 {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED)
@@ -129,6 +134,7 @@ static void app_ui_weather_sim_event_cb(lv_event_t *e)
         s_weather_sim_cb();
     }
 }
+// 创建 Wi-Fi/MQTT/CH32 三个圆点状态灯。
 static lv_obj_t *app_ui_create_status_dot(lv_obj_t *parent,
     const char *label_text,
     int32_t x,
@@ -150,6 +156,7 @@ static lv_obj_t *app_ui_create_status_dot(lv_obj_t *parent,
     lv_obj_align_to(lbl, ind, LV_ALIGN_OUT_RIGHT_MID, 8, 0);
     return ind;
 }
+// 更新时间显示；SNTP 未同步前显示等待状态。
 static void app_ui_update_clock_unlocked(void)
 {
     if (s_main_clock_time == NULL || s_main_clock_note == NULL)
@@ -212,6 +219,7 @@ static void app_ui_main_task_blink_timer_cb(lv_timer_t *timer)
     s_main_task_blink_dim = !s_main_task_blink_dim;
     app_ui_set_main_task_opa_unlocked(s_main_task_blink_dim ? LV_OPA_70 : LV_OPA_COVER);
 }
+// 天气阻止等告警状态通过轻微闪烁提醒用户。
 static void app_ui_set_main_task_blink_unlocked(bool enabled)
 {
     s_main_task_blink_enabled = enabled;
@@ -231,6 +239,7 @@ static void app_ui_set_main_task_blink_unlocked(bool enabled)
         lv_timer_pause(s_main_task_blink_timer);
     }
 }
+// 更新阶段指示块颜色：ready 绿色、异常红色、未完成灰色。
 static void app_ui_apply_main_phase_style_unlocked(int index, bool ready, bool danger)
 {
     if (index < 0 || index >= UI_MAIN_PHASE_COUNT)
@@ -254,6 +263,7 @@ static void app_ui_apply_main_phase_style_unlocked(int index, bool ready, bool d
             (ready ? lv_color_hex(0x0F766E) : lv_color_hex(0x475569)),
         0);
 }
+// 根据连接/天气/取货状态刷新顶部任务徽标。
 static void app_ui_update_main_task_badge_unlocked(void)
 {
     if (s_main_task_badge == NULL)
@@ -299,6 +309,7 @@ static void app_ui_update_main_task_badge_unlocked(void)
     lv_label_set_text(s_main_task_badge, text);
     lv_obj_set_style_text_color(s_main_task_badge, color, 0);
 }
+// 同步四个阶段指示：云端、从控、对接、取货。
 static void app_ui_refresh_main_phase_indicators_unlocked(void)
 {
     const bool cloud_ready = s_main_status_wifi_ok && s_main_status_mqtt_ok;
@@ -317,6 +328,7 @@ static void app_ui_refresh_main_phase_indicators_unlocked(void)
         false);
     app_ui_update_main_task_badge_unlocked();
 }
+// 天气阻止时切换任务卡片强调色并显示告警块。
 static void app_ui_apply_main_task_visual_unlocked(bool weather_blocked)
 {
     const lv_color_t normal = lv_color_hex(0x0F766E);
@@ -377,6 +389,7 @@ static void app_ui_update_weather_sim_button_unlocked(void)
         lv_obj_invalidate(s_weather_sim_btn);
     }
 }
+// 刷新天气图标、天气文案和模拟按钮状态。
 static void app_ui_apply_weather_unlocked(void)
 {
     const bool extreme = app_ui_weather_is_severe(s_main_weather_code);
@@ -434,6 +447,7 @@ static void app_ui_apply_main_task_display_unlocked(const char *text,
     app_ui_set_main_task_blink_unlocked(blink);
     app_ui_set_main_task_text_unlocked(text, color);
 }
+// 兼容旧的英文状态字符串，把它们归一到主屏枚举。
 static app_ui_main_task_state_t app_ui_main_task_state_from_text(const char *text)
 {
     if (text == NULL)
@@ -470,6 +484,7 @@ static app_ui_main_task_state_t app_ui_main_task_state_from_text(const char *tex
     }
     return APP_UI_MAIN_TASK_WAITING;
 }
+// 根据任务枚举更新主屏任务文案、颜色和告警闪烁。
 static void app_ui_apply_main_task_state_value_unlocked(app_ui_main_task_state_t state)
 {
     s_main_task_state = state;
@@ -531,6 +546,7 @@ static void app_ui_apply_main_task_state_unlocked(const char *text)
     }
     app_ui_apply_main_task_display_unlocked(text, lv_color_hex(0x0F766E), false, false);
 }
+// 创建并显示主屏；已创建时仅取消隐藏并刷新状态。
 bool app_ui_show_main_screen(void)
 {
     if (!bsp_display_lock(UI_LOCK_BOOT_MS))
@@ -881,6 +897,7 @@ bool app_ui_show_main_screen(void)
     bsp_display_unlock();
     return true;
 }
+// 隐藏主屏，进入相机预览时调用。
 void app_ui_hide_main_screen(void)
 {
     if (s_main_layer == NULL)
@@ -895,6 +912,7 @@ void app_ui_hide_main_screen(void)
     lv_refr_now(NULL);
     bsp_display_unlock();
 }
+// 显示/隐藏取货按钮，并同步主屏任务阶段。
 void app_ui_main_screen_show_pickup(bool show)
 {
     if (s_main_pickup_btn == NULL)
@@ -926,6 +944,7 @@ void app_ui_main_screen_show_pickup(bool show)
     }
     bsp_display_unlock();
 }
+// 更新三路连接状态灯和阶段指示。
 void app_ui_main_screen_update_status(bool wifi_ok, bool mqtt_ok, bool ch32_ok)
 {
     if (s_main_layer == NULL)
@@ -970,6 +989,7 @@ void app_ui_main_screen_update_status(bool wifi_ok, bool mqtt_ok, bool ch32_ok)
     app_ui_refresh_main_phase_indicators_unlocked();
     bsp_display_unlock();
 }
+// 按枚举设置任务状态，推荐新代码使用这个接口。
 void app_ui_main_screen_set_task_state(app_ui_main_task_state_t state)
 {
     s_main_task_state = state;
@@ -984,6 +1004,7 @@ void app_ui_main_screen_set_task_state(app_ui_main_task_state_t state)
     app_ui_apply_main_task_state_value_unlocked(state);
     bsp_display_unlock();
 }
+// 兼容旧文本状态入口，会尝试映射到主屏枚举。
 void app_ui_main_screen_set_task_text(const char *text)
 {
     if (text == NULL)
@@ -1002,6 +1023,7 @@ void app_ui_main_screen_set_task_text(const char *text)
     app_ui_apply_main_task_state_unlocked(text);
     bsp_display_unlock();
 }
+// 单独刷新天气文字和图标。
 void app_ui_main_screen_set_weather(const char *text, int weather_code)
 {
     if (text == NULL)
@@ -1021,6 +1043,7 @@ void app_ui_main_screen_set_weather(const char *text, int weather_code)
     app_ui_apply_weather_unlocked();
     bsp_display_unlock();
 }
+// 更新天气模拟标记，并同步告警视觉状态。
 void app_ui_main_screen_set_weather_simulated(bool simulated)
 {
     s_main_weather_simulated = simulated;
@@ -1040,6 +1063,7 @@ void app_ui_main_screen_set_weather_simulated(bool simulated)
     }
     bsp_display_unlock();
 }
+// 一次性应用天气、模拟状态和可选任务文本，减少多次抢锁。
 void app_ui_main_screen_apply_weather_state(const char *weather_text,
     int weather_code,
     bool simulated,

@@ -12,6 +12,9 @@
 #include "app_ai_capture.h"
 #include "app_image_utils.h"
 #include "app_ui.h"
+
+// 视觉管线：从相机 RGB565 帧抽样生成 320x240 灰度图，后台检测 AprilTag 并发布最新结果。
+
 #define VISION_TASK_STACK_SIZE         (16 * 1024)
 #define VISION_TASK_PRIORITY           4
 #define VISION_TASK_CORE_ID            1
@@ -37,6 +40,7 @@ static app_vision_frame_info_t s_latest_frame = {0};
 static app_vision_gray_slot_t s_slot_a = {0};
 static app_vision_gray_slot_t s_slot_b = {0};
 static app_vision_gray_slot_t s_slot_c = {0};
+// 三槽轮转：pending 给提交者发布，detect 给检测任务读取，write 给下一帧写入。
 static app_vision_gray_slot_t *s_pending_slot = &s_slot_a;
 static app_vision_gray_slot_t *s_detect_slot = &s_slot_b;
 static app_vision_gray_slot_t *s_write_slot = &s_slot_c;
@@ -71,6 +75,7 @@ static inline uint32_t app_vision_now_ms(void)
 {
     return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
 }
+// 输入分辨率不变时复用采样映射，减少每帧除法开销。
 static void app_vision_prepare_sample_map(uint32_t width, uint32_t height)
 {
     if (s_sample_map_width == width && s_sample_map_height == height)
@@ -114,6 +119,7 @@ static void app_vision_prepare_sample_map(uint32_t width, uint32_t height)
     s_sample_crop_w = crop_w;
     s_sample_crop_h = crop_h;
 }
+// 检测任务取走最新 pending 槽，并把旧 detect 槽换回 pending。
 static app_vision_gray_slot_t *app_vision_take_snapshot(app_vision_frame_info_t *meta_out,
     uint32_t *overwrite_out)
 {
@@ -132,6 +138,7 @@ static app_vision_gray_slot_t *app_vision_take_snapshot(app_vision_frame_info_t 
     taskEXIT_CRITICAL(&s_vision_mux);
     return slot;
 }
+// pending 槽未被检测任务取走时拒收新帧，调用方记录 busy drop。
 static bool app_vision_can_accept_frame(void)
 {
     bool ready = false;
@@ -185,6 +192,7 @@ static void app_vision_set_wait_text(uint32_t heartbeat)
     snprintf(buf, sizeof(buf), "tag: wait #%lu", (unsigned long)heartbeat);
     app_ui_set_vision_text(buf);
 }
+// 将灰度检测区域和原图尺寸写入结果，供 UI 映射回屏幕坐标。
 static void app_vision_fill_result_geometry(app_vision_result_t *result,
     const app_vision_gray_frame_info_t *info)
 {
@@ -201,6 +209,7 @@ static void app_vision_fill_result_geometry(app_vision_result_t *result,
     result->gray_width = info->gray_width;
     result->gray_height = info->gray_height;
 }
+// 根据检测成败更新稳定/丢失计数、最新结果和 HUD 文案。
 static void app_vision_update_result(const app_vision_gray_slot_t *slot,
     const app_apriltag_result_t *tag,
     uint32_t detect_ms,
@@ -360,6 +369,7 @@ static void app_vision_update_result(const app_vision_gray_slot_t *slot,
         s_last_miss_info_log_ms = now_ms;
     }
 }
+// 检测任务：等待新灰度帧，调用 AprilTag 检测器并记录跳帧/覆盖情况。
 static void app_vision_task(void *arg)
 {
     (void)arg;
@@ -475,6 +485,7 @@ static void app_vision_task(void *arg)
         (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(VISION_POLL_PERIOD_MS));
     }
 }
+// 初始化 AprilTag 检测器和三槽缓冲状态。
 esp_err_t app_vision_init(void)
 {
     if (s_vision_inited)
@@ -515,6 +526,7 @@ esp_err_t app_vision_init(void)
     s_vision_inited = true;
     return ESP_OK;
 }
+// 启动视觉检测任务，优先使用 PSRAM 栈。
 esp_err_t app_vision_start(void)
 {
     if (!s_vision_inited)
@@ -565,6 +577,7 @@ esp_err_t app_vision_start(void)
     ESP_LOGI(TAG, "vision task started");
     return ESP_OK;
 }
+// 相机回调提交 RGB565 帧：居中裁剪、下采样并转换为灰度 pending 槽。
 esp_err_t app_vision_submit_frame(const uint8_t *rgb565,
     uint32_t width,
     uint32_t height,
@@ -600,6 +613,7 @@ esp_err_t app_vision_submit_frame(const uint8_t *rgb565,
     write_slot->info.crop_y = s_sample_crop_y;
     write_slot->info.crop_w = s_sample_crop_w;
     write_slot->info.crop_h = s_sample_crop_h;
+    // 最近邻采样并转灰度，保留原图到灰度图的裁剪映射参数。
     const uint16_t *src = (const uint16_t *)rgb565;
     for (uint32_t gy = 0; gy < VISION_GRAY_HEIGHT; gy++) {
         const uint16_t *src_row = src + (size_t)s_sample_y[gy] * width;

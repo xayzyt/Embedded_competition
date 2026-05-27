@@ -14,6 +14,8 @@
 #include "app_ch32_link.h"
 #include "app_ui.h"
 
+// 天气子模块：拉取心知天气、缓存主屏展示，并在恶劣天气时阻止/中止对接。
+
 static const char *TAG = "app_cloud";
 static TaskHandle_t s_weather_task = NULL;
 typedef struct {
@@ -22,6 +24,7 @@ typedef struct {
     int cap;
     bool truncated;
 } app_cloud_http_buf_t;
+// 判断当前任务是否已经进入需要天气保护介入的活动阶段。
 static bool app_cloud_snapshot_is_active_task(const app_task_snapshot_t *snap)
 {
     if (snap == NULL)
@@ -33,6 +36,7 @@ static bool app_cloud_snapshot_is_active_task(const app_task_snapshot_t *snap)
         snap->state == APP_TASK_STATE_AUTH_PASSED ||
         snap->state == APP_TASK_STATE_DOCKING;
 }
+// HTTP 回调按块累积响应体，超过固定缓冲区则标记截断。
 static esp_err_t app_cloud_weather_http_event_cb(esp_http_client_event_t *evt)
 {
     if (evt == NULL || evt->event_id != HTTP_EVENT_ON_DATA)
@@ -74,6 +78,7 @@ static const char *app_cloud_json_get_string(cJSON *obj, const char *key)
     }
     return NULL;
 }
+// 解析心知天气 now.json，提取天气文字、温度和天气 code。
 static esp_err_t app_cloud_parse_weather_response(const char *json,
     char *weather_text,
     size_t weather_text_size,
@@ -108,6 +113,7 @@ static esp_err_t app_cloud_parse_weather_response(const char *json,
     cJSON_Delete(root);
     return ret;
 }
+// 缓存最近一次真实天气，退出模拟模式时可快速恢复显示。
 static void app_cloud_cache_weather(const char *text, int weather_code)
 {
     if (text == NULL)
@@ -127,6 +133,7 @@ static bool app_cloud_cached_weather_is_fresh(TickType_t max_age_ticks)
     }
     return (xTaskGetTickCount() - s_cloud.weather_cache_tick) < max_age_ticks;
 }
+// 唤醒天气任务，用于 Wi-Fi 连上、模拟状态切换或紧急保护后立即刷新。
 void app_cloud_notify_weather_task(void)
 {
     if (s_weather_task != NULL)
@@ -134,6 +141,7 @@ void app_cloud_notify_weather_task(void)
         xTaskNotifyGive(s_weather_task);
     }
 }
+// 未配置天气 API key 或请求失败时使用本地兜底天气。
 static void app_cloud_show_weather_fallback(void)
 {
     const char *fallback = "多云\n--℃";
@@ -143,6 +151,7 @@ static void app_cloud_show_weather_fallback(void)
         false,
         NULL);
 }
+// 恶劣天气紧急保护：优先安全关闭，失败再请求中止。
 static void app_cloud_send_weather_protection(void)
 {
     if (!app_ch32_link_is_ready())
@@ -161,6 +170,7 @@ static void app_cloud_send_weather_protection(void)
         ESP_LOGW(TAG, "abort dock for severe weather failed: %s", esp_err_to_name(ret));
     }
 }
+// 将天气策略应用到任务状态机和 CH32 执行机构。
 static void app_cloud_apply_weather_docking_policy(bool simulated)
 {
     s_cloud.weather_docking_blocked = simulated;
@@ -200,6 +210,7 @@ static void app_cloud_apply_weather_docking_policy(bool simulated)
         }
     }
 }
+// 主屏展示模拟恶劣天气，并把任务状态置为天气阻止。
 static void app_cloud_show_simulated_weather_ui(void)
 {
     app_ui_main_screen_apply_weather_state("台风\n28℃",
@@ -213,6 +224,7 @@ static void app_cloud_show_simulated_severe_weather(void)
     app_cloud_show_simulated_weather_ui();
     app_cloud_apply_weather_docking_policy(true);
 }
+// 退出模拟后先恢复缓存天气；没有缓存时显示同步中。
 static void app_cloud_show_restored_weather_ui(bool update_task_text)
 {
     if (s_cloud.have_cached_weather)
@@ -239,6 +251,7 @@ static void app_cloud_show_restored_weather(bool update_task_text)
     s_cloud.weather_mode = APP_CLOUD_WEATHER_MODE_NORMAL;
     app_cloud_show_restored_weather_ui(update_task_text);
 }
+// 拉取一次真实天气；若中途进入模拟模式，则立即切换到模拟保护。
 static esp_err_t app_cloud_fetch_weather_once(void)
 {
     if (s_cloud.weather_simulated)
@@ -321,6 +334,7 @@ static esp_err_t app_cloud_fetch_weather_once(void)
     ESP_LOGI(TAG, "weather updated: %s code=%d", weather_text, weather_code);
     return ESP_OK;
 }
+// 天气任务：定时刷新真实天气，模拟/恢复状态变化时被通知唤醒。
 static void app_cloud_weather_task(void *arg)
 {
     (void)arg;
@@ -362,6 +376,7 @@ static void app_cloud_weather_task(void *arg)
             APP_CLOUD_WEATHER_RETRY_MS));
     }
 }
+// 确保天气任务只创建一次。
 void app_cloud_start_weather_task_once(void)
 {
     if (s_weather_task != NULL)
@@ -380,6 +395,7 @@ void app_cloud_start_weather_task_once(void)
         s_weather_task = NULL;
     }
 }
+// UI/云端切换天气模拟；带防抖，避免按钮连点反复触发保护。
 void app_cloud_set_weather_simulated(bool simulated)
 {
     const TickType_t now = xTaskGetTickCount();
@@ -427,6 +443,7 @@ void app_cloud_set_weather_simulated(bool simulated)
     app_cloud_publish_current_state();
     app_cloud_notify_weather_task();
 }
+// 紧急保护入口：强制进入恶劣天气模式并立即执行保护策略。
 void app_cloud_trigger_weather_emergency(void)
 {
     s_cloud.weather_simulated = true;

@@ -1,4 +1,5 @@
 ﻿#include "lvgl.h"
+// LVGL 生成字体：英文标题和状态文本使用，下面的大数组为字形位图和字距表。
 #ifndef FONT_TITLE_EN
 #define FONT_TITLE_EN 1
 #endif

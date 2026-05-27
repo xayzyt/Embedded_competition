@@ -18,6 +18,8 @@
 #include "app_ui.h"
 #include "app_vision.h"
 #include "bsp_display_port.h"
+
+// 应用入口：负责串起显示、视觉、AI、云端、CH32 控制和任务状态机。
 static const char *TAG = "main";
 
 // 演示默认参数集中放在入口处，方便按一次启动流程阅读。
@@ -45,6 +47,8 @@ static TaskHandle_t s_task_event_task = NULL;
 static QueueHandle_t s_task_event_queue = NULL;
 static portMUX_TYPE s_weather_emergency_mux = portMUX_INITIALIZER_UNLOCKED;
 static bool s_weather_emergency_running = false;
+
+// 初始化 NVS，遇到分区版本变化或空间不足时自动擦除后重试。
 static void app_init_nvs(void)
 {
     esp_err_t ret = nvs_flash_init();
@@ -55,6 +59,8 @@ static void app_init_nvs(void)
     }
     ESP_ERROR_CHECK(ret);
 }
+
+// 启动显示屏和基础 UI；失败时保留日志并让 app_main 提前返回。
 static bool app_start_display_ui(void)
 {
     ESP_LOGI(TAG, "display step: init begin");
@@ -85,6 +91,8 @@ static bool app_start_display_ui(void)
     app_ui_set_dock_text("dock dbg: init");
     return true;
 }
+
+// 生成本次演示使用的对接判定参数。
 static app_dock_judge_config_t app_make_dock_config(void)
 {
     app_dock_judge_config_t cfg;
@@ -98,6 +106,8 @@ static app_dock_judge_config_t app_make_dock_config(void)
     cfg.max_distance_mm = APP_MAX_DISTANCE_MM;
     return cfg;
 }
+
+// 打印对接判定关键参数，方便串口日志和现场调试对齐配置。
 static void app_log_dock_config(const app_dock_judge_config_t *cfg)
 {
     ESP_LOGI(TAG,
@@ -109,6 +119,8 @@ static void app_log_dock_config(const app_dock_judge_config_t *cfg)
              (long)cfg->min_distance_mm,
              (long)cfg->max_distance_mm);
 }
+
+// 按启动页进度逐个初始化运行期模块。
 static void app_init_runtime_modules(const app_dock_judge_config_t *dock_cfg)
 {
     app_ui_set_loading_text("启动 CH32 通信");
@@ -139,6 +151,8 @@ static void app_init_runtime_modules(const app_dock_judge_config_t *dock_cfg)
         app_ui_set_capture_text("cap: disabled");
     }
 }
+
+// 启动相机预览链路：先等 AI 模型，随后开启摄像头、视觉检测和 LVGL 预览。
 static esp_err_t app_start_camera_pipeline(void)
 {
     esp_err_t ai_ready_ret;
@@ -185,6 +199,8 @@ static esp_err_t app_start_camera_pipeline(void)
     app_ui_hide_loading();
     return ESP_OK;
 }
+
+// 主屏进入“已配置”状态，提示当前目标码和距离门控配置。
 static void app_show_ready_status(const app_dock_judge_config_t *dock_cfg)
 {
     char vision_text[64];
@@ -225,6 +241,8 @@ static void app_cloud_start_task(void *arg)
     }
     vTaskDelete(NULL);
 }
+
+// 只提交一次云端后台初始化任务，避免 Wi-Fi/MQTT 重复启动。
 static void app_start_cloud_async(void)
 {
     if (s_cloud_start_requested)
@@ -246,6 +264,8 @@ static void app_start_cloud_async(void)
         app_ui_main_screen_set_task_state(APP_UI_MAIN_TASK_LOCAL_WAIT);
     }
 }
+
+// 相机链路的后台任务入口，失败时回退到主屏错误态。
 static void app_camera_start_task(void *arg)
 {
     (void)arg;
@@ -286,6 +306,8 @@ static void app_start_camera_if_needed(void)
         app_ui_show_main_screen();
     }
 }
+
+// 根据任务状态切换主屏和相机预览。
 static void app_handle_task_state_changed(const app_task_snapshot_t *snap)
 {
     if (snap == NULL)
@@ -314,6 +336,8 @@ static void app_handle_task_state_changed(const app_task_snapshot_t *snap)
         break;
     }
 }
+
+// 任务事件 worker：把任务模块回调转换成主线程侧的 UI/相机动作。
 static void app_task_event_task(void *arg)
 {
     (void)arg;
@@ -331,6 +355,7 @@ static void app_task_event_task(void *arg)
     }
 }
 
+// 创建任务事件队列和 worker。
 static esp_err_t app_start_task_event_worker(void)
 {
     if (s_task_event_queue == NULL)
@@ -358,6 +383,8 @@ static esp_err_t app_start_task_event_worker(void)
     }
     return ESP_OK;
 }
+
+// 任务模块回调入口；队列满时用最新状态覆盖最旧状态。
 static void app_on_task_event(app_task_event_t event,
                               const app_task_snapshot_t *snap,
                               void *user_ctx)
@@ -379,6 +406,8 @@ static void app_on_task_event(app_task_event_t event,
         (void)xQueueSend(s_task_event_queue, &msg, 0);
     }
 }
+
+// 用户取货按钮回调，确认任务完成且天气允许后打开内舱门。
 static void app_pickup_cb(void)
 {
     if (app_cloud_is_weather_docking_blocked())
@@ -405,6 +434,8 @@ static void app_pickup_cb(void)
     app_ui_main_screen_show_pickup(false);
     app_ui_main_screen_set_task_state(APP_UI_MAIN_TASK_WAITING);
 }
+
+// 切换天气模拟状态，用于现场演示天气保护流程。
 static void app_weather_sim_cb(void)
 {
     app_cloud_set_weather_simulated(!app_cloud_is_weather_simulated());
@@ -423,6 +454,8 @@ static bool app_weather_emergency_try_begin(void)
     taskEXIT_CRITICAL(&s_weather_emergency_mux);
     return ok;
 }
+
+// 天气保护任务结束时释放运行标记。
 static void app_weather_emergency_finish(void)
 {
     taskENTER_CRITICAL(&s_weather_emergency_mux);
@@ -430,6 +463,8 @@ static void app_weather_emergency_finish(void)
     s_weather_emergency_task = NULL;
     taskEXIT_CRITICAL(&s_weather_emergency_mux);
 }
+
+// 后台触发天气紧急保护，避免 UI 回调里做较重的云端/任务处理。
 static void app_weather_emergency_task(void *arg)
 {
     (void)arg;
@@ -441,6 +476,8 @@ static void app_weather_emergency_task(void *arg)
     app_weather_emergency_finish();
     vTaskDelete(NULL);
 }
+
+// 用户手动触发恶劣天气保护时，立即暂停相机并切回主屏。
 static void app_weather_emergency_cb(void)
 {
     app_camera_pause();
@@ -468,6 +505,8 @@ static void app_weather_emergency_cb(void)
         app_cloud_set_weather_simulated(true);
     }
 }
+
+// 主屏状态灯定时刷新，展示 Wi-Fi、MQTT 和 CH32 在线状态。
 static void app_main_screen_status_task(void *arg)
 {
     (void)arg;
@@ -480,6 +519,8 @@ static void app_main_screen_status_task(void *arg)
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
+
+// ESP-IDF 应用入口。
 void app_main(void)
 {
     ESP_LOGI(TAG, "app_main enter");

@@ -9,6 +9,9 @@
 #include "driver/uart.h"
 #include "esp_check.h"
 #include "esp_log.h"
+
+// ESP32 与 CH32 从控的 UART 协议层：负责二进制帧编解码、ACK/NACK 匹配和 ready 状态缓存。
+
 static const char *TAG = "app_ch32_link";
 #define CH32_EVT_READY           BIT0
 #define CH32_EVT_ACK             BIT1
@@ -34,6 +37,8 @@ typedef struct {
     TickType_t last_rx_tick;
 } app_ch32_link_ctx_t;
 static app_ch32_link_ctx_t s_ctx = {0};
+
+// 发送互斥锁比命令超时多留一点余量，避免刚到期就抢不到锁。
 static uint32_t app_ch32_link_lock_timeout_ms(uint32_t timeout_ms)
 {
     const uint32_t guard_ms = 100U;
@@ -58,6 +63,7 @@ static void app_ch32_link_unlock_tx(void)
         xSemaphoreGive(s_ctx.tx_mutex);
     }
 }
+// CH32 协议使用 CRC16/IBM，小端附在帧尾。
 static uint16_t app_ch32_crc16_ibm(const uint8_t *data, size_t len)
 {
     uint16_t crc = 0xFFFFU;
@@ -83,6 +89,7 @@ static uint16_t app_ch32_read_u16_le(const uint8_t *p)
 {
     return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
 }
+// 兼容旧版单字符命令，把字符映射到新的二进制协议命令。
 static app_ch32_proto_cmd_t app_ch32_char_cmd_to_proto(char cmd)
 {
     switch (cmd) {
@@ -143,6 +150,7 @@ const char *app_ch32_link_proto_error_name(uint8_t err)
     default:                       return "UNKNOWN";
     }
 }
+// ready 可由 flags 直接指示，也可由若干静态安全阶段推断。
 static bool app_ch32_proto_stage_indicates_ready(app_ch32_proto_stage_t stage, uint16_t flags)
 {
     if ((flags & APP_CH32_FLAG_READY) != 0U) return true;
@@ -156,6 +164,7 @@ static bool app_ch32_proto_stage_indicates_ready(app_ch32_proto_stage_t stage, u
         return false;
     }
 }
+// ready 状态有时效，超过窗口未收到状态帧则主动置为离线。
 static bool app_ch32_ready_is_fresh(void)
 {
     if (!s_ctx.ready) return false;
@@ -169,6 +178,7 @@ static bool app_ch32_ready_is_fresh(void)
     }
     return true;
 }
+// 任何入站消息都先更新 ready、ACK/NACK 等协议层状态。
 static void app_ch32_apply_common_side_effects(const app_ch32_line_t *msg)
 {
     if (msg == NULL) return;
@@ -203,6 +213,7 @@ static void app_ch32_dispatch_msg(const app_ch32_line_t *msg)
         s_ctx.cb(msg, s_ctx.user_ctx);
     ESP_LOGD(TAG, "CH32 rx: %s", msg->line);
 }
+// 校验并解析一帧 CH32 二进制协议，输出统一的 app_ch32_line_t。
 static bool app_ch32_parse_proto_frame(const uint8_t *frame, size_t frame_len, app_ch32_line_t *out)
 {
     if (frame == NULL || out == NULL) return false;
@@ -269,6 +280,7 @@ static bool app_ch32_parse_proto_frame(const uint8_t *frame, size_t frame_len, a
     }
     return true;
 }
+// UART 接收任务按 SOF1/SOF2/payload_len 组帧，完成后分发给控制器。
 static void app_ch32_link_rx_task(void *arg)
 {
     uint8_t ch = 0;
@@ -328,6 +340,7 @@ static void app_ch32_link_rx_task(void *arg)
         }
     }
 }
+// 初始化 UART 前先把 TX 拉高，避免从控把上电抖动误判为帧起始。
 static esp_err_t app_ch32_link_prepare_tx_idle(void)
 {
     gpio_config_t io_conf = {
@@ -341,6 +354,7 @@ static esp_err_t app_ch32_link_prepare_tx_idle(void)
     ESP_RETURN_ON_ERROR(gpio_set_level(APP_CH32_LINK_TX_GPIO, 1), TAG, "gpio_set_level tx idle failed");
     return ESP_OK;
 }
+// 打包并发送一帧 CMD，序号递增用于后续 ACK/NACK 匹配。
 static esp_err_t app_ch32_link_send_proto(app_ch32_proto_cmd_t cmd,
     const void *payload, uint8_t payload_len, uint8_t *out_seq)
 {
@@ -373,6 +387,7 @@ static esp_err_t app_ch32_link_send_proto(app_ch32_proto_cmd_t cmd,
         (unsigned)cmd, (unsigned)seq, (unsigned)payload_len);
     return ESP_OK;
 }
+// 在指定时间内等待与 cmd/seq 匹配的 ACK 或 NACK。
 static esp_err_t app_ch32_link_wait_ack_for_cmd(app_ch32_proto_cmd_t cmd, uint8_t seq, uint32_t timeout_ms)
 {
     uint32_t elapsed_ms = 0;
@@ -401,6 +416,7 @@ static esp_err_t app_ch32_link_wait_ack_for_cmd(app_ch32_proto_cmd_t cmd, uint8_
     }
     return ESP_ERR_TIMEOUT;
 }
+// 初始化 UART 驱动、事件组、发送锁和接收任务。
 esp_err_t app_ch32_link_init(app_ch32_line_cb_t cb, void *user_ctx)
 {
     ESP_RETURN_ON_FALSE(!s_ctx.inited, ESP_ERR_INVALID_STATE, TAG, "already initialized");
@@ -446,6 +462,7 @@ esp_err_t app_ch32_link_send_cmd_and_wait_ack(char cmd, uint32_t timeout_ms)
         ESP_ERR_INVALID_ARG, TAG, "unknown cmd: %c", cmd);
     return app_ch32_link_send_proto_cmd_and_wait_ack(proto_cmd, timeout_ms);
 }
+// 公共发送接口：串行化命令发送，清理旧 ACK 状态后等待本次响应。
 esp_err_t app_ch32_link_send_proto_cmd_and_wait_ack(app_ch32_proto_cmd_t proto_cmd, uint32_t timeout_ms)
 {
     ESP_RETURN_ON_FALSE(s_ctx.inited, ESP_ERR_INVALID_STATE, TAG, "not initialized");
@@ -466,6 +483,7 @@ esp_err_t app_ch32_link_send_proto_cmd_and_wait_ack(app_ch32_proto_cmd_t proto_c
     app_ch32_link_unlock_tx();
     return ret;
 }
+// 主动探测 CH32 ready；若缓存仍新鲜则不再打扰总线。
 esp_err_t app_ch32_link_probe_ready(uint32_t timeout_ms)
 {
     ESP_RETURN_ON_FALSE(s_ctx.inited, ESP_ERR_INVALID_STATE, TAG, "not initialized");

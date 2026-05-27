@@ -1,6 +1,9 @@
 ﻿#include "app_ctrl_text.h"
 #include <stdio.h>
 #include "app_drone_ai.h"
+
+// 控制/UI 文案组装集中在这里，避免控制状态机里混入大量 snprintf。
+
 void app_ctrl_compose_detail(const app_dock_judge_result_t *dock,
     bool has_weight,
     int32_t weight_g,
@@ -12,6 +15,7 @@ void app_ctrl_compose_detail(const app_dock_judge_result_t *dock,
     {
         return;
     }
+    // 按对接判定的门控顺序给出下一步操作提示。
     if (!dock->vision_valid)
     {
         if (dock->state != APP_DOCK_STATE_SEARCHING)

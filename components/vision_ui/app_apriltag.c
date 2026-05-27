@@ -6,6 +6,9 @@
 #include <string.h>
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+
+// 轻量 AprilTag tag36h11 检测器：二值化、连通域找候选、透视采样并与码表匹配。
+
 #define AT_MAX_WIDTH            360
 #define AT_MAX_HEIGHT           280
 #define AT_MAX_PIXELS           (AT_MAX_WIDTH * AT_MAX_HEIGHT)
@@ -26,6 +29,7 @@ static uint8_t *s_binary = NULL;
 static uint8_t *s_visited = NULL;
 static uint32_t *s_queue = NULL;
 static bool s_inited = false;
+// tag36h11 全码表，用于汉明距离匹配。
 static const uint64_t s_tag36h11_codes[587] = {
     0x21a146babULL,
     0x92d18fe9bULL,
@@ -662,6 +666,7 @@ static inline uint32_t at_index(uint32_t x, uint32_t y, uint32_t width)
 {
     return y * width + x;
 }
+// Otsu 自动阈值，适合光照变化下的黑白标签分割。
 static uint8_t at_otsu_threshold(const uint8_t *gray, uint32_t width, uint32_t height)
 {
     uint32_t hist[256] = {0};
@@ -704,6 +709,7 @@ static inline uint32_t at_hamming64(uint64_t a, uint64_t b)
     return c;
 #endif
 }
+// 灰度图转二值图，同时清空连通域 visited 标记。
 static void at_threshold_binary(const uint8_t *gray, uint32_t width, uint32_t height, uint8_t threshold)
 {
     const uint32_t total = width * height;
@@ -712,6 +718,7 @@ static void at_threshold_binary(const uint8_t *gray, uint32_t width, uint32_t he
         s_visited[i] = 0U;
     }
 }
+// 用面积、长宽比和填充率过滤明显不是标签的连通域。
 static bool at_filter_component(uint32_t area,
                                 uint32_t min_x,
                                 uint32_t min_y,
@@ -753,6 +760,7 @@ static bool at_candidate_too_large(const at_candidate_t *cand, uint32_t width, u
     if ((box_area * 100U) >= (width * height * AT_MAX_BOX_AREA_PCT)) return true;
     return false;
 }
+// 只保留评分最高的少量候选，限制后续透视解码耗时。
 static void at_insert_candidate(at_candidate_t *cands, int *count, const at_candidate_t *cand)
 {
     if (!cand->valid) return;
@@ -771,6 +779,7 @@ static void at_insert_candidate(at_candidate_t *cands, int *count, const at_cand
         if (cand->score > cands[worst].score) cands[worst] = *cand;
     }
 }
+// BFS 收集黑色连通域，并用四个极值点近似标签四角。
 static int at_collect_candidates(uint32_t width, uint32_t height, at_candidate_t *cands)
 {
     int count = 0;
@@ -883,6 +892,7 @@ static bool at_validate_quad(const at_candidate_t *cand)
     if (at_dist2(&cand->tr, &cand->bl) < 100.0f) return false;
     return true;
 }
+// 求 8x8 标签网格到图像四边形的单应矩阵。
 static bool at_solve_homography(const at_pt_t quad[4], float H[9])
 {
     float A[8][9];
@@ -975,6 +985,7 @@ static uint8_t at_sample_bilinear(const uint8_t *gray, uint32_t width, uint32_t 
     if (v > 255.0f) v = 255.0f;
     return (uint8_t)(v + 0.5f);
 }
+// 一个单元采样多个点取均值，降低边缘像素和噪声影响。
 static uint8_t at_sample_cell(const uint8_t *gray, uint32_t width, uint32_t height, const float H[9], float gx, float gy)
 {
     static const float offs[5][2] = { {0.5f, 0.5f}, {0.3f, 0.5f}, {0.7f, 0.5f}, {0.5f, 0.3f}, {0.5f, 0.7f} };
@@ -1103,6 +1114,7 @@ static uint64_t at_build_code_variant(const uint8_t bits[AT_DATA_GRID][AT_DATA_G
         return 0ULL;
     }
 }
+// 与 tag36h11 码表逐项比较，取汉明距离最小的 ID。
 static void at_match_code(uint64_t code, uint16_t *best_id, uint32_t *best_h)
 {
     *best_h = UINT32_MAX;
@@ -1117,6 +1129,7 @@ static void at_match_code(uint64_t code, uint16_t *best_id, uint32_t *best_h)
         }
     }
 }
+// 对一个候选四边形做透视采样、边框校验、旋转/调试变换枚举和码表匹配。
 static bool at_decode_with_quad(const uint8_t *gray,
                                 uint32_t width,
                                 uint32_t height,
@@ -1274,6 +1287,7 @@ static bool at_decode_with_quad(const uint8_t *gray,
                                      cand->tr.x - cand->tl.x) * (180.0f / (float)M_PI);
     return true;
 }
+// 分配二值图、visited 和 BFS 队列缓存。
 esp_err_t app_apriltag_init(void)
 {
     if (s_inited) return ESP_OK;
@@ -1294,6 +1308,7 @@ esp_err_t app_apriltag_init(void)
     ESP_LOGI(TAG, "local perspective tag36h11 detector ready");
     return ESP_OK;
 }
+// 检测入口：从候选中选择汉明距离最低、边框更可靠的标签结果。
 bool app_apriltag_detect_tag36h11(const uint8_t *gray,
                                   uint32_t width,
                                   uint32_t height,

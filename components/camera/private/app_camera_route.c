@@ -8,6 +8,8 @@
 #include "app_task.h"
 #include "app_vision.h"
 
+// 相机帧路由：按任务阶段把同一路视频流分配给 AI、AprilTag 和样本抓图。
+
 #define VISION_SAMPLE_INTERVAL   2
 #define DRONE_AI_SAMPLE_INTERVAL 8
 #define CAMERA_DIAG_INTERVAL_MS  2000U
@@ -42,6 +44,7 @@ static bool app_camera_route_apriltag_gate_open(void)
     {
         return false;
     }
+    // AprilTag 只有在 AI 已确认无人机后才放行，降低视觉检测负载。
     return task.active &&
            (task.state == APP_TASK_STATE_WAIT_APPROACH ||
             task.state == APP_TASK_STATE_AUTH_PASSED) &&
@@ -55,6 +58,7 @@ static bool app_camera_route_ai_gate_active(void)
     {
         return false;
     }
+    // 任务等待靠近且 AI 尚未确认时，优先抽帧给无人机识别。
     return task.active &&
            (task.state == APP_TASK_STATE_WAIT_APPROACH) &&
            !app_drone_ai_is_drone_confirmed();
@@ -71,6 +75,7 @@ app_camera_frame_route_t app_camera_route_select(void)
     const bool capture_active = app_ai_capture_is_active();
     const bool ai_gate_active = app_camera_route_ai_gate_active();
     const bool apriltag_gate_open = app_camera_route_apriltag_gate_open();
+    // AI 与视觉都采用降采样节拍，避免每帧都进入重计算模块。
     if (!ai_gate_active)
     {
         s_route.drone_ai_sample_skip = 0;
@@ -96,6 +101,7 @@ app_camera_frame_route_t app_camera_route_select(void)
         s_route.vision_sample_skip = 0;
         route.vision_due = true;
     }
+    // 抓图由独立开关控制，方便现场采集训练样本。
     route.capture_due = app_ai_capture_should_capture_frame();
     return route;
 }

@@ -3,6 +3,10 @@
 #include <stddef.h>
 #include <string.h>
 #include "cJSON.h"
+
+// 云端命令 JSON 解析：只抽取业务需要的字段，缺省字段保持为 0/空串。
+
+// 读取字符串字段并按目标缓冲区截断，避免 MQTT 负载过长越界。
 static bool app_cloud_cmd_get_string(const cJSON *root,
     const char *key,
     char *out,
@@ -20,6 +24,8 @@ static bool app_cloud_cmd_get_string(const cJSON *root,
     }
     return ok;
 }
+
+// 读取 0~65535 范围内的数值字段，用作目标标签 ID。
 static bool app_cloud_cmd_get_u16(const cJSON *root, const char *key, uint16_t *out)
 {
     if (root == NULL || key == NULL || out == NULL)
@@ -36,6 +42,8 @@ static bool app_cloud_cmd_get_u16(const cJSON *root, const char *key, uint16_t *
     }
     return ok;
 }
+
+// 解析云端命令，cmd 为必填，其余字段按不同命令可选。
 esp_err_t app_cloud_cmd_parse_json(const char *payload, app_cloud_cmd_t *out)
 {
     if (payload == NULL || out == NULL)

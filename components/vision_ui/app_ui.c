@@ -7,6 +7,9 @@
 #include "bsp/esp-bsp.h"
 #include "bsp/display.h"
 #include "app_ai_capture.h"
+
+// 相机预览 HUD 与启动页 UI：负责状态文字、对接框、锁定条、抓图按钮和天气保护按钮。
+
 #ifndef BSP_CAMERA_ROTATION
 #define BSP_CAMERA_ROTATION 0
 #endif
@@ -60,6 +63,7 @@ static lv_obj_t *app_get_active_screen(void)
     return lv_scr_act();
 #endif
 }
+// 通用半透明标签样式，保证叠在相机画面上仍可读。
 static void app_ui_style_label(lv_obj_t *obj)
 {
     lv_obj_set_style_bg_opa(obj, LV_OPA_50, 0);
@@ -180,6 +184,7 @@ static lv_obj_t *app_ui_add_button_label(lv_obj_t *btn, const char *text)
     lv_obj_center(label);
     return label;
 }
+// LVGL 锁内更新标签；文本未变化时跳过，减少刷新抖动。
 static void app_ui_set_label_text_unlocked(lv_obj_t *label, const char *text)
 {
     if ((label != NULL) && (text != NULL))
@@ -200,6 +205,7 @@ static void app_ui_set_capture_text_unlocked(const char *text)
 {
     app_ui_set_label_text_unlocked(s_capture, text);
 }
+// 抓图按钮：启动连续样本采集。
 static void app_ui_capture_start_event_cb(lv_event_t *e)
 {
     if (lv_event_get_code(e) != LV_EVENT_PRESSED)
@@ -241,6 +247,7 @@ static void app_ui_capture_mode_event_cb(lv_event_t *e)
         lv_obj_center(s_mode_label);
     }
 }
+// 根据对接状态选择 HUD 颜色；hold_box 用灰色表示短时丢帧保持。
 static lv_color_t app_ui_state_color(app_dock_state_t state, bool hold_box)
 {
     if (hold_box)
@@ -261,6 +268,7 @@ static lv_color_t app_ui_state_color(app_dock_state_t state, bool hold_box)
         return lv_color_hex(0x7E8A93);
     }
 }
+// 计算相机画面在 LCD 上等比例显示后的尺寸。
 static void app_ui_calc_fit_dims(int32_t src_w, int32_t src_h, int32_t *fit_w, int32_t *fit_h)
 {
     if ((fit_w == NULL) || (fit_h == NULL) || (src_w <= 0) || (src_h <= 0))
@@ -297,6 +305,7 @@ static void app_ui_get_rotated_dims(int32_t src_w, int32_t src_h, int32_t *rot_w
         *rot_h = src_h;
     }
 }
+// 按 BSP 摄像头旋转角把原图点转换到预览方向。
 static void app_ui_transform_src_point(float x,
     float y,
     int32_t src_w,
@@ -334,6 +343,7 @@ static int32_t app_ui_clamp_i32(int32_t v, int32_t lo, int32_t hi)
     if (v > hi) return hi;
     return v;
 }
+// 将灰度检测坐标系下的 bbox 映射回 LCD 坐标系，包含裁剪和旋转修正。
 static void app_ui_map_bbox_to_screen(const app_vision_result_t *vision,
     int32_t *x,
     int32_t *y,
@@ -402,6 +412,7 @@ static void app_ui_map_bbox_to_screen(const app_vision_result_t *vision,
         *h = BSP_LCD_V_RES - *y;
     }
 }
+// 锁定条表示稳定帧数/ready 状态，给用户一个靠近完成度反馈。
 static void app_ui_update_lock_bar(const app_dock_judge_result_t *dock)
 {
     uint8_t filled = 0;
@@ -442,6 +453,7 @@ static void app_ui_update_lock_bar(const app_dock_judge_result_t *dock)
         }
     }
 }
+// 进入 ready 的瞬间短暂显示 AUTH PASSED。
 static void app_ui_update_auth_banner(app_dock_state_t state)
 {
     uint32_t now_ms = lv_tick_get();
@@ -483,6 +495,7 @@ static void app_ui_set_track_box(bool show,
     lv_obj_set_style_border_opa(s_track_box, opa, 0);
     lv_obj_clear_flag(s_track_box, LV_OBJ_FLAG_HIDDEN);
 }
+// 创建预览 HUD 和右侧调试按钮；对象只创建一次，后续复用。
 bool app_ui_create(void)
 {
     if (!bsp_display_lock(UI_LOCK_BOOT_MS))
@@ -626,6 +639,7 @@ bool app_ui_create(void)
     bsp_display_unlock();
     return true;
 }
+// 创建/显示启动页，包含 logo、进度条、队名和竞赛名称。
 bool app_ui_show_loading(const char *text)
 {
     if (!bsp_display_lock(UI_LOCK_BOOT_MS))
@@ -719,6 +733,7 @@ void app_ui_set_loading_progress(int32_t percent)
     lv_refr_now(NULL);
     bsp_display_unlock();
 }
+// 删除启动页对象，让相机 canvas 和 HUD 成为主显示层。
 void app_ui_hide_loading(void)
 {
     if (s_loading_layer == NULL)
@@ -740,6 +755,7 @@ void app_ui_set_weather_emergency_callback(app_ui_weather_emergency_cb_t cb)
 {
     s_weather_emergency_cb = cb;
 }
+// 天气按钮事件，真正的保护动作由 main 注册的回调执行。
 static void app_ui_weather_emergency_event_cb(lv_event_t *e)
 {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED)
@@ -803,6 +819,7 @@ void app_ui_set_dock_text(const char *text)
     app_ui_set_label_text_unlocked(s_dock, text);
     bsp_display_unlock();
 }
+// 更新视觉框、准星颜色、锁定条和认证提示；调用者需持有 LVGL 锁。
 static void app_ui_update_hud_unlocked(const app_vision_result_t *vision,
     const app_dock_judge_result_t *dock)
 {
@@ -828,6 +845,7 @@ static void app_ui_update_hud_unlocked(const app_vision_result_t *vision,
     } else if (s_have_last_box && (dock->invalid_hold_count > 0U) &&
         (dock->state != APP_DOCK_STATE_SEARCHING))
         {
+        // 视觉短时丢失时保留上一帧框，但降低透明度提示这是 hold 状态。
         box_x = s_last_box_x;
         box_y = s_last_box_y;
         box_w = s_last_box_w;
@@ -861,6 +879,7 @@ void app_ui_update_hud(const app_vision_result_t *vision,
     app_ui_update_hud_unlocked(vision, dock);
     bsp_display_unlock();
 }
+// 控制器一次性刷新状态栏、任务行、调试行和 HUD，减少多次抢 LVGL 锁。
 void app_ui_update_control_state(const char *status,
     const char *vision_text,
     const char *dock_text,

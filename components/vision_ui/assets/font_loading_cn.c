@@ -1,4 +1,5 @@
 ﻿#include "lvgl.h"
+// LVGL 生成字体：启动页中文加载文案使用，下面的大数组为字形位图和字距表。
 #ifndef FONT_LOADING_CN
 #define FONT_LOADING_CN 1
 #endif

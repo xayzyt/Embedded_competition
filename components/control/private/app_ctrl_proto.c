@@ -1,4 +1,6 @@
 ﻿#include "app_ctrl_proto.h"
+// CH32 协议辅助判断：把底层阶段、flags 和错误码转换成控制语义。
+
 bool app_ctrl_proto_stage_is_busy(app_ch32_proto_stage_t stage)
 {
     switch (stage) {
@@ -64,6 +66,7 @@ bool app_ctrl_is_soft_waiting_cargo_error(app_ch32_proto_stage_t prev_stage,
 {
     const bool tray_out_now = app_ctrl_proto_flags_indicate_tray_out(flags);
     const bool tray_out_before = app_ctrl_proto_flags_indicate_tray_out(prev_flags);
+    // 等货超时或重量异常在托盘伸出窗口内属于可恢复等待，不立即进入故障。
     if (!app_ctrl_proto_error_is_cargo_wait_soft(proto_error))
     {
         return false;

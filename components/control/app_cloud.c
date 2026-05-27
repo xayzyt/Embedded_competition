@@ -15,6 +15,9 @@
 #include "esp_netif.h"
 #include "esp_netif_sntp.h"
 #include "esp_wifi.h"
+
+// 云端连接模块：初始化 ESP-Hosted Wi-Fi、SNTP 和 MQTT，并把任务状态同步到云端。
+
 static const char *TAG = "app_cloud";
 app_cloud_runtime_t s_cloud = {0};
 static TaskHandle_t s_cloud_task = NULL;
@@ -32,6 +35,7 @@ static void app_cloud_log_heap(const char *stage)
         (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
         (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
 }
+// ESP-IDF 全局网络栈/事件循环可能被别的模块初始化过，重复调用视为成功。
 static esp_err_t app_cloud_init_netif_once(void)
 {
     esp_err_t ret = esp_netif_init();
@@ -50,6 +54,7 @@ static esp_err_t app_cloud_init_event_loop_once(void)
     }
     return ret;
 }
+// 根据 topic 前缀和设备名生成 cmd/ack/state 三类 MQTT 主题。
 static void app_cloud_build_topics(void)
 {
     snprintf(s_cloud.topic_cmd,
@@ -76,6 +81,7 @@ static void app_cloud_log_topics_once(void)
         s_cloud.topic_ack,
         s_cloud.topic_state);
 }
+// 统一封装 Wi-Fi 重连请求，保留触发原因方便排查。
 static void app_cloud_request_wifi_connect(const char *reason)
 {
     esp_err_t ret = esp_wifi_connect();
@@ -100,6 +106,7 @@ static void app_cloud_log_dns_info(const char *label, const esp_netif_dns_info_t
         label,
         esp_ip4addr_ntoa(&dns->ip.u_addr.ip4, ip, sizeof(ip)));
 }
+// 某些 ESP-Hosted 场景 DHCP DNS 可能为空，拿到 IP 后补一个兜底 DNS。
 static void app_cloud_ensure_dns_after_ip(void)
 {
     if (s_cloud.sta_netif == NULL)
@@ -135,6 +142,7 @@ static void app_cloud_ensure_dns_after_ip(void)
     }
     app_cloud_log_dns_info("fallback", &fallback);
 }
+// SNTP 同步完成后打印本地时间，供日志时间线校准。
 static void app_cloud_time_sync_cb(struct timeval *tv)
 {
     (void)tv;
@@ -146,6 +154,7 @@ static void app_cloud_time_sync_cb(struct timeval *tv)
     strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", &tm_now);
     ESP_LOGI(TAG, "time synced: %s", time_buf);
 }
+// Wi-Fi 拿到 IP 后启动 SNTP；时区采用中国标准时间。
 static void app_cloud_start_sntp_once(void)
 {
     if (s_cloud.sntp_started)
@@ -171,6 +180,7 @@ static void app_cloud_start_sntp_once(void)
     s_cloud.sntp_started = true;
     ESP_LOGI(TAG, "SNTP started, server=%s", APP_CLOUD_NTP_SERVER);
 }
+// 检查 menuconfig 中必须填写的 Wi-Fi/MQTT 参数。
 static esp_err_t app_cloud_validate_config(void)
 {
     if (CONFIG_SKY_WIFI_SSID[0] == '\0')
@@ -210,6 +220,7 @@ static esp_err_t app_cloud_validate_config(void)
     }
     return ESP_OK;
 }
+// 创建 MQTT 客户端，证书校验策略由 menuconfig 控制。
 static esp_err_t app_cloud_create_mqtt_client(void)
 {
     if (s_cloud.mqtt_client != NULL)
@@ -248,6 +259,7 @@ static void app_cloud_destroy_mqtt_client(void)
     s_cloud.mqtt_started = false;
     s_cloud.mqtt_connected = false;
 }
+// MQTT 只在 Wi-Fi 已拿到 IP 后启动，失败时由 cloud task 延迟重试。
 static esp_err_t app_cloud_start_mqtt_if_needed(void)
 {
     if (s_cloud.mqtt_client == NULL && app_cloud_create_mqtt_client() != ESP_OK)
@@ -279,6 +291,7 @@ static esp_err_t app_cloud_start_mqtt_if_needed(void)
     ESP_LOGI(TAG, "EMQX mqtt client started");
     return ESP_OK;
 }
+// 云端后台任务：消费“启动 MQTT”事件，避免事件回调里做重操作。
 static void app_cloud_task(void *arg)
 {
     (void)arg;
@@ -301,6 +314,7 @@ static void app_cloud_task(void *arg)
         }
     }
 }
+// Wi-Fi/IP 事件处理：断线清理 MQTT，拿到 IP 后启动时间、天气和 MQTT。
 static void app_cloud_wifi_event_handler(void *arg,
     esp_event_base_t event_base,
     int32_t event_id,
@@ -343,6 +357,7 @@ static void app_cloud_wifi_event_handler(void *arg,
             APP_CLOUD_WIFI_CONNECTED_BIT | APP_CLOUD_START_MQTT_BIT);
     }
 }
+// MQTT 事件处理：连接后订阅命令主题，收到数据后交给消息子模块。
 static void app_cloud_mqtt_event_handler(void *handler_args,
     esp_event_base_t base,
     int32_t event_id,
@@ -388,6 +403,7 @@ static void app_cloud_mqtt_event_handler(void *handler_args,
         break;
     }
 }
+// 云端模块总初始化入口，由 main 以后台任务方式启动。
 esp_err_t app_cloud_init(void)
 {
     if (s_cloud.inited)
@@ -401,6 +417,7 @@ esp_err_t app_cloud_init(void)
         return ESP_ERR_NO_MEM;
     }
     app_cloud_build_topics();
+    // 云端需要监听任务状态变化，及时发布 state。
     ESP_RETURN_ON_ERROR(app_task_register_event_callback(app_cloud_on_task_event, NULL),
         TAG,
         "register task callback failed");
@@ -465,6 +482,7 @@ esp_err_t app_cloud_init(void)
     ESP_LOGI(TAG, "EMQX init done (official host Wi-Fi path via ESP32-C6)");
     return ESP_OK;
 }
+// 汇总给主屏状态灯使用的连接/天气状态。
 void app_cloud_get_status(app_cloud_status_t *out)
 {
     if (out == NULL)

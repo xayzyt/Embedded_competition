@@ -12,6 +12,9 @@
 #include "bsp/esp-bsp.h"
 #include "app_image_utils.h"
 #include "app_ui.h"
+
+// AI 样本抓图模块：把相机 RGB565 帧下采样为 BMP，按有/无人机目录保存到 SD 卡。
+
 #define CAPTURE_ROOT_DIR            BSP_SD_MOUNT_POINT "/CAP"
 #define CAPTURE_DRONE_DIR           CAPTURE_ROOT_DIR "/DRONE"
 #define CAPTURE_NO_DRONE_DIR        CAPTURE_ROOT_DIR "/NODRONE"
@@ -81,6 +84,7 @@ static const char *app_ai_capture_mode_dir(app_ai_capture_mode_t mode)
             return CAPTURE_DRONE_DIR;
     }
 }
+// 识别 IMG00001.BMP 这类文件名，用于续接上次采集编号。
 static bool app_ai_capture_parse_image_name(const char *name, uint32_t *out_index)
 {
     if (name == NULL || out_index == NULL || strlen(name) != 12U)
@@ -107,6 +111,7 @@ static bool app_ai_capture_parse_image_name(const char *name, uint32_t *out_inde
     *out_index = value;
     return true;
 }
+// 扫描目录中已有 BMP，计算下一张图片编号。
 static uint32_t app_ai_capture_find_next_index(const char *dir_path)
 {
     uint32_t max_index = 0;
@@ -138,6 +143,7 @@ static void app_ai_capture_set_status(const char *status)
         app_ui_set_vision_text(status);
     }
 }
+// 把当前抓图模式、保存数和丢帧数压成一行 HUD 文案。
 static void app_ai_capture_format_status(const char *state)
 {
     char text[64];
@@ -170,6 +176,7 @@ static void app_ai_capture_format_status(const char *state)
     }
     app_ai_capture_set_status(text);
 }
+// 挂载 SD 卡并创建 CAP/DRONE、CAP/NODRONE 两个样本目录。
 static esp_err_t app_ai_capture_prepare_storage(void)
 {
     if (s_sd_ready)
@@ -214,6 +221,7 @@ static esp_err_t app_ai_capture_prepare_storage(void)
              (unsigned long)s_next_index[APP_AI_CAPTURE_MODE_NO_DRONE]);
     return ESP_OK;
 }
+// 居中裁剪后下采样到 320x240 BGR，直接匹配 BMP 的像素顺序。
 static void app_ai_capture_downsample_rgb565_to_bgr(const uint8_t *rgb565,
                                                     uint32_t src_width,
                                                     uint32_t src_height,
@@ -256,6 +264,7 @@ static void app_ai_capture_downsample_rgb565_to_bgr(const uint8_t *rgb565,
         }
     }
 }
+// 手写 24-bit BMP 头，使用负高度生成自顶向下图片，避免写入时倒置。
 static esp_err_t app_ai_capture_write_bmp(const app_ai_capture_slot_t *slot)
 {
     if (slot == NULL || slot->bgr == NULL)
@@ -315,6 +324,7 @@ static esp_err_t app_ai_capture_write_bmp(const app_ai_capture_slot_t *slot)
     }
     return ret;
 }
+// 写文件放到后台任务，避免相机帧回调被 SD 卡 I/O 阻塞。
 static void app_ai_capture_writer_task(void *arg)
 {
     (void)arg;
@@ -339,6 +349,7 @@ static void app_ai_capture_writer_task(void *arg)
         (void)xQueueSend(s_free_queue, &slot, portMAX_DELAY);
     }
 }
+// 初始化双缓冲 slot 和写入任务。
 esp_err_t app_ai_capture_init(void)
 {
     if (s_inited)
@@ -447,6 +458,7 @@ bool app_ai_capture_is_active(void)
     taskEXIT_CRITICAL(&s_mux);
     return active;
 }
+// 采样节拍控制：每隔固定帧数抓一次，写入队列满时暂停采样。
 bool app_ai_capture_should_capture_frame(void)
 {
     bool capture = false;
@@ -479,6 +491,7 @@ bool app_ai_capture_should_capture_frame(void)
     }
     return capture;
 }
+// 相机路由提交帧后，当前线程只做下采样并入队，真正写盘由 writer 完成。
 esp_err_t app_ai_capture_submit_frame(const uint8_t *rgb565,
                                       uint32_t width,
                                       uint32_t height,

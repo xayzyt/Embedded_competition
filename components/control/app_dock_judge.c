@@ -2,6 +2,10 @@
 #include <stdio.h>
 #include <string.h>
 #include "esp_log.h"
+
+// 对接判定器：对 AprilTag 结果做目标 ID、居中、靠近、稳定和距离门控，
+// 并用 EMA 与滞回减少抖动导致的误触发。
+
 static const char *TAG = "app_dock";
 typedef struct {
     bool have_filter;
@@ -33,6 +37,7 @@ static inline uint8_t app_sat_inc_u8(uint8_t v)
 {
     return (v == UINT8_MAX) ? UINT8_MAX : (uint8_t)(v + 1U);
 }
+// 整数 EMA，使用 shift 表示 1/(2^shift) 的滤波系数。
 static int32_t app_filter_ema_i32(int32_t prev, int32_t sample, uint8_t shift)
 {
     if (shift == 0U)
@@ -58,6 +63,7 @@ static int32_t app_clip_i32(int32_t v, int32_t lo, int32_t hi)
     if (v > hi) return hi;
     return v;
 }
+// 同一帧可能被 UI/control 多次读取，计数器只允许处理一次。
 static bool app_dock_is_repeated_frame(const app_vision_result_t *vision)
 {
     return (vision != NULL) &&
@@ -73,6 +79,7 @@ static void app_dock_mark_frame_processed(const app_vision_result_t *vision)
     s_rt.have_processed_frame = true;
     s_rt.last_processed_frame_seq = vision->frame_seq;
 }
+// 标签 ID 变化时重置滤波器；同一标签则持续 EMA 平滑。
 static void app_dock_apply_filter(const app_vision_result_t *vision)
 {
     if (!s_rt.have_filter || (s_rt.last_tag_id != vision->tag_id))
@@ -114,6 +121,7 @@ static void app_dock_apply_filter(const app_vision_result_t *vision)
         vision->top_edge_angle_deg,
         s_cfg.ema_shift);
 }
+// 由标签实际尺寸、焦距和像素边长估算相机到标签距离。
 static int32_t app_dock_estimate_distance_mm(float edge_px)
 {
     if (edge_px <= 1.0f || s_cfg.focal_length_px <= 1.0f || s_cfg.tag_size_mm <= 0)
@@ -122,6 +130,7 @@ static int32_t app_dock_estimate_distance_mm(float edge_px)
     }
     return (int32_t)((s_cfg.focal_length_px * (float)s_cfg.tag_size_mm / edge_px) + 0.5f);
 }
+// 把中心偏差、稳定度、靠近程度和距离门控合成 0~100 的悬停评分。
 static uint8_t app_dock_calc_hover_score(const app_dock_judge_result_t *out)
 {
     int32_t center_x_score = 0;
@@ -177,6 +186,7 @@ static uint8_t app_dock_calc_hover_score(const app_dock_judge_result_t *out)
     }
     return (uint8_t)app_clip_i32(score, 0, 100);
 }
+// 填充对接结果中的原始值、滤波值和派生距离。
 static void app_dock_fill_result_base(const app_vision_result_t *vision,
     app_dock_judge_result_t *out)
 {
@@ -204,6 +214,7 @@ static void app_dock_fill_result_base(const app_vision_result_t *vision,
     out->invalid_hold_count = s_rt.invalid_hold_count;
     out->est_distance_mm = app_dock_estimate_distance_mm(s_rt.filtered_edge_px);
 }
+// 默认参数偏演示友好，距离门控默认关闭以提高现场容错。
 void app_dock_judge_get_default_config(app_dock_judge_config_t *out)
 {
     if (out == NULL)
@@ -261,6 +272,7 @@ esp_err_t app_dock_judge_init(const app_dock_judge_config_t *cfg)
         (long)s_cfg.max_distance_mm);
     return ESP_OK;
 }
+// 云端或任务更新目标 ID 后重置历史滤波/滞回状态。
 esp_err_t app_dock_judge_set_target_id(uint16_t target_tag_id, bool enable_filter)
 {
     if (!s_inited)
@@ -287,6 +299,7 @@ void app_dock_judge_reset(void)
     memset(&s_rt, 0, sizeof(s_rt));
     s_rt.last_state = APP_DOCK_STATE_SEARCHING;
 }
+// 核心判定入口：输入视觉结果，输出带滞回的对接状态。
 bool app_dock_judge_process(const app_vision_result_t *vision,
     app_dock_judge_result_t *out)
 {
@@ -298,6 +311,7 @@ bool app_dock_judge_process(const app_vision_result_t *vision,
     const bool repeated_frame = app_dock_is_repeated_frame(vision);
     if (!vision->valid)
     {
+        // 短时丢帧时保持上一次状态，避免 UI 和控制状态剧烈跳变。
         if (!repeated_frame && s_rt.invalid_hold_count < s_cfg.lost_hold_frames)
         {
             s_rt.invalid_hold_count++;
@@ -371,6 +385,7 @@ bool app_dock_judge_process(const app_vision_result_t *vision,
     }
     if (!out->target_id_ok)
     {
+        // 错误 ID 需要连续出现才进入 wrong_id，降低误检噪声影响。
         if (!repeated_frame)
         {
             s_rt.wrong_id_count = app_sat_inc_u8(s_rt.wrong_id_count);
@@ -394,6 +409,7 @@ bool app_dock_judge_process(const app_vision_result_t *vision,
         return true;
     }
     s_rt.wrong_id_count = 0;
+    // ready 条件比 aligned 更严格，ready 状态退出也带坏帧滞回。
     const bool ready_cond = out->centered_ok &&
     out->near_ok &&
     out->stable_ok &&
@@ -492,6 +508,7 @@ const char *app_dock_judge_state_to_text(app_dock_state_t state)
         return "unknown";
     }
 }
+// 简短状态文案给主状态栏使用。
 void app_dock_judge_format_status(const app_dock_judge_result_t *result,
     char *buf,
     size_t buf_len)
@@ -521,6 +538,7 @@ void app_dock_judge_format_status(const app_dock_judge_result_t *result,
         break;
     }
 }
+// 详细调试文案给 dock dbg 行使用，包含门控标记和关键几何量。
 void app_dock_judge_format_detail(const app_dock_judge_result_t *result,
     char *buf,
     size_t buf_len)

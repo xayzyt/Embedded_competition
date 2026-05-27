@@ -5,6 +5,9 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "nvs.h"
+
+// 高层任务状态机：管理目标 ID、配送任务阶段、NVS 持久化和事件回调。
+
 static const char *TAG = "app_task";
 static const char *NVS_NS = "sky_task";
 static const char *NVS_KEY_TARGET_ID = "target_id";
@@ -31,6 +34,7 @@ static uint32_t app_task_now_ms(void)
 {
     return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
 }
+// 修改任务状态和状态进入时间，必须在 s_mux 内调用。
 static void app_task_change_state_locked(app_task_state_t state, const char *note)
 {
     s_rt.state = state;
@@ -56,6 +60,7 @@ static void app_task_copy_snapshot_locked(app_task_snapshot_t *out)
     strlcpy(out->source, s_rt.source, sizeof(out->source));
     strlcpy(out->note, s_rt.note, sizeof(out->note));
 }
+// 发事件前复制快照和回调表，避免回调中再次访问任务模块造成长时间持锁。
 static void app_task_emit_event(app_task_event_t event)
 {
     app_task_snapshot_t snap = {0};
@@ -72,6 +77,7 @@ static void app_task_emit_event(app_task_event_t event)
         }
     }
 }
+// 将目标标签 ID 保存到 NVS，重启后继续使用上次配置。
 static esp_err_t app_task_persist_target_id(uint16_t target_id)
 {
     nvs_handle_t handle;
@@ -88,6 +94,7 @@ static esp_err_t app_task_persist_target_id(uint16_t target_id)
     nvs_close(handle);
     return ret;
 }
+// 从 NVS 读取目标 ID，失败或越界时回退到默认值。
 static uint16_t app_task_load_target_id(uint16_t default_target_id)
 {
     nvs_handle_t handle;
@@ -105,6 +112,7 @@ static uint16_t app_task_load_target_id(uint16_t default_target_id)
     }
     return (uint16_t)value;
 }
+// 注册任务事件监听者，最多保留少量固定槽位。
 esp_err_t app_task_register_event_callback(app_task_event_cb_t cb, void *user_ctx)
 {
     if (cb == NULL)
@@ -125,6 +133,7 @@ esp_err_t app_task_register_event_callback(app_task_event_cb_t cb, void *user_ct
     taskEXIT_CRITICAL(&s_mux);
     return ESP_ERR_NO_MEM;
 }
+// 初始化任务状态，并广播 INIT 事件给 UI/云端/控制器。
 esp_err_t app_task_init(uint16_t default_target_id)
 {
     taskENTER_CRITICAL(&s_mux);
@@ -146,6 +155,7 @@ esp_err_t app_task_init(uint16_t default_target_id)
     app_task_emit_event(APP_TASK_EVENT_INIT);
     return ESP_OK;
 }
+// 更新目标 ID；无活动任务时回到 configured 状态。
 esp_err_t app_task_set_target_id(uint16_t target_id, bool persist)
 {
     if (!s_rt.inited)
@@ -174,6 +184,7 @@ esp_err_t app_task_set_target_id(uint16_t target_id, bool persist)
     app_task_emit_event(APP_TASK_EVENT_TARGET_UPDATED);
     return ESP_OK;
 }
+// 启动一单任务，进入等待无人机靠近/认证阶段。
 esp_err_t app_task_start_with_target(uint16_t target_id, const char *source)
 {
     if (!s_rt.inited)
@@ -196,6 +207,7 @@ esp_err_t app_task_submit_remote_request(uint16_t target_id, const char *source)
 {
     return app_task_start_with_target(target_id, (source != NULL) ? source : "remote");
 }
+// AprilTag 对接判定 ready 后标记认证通过。
 void app_task_mark_auth_passed(uint16_t matched_tag_id)
 {
     bool changed = false;
@@ -213,6 +225,7 @@ void app_task_mark_auth_passed(uint16_t matched_tag_id)
         app_task_emit_event(APP_TASK_EVENT_STATE_CHANGED);
     }
 }
+// CH32 接收对接命令或上报 busy 后进入 docking。
 void app_task_mark_docking_started(void)
 {
     bool changed = false;
@@ -229,6 +242,7 @@ void app_task_mark_docking_started(void)
         app_task_emit_event(APP_TASK_EVENT_STATE_CHANGED);
     }
 }
+// 对接流程完成，任务转为非 active。
 void app_task_mark_completed(const char *note)
 {
     taskENTER_CRITICAL(&s_mux);
@@ -254,6 +268,7 @@ void app_task_cancel(const char *note)
     taskEXIT_CRITICAL(&s_mux);
     app_task_emit_event(APP_TASK_EVENT_STATE_CHANGED);
 }
+// get 表示消费者已处理 target_dirty，读取后会清除此标记。
 bool app_task_get_snapshot(app_task_snapshot_t *out)
 {
     if (out == NULL)
@@ -266,6 +281,7 @@ bool app_task_get_snapshot(app_task_snapshot_t *out)
     taskEXIT_CRITICAL(&s_mux);
     return true;
 }
+// peek 只读快照，不改变 dirty 标记，适合 UI/云端状态查询。
 bool app_task_peek_snapshot(app_task_snapshot_t *out)
 {
     if (out == NULL)
@@ -291,6 +307,7 @@ const char *app_task_state_to_text(app_task_state_t state)
     default:                           return "unknown";
     }
 }
+// 生成一行紧凑任务状态，供 HUD/主屏复用。
 void app_task_format_brief(const app_task_snapshot_t *snap, char *buf, size_t buf_len)
 {
     if (snap == NULL || buf == NULL || buf_len == 0U)

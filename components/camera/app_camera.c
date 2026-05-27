@@ -23,6 +23,10 @@
 #if SOC_PPA_SUPPORTED
 #include "driver/ppa.h"
 #endif
+
+// 摄像头预览模块：V4L2 USERPTR 取帧，PPA/CPU 缩放到固定 LVGL canvas，
+// 同时按路由把抽样帧提交给 AI、AprilTag 和抓图保存。
+
 #define CAMERA_NUM_BUFS          4
 #define STAGE_NUM_BUFS           5
 #define ALIGN_UP(num, align)     (((num) + ((align) - 1)) & ~((align) - 1))
@@ -45,6 +49,7 @@ static lv_obj_t *s_camera_canvas = NULL;
 static size_t s_cache_line_size = 0;
 static uint8_t *s_cam_buf[CAMERA_NUM_BUFS] = {0};
 static size_t s_cam_buf_size = 0;
+// stage buffer 是相机回调和 LVGL 显示任务之间的轻量多缓冲队列。
 static uint8_t *s_stage_buf[STAGE_NUM_BUFS] = {0};
 static uint8_t *s_ui_canvas_buf = NULL;
 static uint32_t s_disp_buf_size = 0;
@@ -69,6 +74,7 @@ static uint32_t s_stage_drop_count = 0;
 #if SOC_PPA_SUPPORTED
 static ppa_client_handle_t s_ppa_srm_handle = NULL;
 #endif
+// 对齐到 cache line 后同步，避免 PSRAM/DMA 缓存一致性问题。
 static esp_err_t app_camera_msync_aligned(void *addr, size_t size, int flags)
 {
     if (addr == NULL || size == 0)
@@ -92,6 +98,7 @@ static inline esp_err_t app_camera_msync_c2m(void *addr, size_t size)
         ESP_CACHE_MSYNC_FLAG_DIR_C2M |
         ESP_CACHE_MSYNC_FLAG_INVALIDATE);
 }
+// 优先按请求能力分配，DMA 不可用时退回 cache-aligned PSRAM。
 static void *app_camera_aligned_calloc(size_t size, uint32_t caps, const char *name)
 {
     void *ptr = heap_caps_aligned_calloc(s_cache_line_size, 1, size, caps);
@@ -111,6 +118,7 @@ static lv_obj_t *app_get_active_screen(void)
     return lv_scr_act();
 #endif
 }
+// 计算等比例缩放后的预览尺寸，保持画面不拉伸。
 static void app_camera_preview_calc_aspect_fit(uint32_t src_w,
     uint32_t src_h,
     uint32_t dst_w,
@@ -141,6 +149,7 @@ static void app_camera_preview_calc_aspect_fit(uint32_t src_w,
         *out_w = (uint32_t)(dst_h * src_aspect);
     }
 }
+// CPU fallback 缩放路径：最近邻采样到屏幕中央区域。
 static esp_err_t app_camera_preview_scale_rgb565_cpu(const uint8_t *in_buf,
     uint32_t in_width,
     uint32_t in_height,
@@ -210,6 +219,7 @@ static void app_camera_free_display_buffers(void)
     s_retained_stage_index = -1;
     s_disp_buf_size = 0;
 }
+// 分配 LVGL canvas 与 stage queue 缓冲区，均按 cache line 对齐。
 static esp_err_t app_camera_alloc_display_buffers(void)
 {
     esp_err_t ret = esp_cache_get_alignment(MALLOC_CAP_SPIRAM, &s_cache_line_size);
@@ -237,6 +247,7 @@ static esp_err_t app_camera_alloc_display_buffers(void)
     }
     return ESP_OK;
 }
+// 分配 V4L2 USERPTR 帧缓存，供摄像头驱动直接写入。
 static esp_err_t app_camera_alloc_userptr_buffers(size_t frame_size)
 {
     if (s_cache_line_size == 0)
@@ -261,6 +272,7 @@ static esp_err_t app_camera_alloc_userptr_buffers(size_t frame_size)
     ESP_LOGI(TAG, "USERPTR camera buffers ready: %d x %u bytes", CAMERA_NUM_BUFS, (unsigned)s_cam_buf_size);
     return ESP_OK;
 }
+// 创建固定尺寸 canvas；之后只切换 buffer 指针，不反复创建对象。
 static esp_err_t app_camera_create_canvas(void)
 {
     if (s_camera_canvas != NULL)
@@ -289,6 +301,7 @@ static esp_err_t app_camera_create_canvas(void)
     return ESP_OK;
 }
 #if SOC_PPA_SUPPORTED
+// 注册 PPA SRM 客户端，用硬件完成缩放/旋转。
 static void app_ppa_init(void)
 {
     if (s_ppa_srm_handle)
@@ -304,6 +317,7 @@ static void app_ppa_init(void)
         ESP_LOGE(TAG, "ppa_register_client failed: 0x%x", ret);
     }
 }
+// 清理预览上下或左右黑边，避免上一帧残留。
 static esp_err_t app_camera_clear_letterbox(uint8_t *out_buf,
     uint32_t out_width,
     uint32_t out_height)
@@ -364,6 +378,7 @@ static esp_err_t app_camera_clear_letterbox(uint8_t *out_buf,
     }
     return ESP_OK;
 }
+// 只有预览尺寸变化时才重刷黑边，减少每帧 memset 开销。
 static esp_err_t app_camera_prepare_stage_background(int stage_index,
     uint8_t *out_buf,
     uint32_t out_width,
@@ -386,6 +401,7 @@ static esp_err_t app_camera_prepare_stage_background(int stage_index,
     }
     return ret;
 }
+// PPA 缩放/旋转入口，输出固定到整屏 RGB565 stage buffer。
 static esp_err_t app_image_process_scale_crop(uint8_t *in_buf,
     uint32_t in_width,
     uint32_t in_height,
@@ -452,6 +468,7 @@ static void app_camera_calc_preview_fit(uint32_t camera_width,
     }
 }
 #endif
+// stage queue 只保留最新待显示帧，显示跟不上时主动丢帧。
 static bool app_camera_has_pending_stage(void)
 {
     bool has_pending = false;
@@ -460,6 +477,7 @@ static bool app_camera_has_pending_stage(void)
     taskEXIT_CRITICAL(&s_display_mux);
     return has_pending;
 }
+// 申请一个空闲 stage buffer 供相机回调写入。
 static int app_camera_pick_writable_stage_buffer(void)
 {
     int idx = -1;
@@ -475,6 +493,7 @@ static int app_camera_pick_writable_stage_buffer(void)
     taskEXIT_CRITICAL(&s_display_mux);
     return idx;
 }
+// 发布新帧；若旧 ready 帧还未显示，则丢弃旧帧保证低延迟。
 static void app_camera_publish_stage_buffer(int ready_index)
 {
     taskENTER_CRITICAL(&s_display_mux);
@@ -540,6 +559,7 @@ static void app_camera_release_stage_buffer(int buf_index)
     }
     taskEXIT_CRITICAL(&s_display_mux);
 }
+// LVGL 正在使用的上一帧需要保留一个周期，避免 canvas 指针悬空。
 static void app_camera_mark_displayed_stage_buffer(int buf_index)
 {
     if (buf_index < 0 || buf_index >= STAGE_NUM_BUFS)
@@ -568,6 +588,7 @@ static void app_camera_mark_displayed_stage_buffer(int buf_index)
     s_displayed_stage_index = buf_index;
     taskEXIT_CRITICAL(&s_display_mux);
 }
+// 显示任务负责在 LVGL 锁内切换 canvas buffer，避免相机回调阻塞 UI。
 static void app_camera_display_task(void *arg)
 {
     (void)arg;
@@ -620,6 +641,7 @@ static void app_camera_display_task(void *arg)
         }
     }
 }
+// V4L2 每帧回调：抽样提交识别模块，并生成一帧可显示的 stage buffer。
 static void app_camera_frame_cb(uint8_t *camera_buf,
     uint8_t camera_buf_index,
     uint32_t camera_buf_hes,
@@ -647,6 +669,7 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
     app_camera_route_maybe_log_diag(s_frame_count, s_display_count, s_stage_drop_count);
     bool camera_synced_for_cpu = false;
     app_camera_frame_route_t route = app_camera_route_select();
+    // 只有识别/抓图需要 CPU 读帧时才做 M2C cache 同步。
     if (route.ai_due || route.vision_due || route.capture_due)
     {
         if (app_camera_msync_m2c(camera_buf, camera_buf_len) == ESP_OK)
@@ -678,6 +701,7 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
             }
         }
     }
+    // 显示端已有待处理帧时直接丢弃当前预览帧，保证实时性优先。
     if (app_camera_has_pending_stage())
     {
         s_stage_drop_count++;
@@ -704,6 +728,7 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
             app_camera_abandon_stage_buffer(stage_index);
             return;
         }
+        // 首选 PPA 硬件缩放；失败后只记录一次日志并退回 CPU 路径。
         ppa_ret = app_image_process_scale_crop(camera_buf,
             camera_buf_hes,
             camera_buf_ves,
@@ -757,6 +782,7 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
     }
     app_camera_publish_stage_buffer(stage_index);
 }
+// 启动显示任务，PSRAM 栈失败时自动退回内部 RAM 栈。
 static esp_err_t app_camera_start_display_task(void)
 {
     if (s_display_task_handle)
@@ -794,6 +820,7 @@ static esp_err_t app_camera_start_display_task(void)
 #endif
     return (ret == pdPASS) ? ESP_OK : ESP_FAIL;
 }
+// 初始化摄像头预览链路的静态资源和回调。
 esp_err_t app_camera_init(void)
 {
     if (s_camera_inited)
@@ -841,6 +868,7 @@ esp_err_t app_camera_init(void)
     return ESP_OK;
 #endif
 }
+// 打开视频设备、设置识别曝光参数并启动流任务。
 esp_err_t app_camera_preview_start(void)
 {
     if (!s_camera_inited)
@@ -901,6 +929,7 @@ esp_err_t app_camera_preview_start(void)
     ESP_LOGI(TAG, "camera preview started");
     return ESP_OK;
 }
+// 等待首帧真正交给 LVGL，用于启动页结束条件。
 bool app_camera_wait_first_frame(uint32_t timeout_ms)
 {
     const uint32_t start_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
@@ -918,6 +947,7 @@ bool app_camera_wait_first_frame(uint32_t timeout_ms)
     }
     return true;
 }
+// 暂停只阻止帧处理，不销毁摄像头资源，便于任务恢复时快速继续。
 void app_camera_pause(void)
 {
     s_camera_paused = true;

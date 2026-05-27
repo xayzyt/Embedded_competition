@@ -17,6 +17,9 @@
 #include "esp_video_init.h"
 #include "bsp/esp-bsp.h"
 #include "app_video.h"
+
+// V4L2 视频封装：负责格式协商、帧缓存注册、取还帧和流任务恢复。
+
 static const char *TAG = "app_video";
 #define MAX_BUFFER_COUNT              6
 #define MIN_BUFFER_COUNT              2
@@ -38,6 +41,8 @@ typedef struct {
     bool first_frame_logged;
 } app_video_t;
 static app_video_t s_video;
+
+// 将 fourcc 整数转成可读字符串，便于日志检查实际像素格式。
 static const char *fourcc_to_str(uint32_t fourcc, char out[5])
 {
     out[0] = (char)(fourcc & 0xFF);
@@ -47,6 +52,7 @@ static const char *fourcc_to_str(uint32_t fourcc, char out[5])
     out[4] = '\0';
     return out;
 }
+// 按控件范围和步进裁剪目标值，避免 VIDIOC_S_EXT_CTRLS 被驱动拒绝。
 static int32_t app_video_clamp_ctrl_value(const struct v4l2_query_ext_ctrl *qctrl, int64_t value)
 {
     int64_t min_value = qctrl->minimum;
@@ -66,6 +72,7 @@ static int32_t app_video_clamp_ctrl_value(const struct v4l2_query_ext_ctrl *qctr
     }
     return (int32_t)value;
 }
+// 设置单个 V4L2 扩展控件，成功时返回驱动实际采用的值。
 static esp_err_t app_video_set_ext_ctrl_value(int video_fd,
     uint32_t ctrl_class,
     uint32_t ctrl_id,
@@ -98,6 +105,7 @@ static esp_err_t app_video_set_ext_ctrl_value(int video_fd,
     }
     return ESP_OK;
 }
+// 识别场景使用较短曝光和受控增益，减少运动模糊与过曝。
 esp_err_t app_video_apply_recognition_profile(int video_fd, uint32_t exposure_us, uint8_t gain_percent)
 {
     if (video_fd < 0 || exposure_us == 0)
@@ -140,6 +148,7 @@ esp_err_t app_video_apply_recognition_profile(int video_fd, uint32_t exposure_us
         applied_gain);
     return first_error;
 }
+// 打开并配置视频设备；首选分辨率失败时可回退到传感器默认尺寸。
 static int app_video_open_configured(char *dev,
     video_fmt_t init_fmt,
     uint32_t preferred_width,
@@ -191,6 +200,7 @@ static int app_video_open_configured(char *dev,
              (default_format.fmt.pix.height != preferred_height)));
     if (need_set_format)
     {
+        // 先尝试业务希望的 RGB565/分辨率，失败后按 allow_fallback 决定是否降级。
         struct v4l2_format request_format = {
             .type = type,
             .fmt.pix.width = has_preferred_size ? preferred_width : default_format.fmt.pix.width,
@@ -287,6 +297,7 @@ int app_video_open_preferred(char *dev,
 {
     return app_video_open_configured(dev, init_fmt, preferred_width, preferred_height, true);
 }
+// 配置 MMAP 或 USERPTR 缓冲区，并预先 QBUF 交给驱动填充。
 esp_err_t app_video_set_bufs(int video_fd, uint32_t fb_num, const void **fb)
 {
     if (fb_num > MAX_BUFFER_COUNT)
@@ -359,6 +370,7 @@ uint32_t app_video_get_buf_size(void)
     }
     return (uint32_t)(s_video.camera_buf_hes * s_video.camera_buf_ves * 2);
 }
+// 从驱动取出一帧。
 static inline esp_err_t video_receive_video_frame(int video_fd)
 {
     memset(&s_video.v4l2_buf, 0, sizeof(s_video.v4l2_buf));
@@ -379,6 +391,7 @@ static inline esp_err_t video_receive_video_frame(int video_fd)
     }
     return ESP_OK;
 }
+// 把当前帧交给业务回调处理。
 static inline void video_operation_video_frame(void)
 {
     const uint8_t buf_index = s_video.v4l2_buf.index;
@@ -392,6 +405,7 @@ static inline void video_operation_video_frame(void)
             s_video.v4l2_buf.bytesused ? s_video.v4l2_buf.bytesused : s_video.camera_buf_size);
     }
 }
+// 业务处理完后重新入队，让驱动继续复用该帧缓存。
 static inline esp_err_t video_free_video_frame(int video_fd)
 {
     if (s_video.camera_mem_mode == V4L2_MEMORY_USERPTR)
@@ -427,12 +441,14 @@ static inline esp_err_t video_stream_stop(int video_fd)
     }
     return ESP_OK;
 }
+// 连续 DQBUF/QBUF 异常时重启流，适配摄像头偶发卡住的情况。
 static void video_stream_restart(int video_fd)
 {
     video_stream_stop(video_fd);
     vTaskDelay(pdMS_TO_TICKS(20));
     video_stream_start(video_fd);
 }
+// 视频流任务：DQBUF -> 回调 -> QBUF，失败达到阈值后自动恢复。
 static void video_stream_task(void *arg)
 {
     const int video_fd = *((int *)arg);
@@ -460,6 +476,7 @@ static void video_stream_task(void *arg)
         error_count = 0;
     }
 }
+// 开启 V4L2 流并创建读取任务。
 esp_err_t app_video_stream_task_start(int video_fd, int core_id)
 {
     if (video_stream_start(video_fd) != ESP_OK)

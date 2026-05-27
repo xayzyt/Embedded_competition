@@ -16,6 +16,9 @@
 #include "app_task.h"
 #include "app_ui.h"
 #include "app_vision.h"
+
+// 控制主状态机：融合任务状态、AI 门控、AprilTag 对接判定和 CH32 执行状态。
+
 static const char *TAG = "app_ctrl";
 #define CTRL_TASK_STACK_SIZE            (7 * 1024)
 #define CTRL_TASK_PRIORITY              5
@@ -45,6 +48,7 @@ typedef struct {
     uint32_t retrigger_deadline_ms;
     char notice[96];
 } app_ctrl_runtime_t;
+// 主循环使用的只读快照，避免长时间持有临界区锁。
 typedef struct {
     bool ch32_ready;
     bool dock_busy;
@@ -64,6 +68,7 @@ typedef struct {
 static TaskHandle_t s_ctrl_task = NULL;
 static portMUX_TYPE s_ctrl_mux = portMUX_INITIALIZER_UNLOCKED;
 static app_ctrl_runtime_t s_rt = {0};
+// 任务重新进入等待/结束/异常时重置 AI 门控，下一单重新确认无人机。
 static void app_ctrl_on_task_event(app_task_event_t event,
     const app_task_snapshot_t *snap,
     void *user_ctx)
@@ -92,6 +97,7 @@ static inline bool app_ctrl_deadline_active(uint32_t deadline_ms, uint32_t now_m
 {
     return (deadline_ms != 0U) && ((int32_t)(deadline_ms - now_ms) > 0);
 }
+// 临时提示会覆盖常规状态一小段时间，便于用户看到关键动作结果。
 static void app_ctrl_set_notice_locked(const char *text, uint32_t hold_ms)
 {
     if (text == NULL)
@@ -113,6 +119,7 @@ static void app_ctrl_start_retrigger_cooldown_locked(uint32_t hold_ms)
 {
     s_rt.retrigger_deadline_ms = app_ctrl_now_ms() + hold_ms;
 }
+// 货物等待是软 busy 状态：托盘伸出后不再按普通动作超时处理。
 static void app_ctrl_hold_waiting_cargo_locked(void)
 {
     s_rt.cargo_wait_window_seen = true;
@@ -122,6 +129,7 @@ static void app_ctrl_hold_waiting_cargo_locked(void)
     s_rt.busy_deadline_ms = 0;
     app_ctrl_set_notice_locked("dock: waiting cargo", CTRL_NOTICE_SHOW_MS);
 }
+// 将 CH32 状态帧折叠到控制器运行态，必须在 s_ctrl_mux 内调用。
 static void app_ctrl_apply_proto_msg_locked(const app_ch32_line_t *msg)
 {
     if (msg == NULL)
@@ -154,6 +162,7 @@ static void app_ctrl_apply_proto_msg_locked(const app_ch32_line_t *msg)
             s_rt.last_proto_stage = msg->proto_stage;
             app_ctrl_set_notice_locked(app_ctrl_proto_stage_status_text(msg->proto_stage), CTRL_NOTICE_SHOW_MS);
         }
+        // 等待货物窗口内的 TIMEOUT/WEIGHT 属于业务等待，不当作硬故障。
         if ((msg->proto_detail != APP_CH32_ERR_NONE) || (msg->proto_stage == APP_CH32_STAGE_FAULT))
         {
             if (app_ctrl_is_soft_waiting_cargo_error(prev_proto_stage,
@@ -204,6 +213,7 @@ static void app_ctrl_apply_proto_msg_locked(const app_ch32_line_t *msg)
         }
     }
 }
+// 读取控制运行态快照，主循环在锁外完成较耗时操作。
 static void app_ctrl_read_loop_state(app_ctrl_loop_state_t *out)
 {
     if (out == NULL)
@@ -229,6 +239,7 @@ static void app_ctrl_read_loop_state(app_ctrl_loop_state_t *out)
     strlcpy(out->notice, s_rt.notice, sizeof(out->notice));
     taskEXIT_CRITICAL(&s_ctrl_mux);
 }
+// 任务目标 ID 变化后同步到对接判定器。
 static void app_ctrl_apply_task_target_if_needed(const app_task_snapshot_t *task,
     uint16_t applied_target_id)
 {
@@ -249,6 +260,7 @@ static void app_ctrl_apply_task_target_if_needed(const app_task_snapshot_t *task
     taskEXIT_CRITICAL(&s_ctrl_mux);
     ESP_LOGI(TAG, "applied target id => %u", (unsigned)task->target_id);
 }
+// CH32 未 ready 时周期性探测，避免每轮主循环都占用 UART。
 static void app_ctrl_probe_ready_if_needed(uint32_t now_ms,
     bool ch32_ready,
     uint32_t last_probe_ms)
@@ -292,6 +304,7 @@ static void app_ctrl_set_waiting_cargo_local(bool *dock_busy,
         *busy_deadline_ms = 0;
     }
 }
+// 普通动作 busy 超时会转故障；货物等待窗口则转成本地 waiting cargo。
 static void app_ctrl_handle_busy_timeout(uint32_t now_ms,
     app_task_snapshot_t *task,
     bool *dock_busy,
@@ -365,6 +378,7 @@ static void app_ctrl_hold_soft_cargo_wait_if_needed(bool *dock_busy,
         proto_error,
         busy_deadline_ms);
 }
+// 视觉 ready 后先标记认证通过，随后才能自动触发对接命令。
 static void app_ctrl_mark_auth_if_ready(app_task_snapshot_t *task,
     const app_dock_judge_result_t *dock,
     bool ready_level)
@@ -380,6 +394,7 @@ static void app_ctrl_mark_auth_if_ready(app_task_snapshot_t *task,
         app_ctrl_set_notice("auth passed / ready to dock", CTRL_NOTICE_SHOW_MS);
     }
 }
+// ready 上升沿或认证后重试时，尝试向 CH32 发送 START_DOCK。
 static void app_ctrl_try_auto_dock(uint32_t now_ms,
     const app_dock_judge_result_t *dock,
     app_task_snapshot_t *task,
@@ -462,6 +477,7 @@ static void app_ctrl_try_auto_dock(uint32_t now_ms,
     (void)cargo_wait_window_seen;
 #endif
 }
+// 根据 CH32 busy 边沿推进任务状态：开始对接、完成或故障。
 static void app_ctrl_update_task_for_busy_transition(bool prev_dock_busy,
     bool dock_busy,
     uint8_t proto_error,
@@ -499,6 +515,7 @@ static void app_ctrl_update_task_for_busy_transition(bool prev_dock_busy,
         (void)app_task_get_snapshot(task);
     }
 }
+// 汇总控制状态、视觉结果和任务信息后刷新 UI。
 static void app_ctrl_publish_ui(uint32_t now_ms,
     const app_vision_result_t *vision,
     const app_dock_judge_result_t *dock,
@@ -549,6 +566,7 @@ static void app_ctrl_publish_ui(uint32_t now_ms,
     }
     app_ui_update_control_state(status, task_brief, detail, vision, dock);
 }
+// CH32 回调入口，由 UART 接收任务调用。
 void app_ctrl_on_ch32_line(const app_ch32_line_t *msg, void *user_ctx)
 {
     (void)user_ctx;
@@ -560,6 +578,7 @@ void app_ctrl_on_ch32_line(const app_ch32_line_t *msg, void *user_ctx)
     app_ctrl_apply_proto_msg_locked(msg);
     taskEXIT_CRITICAL(&s_ctrl_mux);
 }
+// 控制主循环：轮询视觉/任务快照，执行门控、超时、自动对接和 UI 发布。
 static void app_ctrl_task(void *arg)
 {
     (void)arg;
@@ -576,6 +595,7 @@ static void app_ctrl_task(void *arg)
         (void)app_vision_get_latest_result(&vision);
         (void)app_dock_judge_process(&vision, &dock);
         (void)app_task_get_snapshot(&task);
+        // AI 确认无人机前关闭 AprilTag，避免误识别背景标签触发对接。
         const bool apriltag_enabled = task.active &&
                                       (task.state == APP_TASK_STATE_WAIT_APPROACH) &&
                                       app_drone_ai_is_drone_confirmed();
@@ -654,6 +674,7 @@ static void app_ctrl_task(void *arg)
         vTaskDelay(pdMS_TO_TICKS(CTRL_POLL_MS));
     }
 }
+// 初始化控制器运行态并注册任务事件回调。
 esp_err_t app_ctrl_init(void)
 {
     if (s_rt.inited)
@@ -674,6 +695,7 @@ esp_err_t app_ctrl_init(void)
     ESP_LOGI(TAG, "ctrl init done (auto_dock=%d)", CTRL_AUTO_DOCK_ENABLE);
     return ESP_OK;
 }
+// 创建 pinned 控制任务，固定到指定核心减少调度抖动。
 esp_err_t app_ctrl_start(void)
 {
     if (!s_rt.inited)

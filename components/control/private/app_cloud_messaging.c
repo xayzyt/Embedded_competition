@@ -9,7 +9,10 @@
 #include "esp_log.h"
 #include "app_cloud_cmd.h"
 
+// MQTT 消息层：负责云端命令解析、ACK 回复和任务状态 JSON 上报。
+
 static const char *TAG = "app_cloud";
+// cJSON 添加字段的轻量包装，让上报构造可以串联判断内存失败。
 static bool app_cloud_json_add_string(cJSON *root, const char *key, const char *value)
 {
     return cJSON_AddStringToObject(root, key, (value != NULL) ? value : "") != NULL;
@@ -18,6 +21,7 @@ static bool app_cloud_json_add_number(cJSON *root, const char *key, double value
 {
     return cJSON_AddNumberToObject(root, key, value) != NULL;
 }
+// 订单名未下发时，用订单号后 6 位生成一个现场可读名称。
 static void app_cloud_make_order_name(const char *order_id, char *out, size_t out_size)
 {
     if (out == NULL || out_size == 0U)
@@ -82,6 +86,7 @@ static esp_err_t app_cloud_publish_raw(const char *topic,
     const char *payload,
     int qos,
     int retain);
+// JSON 对象发布后由调用者继续负责释放 root。
 static esp_err_t app_cloud_publish_json(const char *topic, cJSON *root, int retain)
 {
     if (topic == NULL || root == NULL)
@@ -97,6 +102,7 @@ static esp_err_t app_cloud_publish_json(const char *topic, cJSON *root, int reta
     cJSON_free(json);
     return ret;
 }
+// MQTT 原始发布，连接不可用时返回状态错误供上层稍后重发。
 static esp_err_t app_cloud_publish_raw(const char *topic,
     const char *payload,
     int qos,
@@ -119,6 +125,7 @@ static esp_err_t app_cloud_publish_raw(const char *topic,
     ESP_LOGD(TAG, "mqtt tx topic=%s msg_id=%d", topic, msg_id);
     return ESP_OK;
 }
+// 给云端命令回复 ACK，包含请求/订单信息和执行结果码。
 static esp_err_t app_cloud_publish_ack(const app_cloud_cmd_t *cmd,
     int code,
     const char *msg,
@@ -158,6 +165,7 @@ static esp_err_t app_cloud_publish_ack(const app_cloud_cmd_t *cmd,
     cJSON_Delete(root);
     return ret;
 }
+// 发布任务状态快照；retain=1 让云端/调试端重连后能看到最近状态。
 void app_cloud_publish_task_snapshot_internal(const app_task_snapshot_t *snap)
 {
     if (snap == NULL)
@@ -200,6 +208,7 @@ void app_cloud_publish_task_snapshot_internal(const app_task_snapshot_t *snap)
         ESP_LOGW(TAG, "task snapshot not sent yet: %s", esp_err_to_name(ret));
     }
 }
+// 主动发布当前任务状态，天气策略变化或命令拒绝时调用。
 void app_cloud_publish_current_state(void)
 {
     app_task_snapshot_t snap = {0};
@@ -215,6 +224,7 @@ void app_cloud_publish_current_state(void)
         app_cloud_publish_task_snapshot_internal(&s_cloud.last_snapshot);
     }
 }
+// 任务模块事件回调：缓存最新快照并推送到 MQTT。
 void app_cloud_on_task_event(app_task_event_t event,
     const app_task_snapshot_t *snap,
     void *user_ctx)
@@ -234,6 +244,7 @@ static esp_err_t app_cloud_receive_set_target(uint16_t target_id)
     ESP_LOGI(TAG, "cloud rx: set_target=%u", (unsigned)target_id);
     return app_task_set_target_id(target_id, true);
 }
+// 处理云端 start_task；天气保护期间拒绝接单并保持原订单上下文。
 static esp_err_t app_cloud_receive_start_task(const app_cloud_cmd_t *cmd)
 {
     if (cmd == NULL)
@@ -282,6 +293,7 @@ static esp_err_t app_cloud_receive_cancel(void)
     app_task_cancel("cancelled by cloud");
     return ESP_OK;
 }
+// MQTT cmd 负载入口，按 cmd 字段分发到对应业务处理。
 static esp_err_t app_cloud_handle_command(const char *payload, size_t payload_len)
 {
     char json[APP_CLOUD_CMD_PAYLOAD_LEN];
@@ -341,6 +353,7 @@ static esp_err_t app_cloud_handle_command(const char *payload, size_t payload_le
     (void)app_cloud_publish_ack(&cmd, -2, "unknown_cmd", cmd.target_id);
     return ESP_ERR_NOT_SUPPORTED;
 }
+// ESP MQTT 事件里的 topic/data 不是 NUL 结尾，先复制成普通字符串。
 static int app_cloud_copy_event_slice(char *dst, size_t dst_size, const char *src, int src_len)
 {
     if ((dst == NULL) || (dst_size == 0U))
@@ -363,6 +376,7 @@ static int app_cloud_copy_event_slice(char *dst, size_t dst_size, const char *sr
     dst[copy_len] = '\0';
     return copy_len;
 }
+// MQTT DATA 事件入口，只处理本设备的 cmd 主题。
 void app_cloud_handle_mqtt_data_event(esp_mqtt_event_handle_t event)
 {
     if (event == NULL || event->topic == NULL || event->data == NULL)
