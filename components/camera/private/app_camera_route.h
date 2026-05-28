@@ -25,7 +25,13 @@ void app_camera_route_note_capture_submit(void);
 // 每隔固定时间输出相机、AI、视觉和抓图吞吐情况。
 void app_camera_route_maybe_log_diag(uint32_t frame_count,
     uint32_t display_count,
-    uint32_t stage_drop_count);
+    uint32_t stage_drop_count,
+    uint32_t bad_len_count,
+    uint32_t bad_preview_count,
+    uint32_t ppa_guard_count,
+    uint32_t cpu_fallback_count,
+    uint32_t raw_bad_count,
+    uint32_t canvas_bad_count);
 
 #ifdef __cplusplus
 }

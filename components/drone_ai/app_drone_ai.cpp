@@ -37,8 +37,9 @@ static const char *TAG = "drone_ai";
 #define DRONE_AI_TASK_STACK_SIZE      (24 * 1024)
 #define DRONE_AI_TASK_PRIORITY        0
 #define DRONE_AI_TASK_CORE_ID         1
-#define DRONE_AI_THRESHOLD            0.70f
-#define DRONE_AI_CONFIRM_HITS         3U
+#define DRONE_AI_THRESHOLD            0.90f
+#define DRONE_AI_CONFIRM_HITS         5U
+#define DRONE_AI_MISS_DECAY           1U
 #define DRONE_AI_MALLOC_PSRAM_LIMIT   0U
 #define DRONE_AI_STATUS_INTERVAL_MS   1000U
 #define DRONE_AI_LOG_INTERVAL         10U
@@ -571,7 +572,14 @@ static void app_drone_ai_update_result(uint32_t frame_seq,
         }
         else
         {
-            s_hit_count = 0;
+            if (s_hit_count > DRONE_AI_MISS_DECAY)
+            {
+                s_hit_count -= DRONE_AI_MISS_DECAY;
+            }
+            else
+            {
+                s_hit_count = 0;
+            }
         }
     }
     latest.hit_count = s_hit_count;
@@ -736,9 +744,10 @@ esp_err_t app_drone_ai_init(void)
     }
 
     ESP_LOGI(TAG,
-             "drone ai init done (threshold=%.2f hits=%u)",
+             "drone ai init done (threshold=%.2f hits=%u miss_decay=%u)",
              (double)DRONE_AI_THRESHOLD,
-             (unsigned)DRONE_AI_CONFIRM_HITS);
+             (unsigned)DRONE_AI_CONFIRM_HITS,
+             (unsigned)DRONE_AI_MISS_DECAY);
     return ESP_OK;
 }
 

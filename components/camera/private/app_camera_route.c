@@ -33,6 +33,12 @@ typedef struct {
     uint32_t diag_last_ai_infer_count;
     uint32_t diag_last_ai_drop_count;
     uint32_t diag_last_vision_drop_count;
+    uint32_t diag_last_bad_len_count;
+    uint32_t diag_last_bad_preview_count;
+    uint32_t diag_last_ppa_guard_count;
+    uint32_t diag_last_cpu_fallback_count;
+    uint32_t diag_last_raw_bad_count;
+    uint32_t diag_last_canvas_bad_count;
 } app_camera_route_runtime_t;
 
 static app_camera_route_runtime_t s_route = {0};
@@ -123,7 +129,13 @@ void app_camera_route_note_capture_submit(void)
 
 void app_camera_route_maybe_log_diag(uint32_t frame_count,
     uint32_t display_count,
-    uint32_t stage_drop_count)
+    uint32_t stage_drop_count,
+    uint32_t bad_len_count,
+    uint32_t bad_preview_count,
+    uint32_t ppa_guard_count,
+    uint32_t cpu_fallback_count,
+    uint32_t raw_bad_count,
+    uint32_t canvas_bad_count)
 {
     const uint32_t now_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
     app_drone_ai_stats_t ai = {0};
@@ -143,6 +155,12 @@ void app_camera_route_maybe_log_diag(uint32_t frame_count,
         s_route.diag_last_ai_infer_count = ai.inferred;
         s_route.diag_last_ai_drop_count = ai.dropped;
         s_route.diag_last_vision_drop_count = vision_drop;
+        s_route.diag_last_bad_len_count = bad_len_count;
+        s_route.diag_last_bad_preview_count = bad_preview_count;
+        s_route.diag_last_ppa_guard_count = ppa_guard_count;
+        s_route.diag_last_cpu_fallback_count = cpu_fallback_count;
+        s_route.diag_last_raw_bad_count = raw_bad_count;
+        s_route.diag_last_canvas_bad_count = canvas_bad_count;
         return;
     }
     if ((now_ms - s_route.diag_last_ms) < CAMERA_DIAG_INTERVAL_MS)
@@ -150,7 +168,7 @@ void app_camera_route_maybe_log_diag(uint32_t frame_count,
         return;
     }
     ESP_LOGI(TAG,
-        "diag 2s: capture=%lu display=%lu stage_drop=%lu ai_submit=%lu ai_infer=%lu ai_drop=%lu vision_submit=%lu vision_drop=%lu save_submit=%lu confirmed=%d",
+        "diag 2s: capture=%lu display=%lu stage_drop=%lu ai_submit=%lu ai_infer=%lu ai_drop=%lu vision_submit=%lu vision_drop=%lu save_submit=%lu confirmed=%d bad_len=%lu bad_preview=%lu ppa_guard=%lu cpu_fallback=%lu raw_bad=%lu canvas_bad=%lu",
         (unsigned long)(frame_count - s_route.diag_last_frame_count),
         (unsigned long)(display_count - s_route.diag_last_display_count),
         (unsigned long)(stage_drop_count - s_route.diag_last_stage_drop_count),
@@ -160,7 +178,13 @@ void app_camera_route_maybe_log_diag(uint32_t frame_count,
         (unsigned long)(s_route.vision_submit_count - s_route.diag_last_vision_submit_count),
         (unsigned long)(vision_drop - s_route.diag_last_vision_drop_count),
         (unsigned long)(s_route.capture_submit_count - s_route.diag_last_capture_submit_count),
-        (int)ai.confirmed);
+        (int)ai.confirmed,
+        (unsigned long)(bad_len_count - s_route.diag_last_bad_len_count),
+        (unsigned long)(bad_preview_count - s_route.diag_last_bad_preview_count),
+        (unsigned long)(ppa_guard_count - s_route.diag_last_ppa_guard_count),
+        (unsigned long)(cpu_fallback_count - s_route.diag_last_cpu_fallback_count),
+        (unsigned long)(raw_bad_count - s_route.diag_last_raw_bad_count),
+        (unsigned long)(canvas_bad_count - s_route.diag_last_canvas_bad_count));
     s_route.diag_last_ms = now_ms;
     s_route.diag_last_frame_count = frame_count;
     s_route.diag_last_display_count = display_count;
@@ -171,4 +195,10 @@ void app_camera_route_maybe_log_diag(uint32_t frame_count,
     s_route.diag_last_ai_infer_count = ai.inferred;
     s_route.diag_last_ai_drop_count = ai.dropped;
     s_route.diag_last_vision_drop_count = vision_drop;
+    s_route.diag_last_bad_len_count = bad_len_count;
+    s_route.diag_last_bad_preview_count = bad_preview_count;
+    s_route.diag_last_ppa_guard_count = ppa_guard_count;
+    s_route.diag_last_cpu_fallback_count = cpu_fallback_count;
+    s_route.diag_last_raw_bad_count = raw_bad_count;
+    s_route.diag_last_canvas_bad_count = canvas_bad_count;
 }
