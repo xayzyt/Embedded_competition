@@ -35,10 +35,12 @@ static const char *TAG = "drone_ai";
 #define DRONE_AI_RGB_BYTES            (DRONE_AI_INPUT_PIXELS * DRONE_AI_INPUT_CH)
 #define DRONE_AI_SLOT_COUNT           2U
 #define DRONE_AI_TASK_STACK_SIZE      (24 * 1024)
-#define DRONE_AI_TASK_PRIORITY        0
+#define DRONE_AI_TASK_PRIORITY        6
 #define DRONE_AI_TASK_CORE_ID         1
-#define DRONE_AI_THRESHOLD            0.90f
-#define DRONE_AI_CONFIRM_HITS         5U
+#define DRONE_AI_THRESHOLD            0.85f
+#define DRONE_AI_STRONG_THRESHOLD     0.98f
+#define DRONE_AI_STRONG_HITS          2U
+#define DRONE_AI_CONFIRM_HITS         3U
 #define DRONE_AI_MISS_DECAY           1U
 #define DRONE_AI_MALLOC_PSRAM_LIMIT   0U
 #define DRONE_AI_STATUS_INTERVAL_MS   1000U
@@ -561,9 +563,14 @@ static void app_drone_ai_update_result(uint32_t frame_seq,
     {
         if (latest.label == APP_DRONE_AI_CLASS_DRONE && drone_score >= DRONE_AI_THRESHOLD)
         {
-            if (s_hit_count < 255U)
+            const uint8_t add_hits = (drone_score >= DRONE_AI_STRONG_THRESHOLD) ? DRONE_AI_STRONG_HITS : 1U;
+            if (s_hit_count <= (uint8_t)(255U - add_hits))
             {
-                s_hit_count++;
+                s_hit_count += add_hits;
+            }
+            else
+            {
+                s_hit_count = 255U;
             }
             if (s_hit_count >= DRONE_AI_CONFIRM_HITS)
             {
@@ -744,10 +751,13 @@ esp_err_t app_drone_ai_init(void)
     }
 
     ESP_LOGI(TAG,
-             "drone ai init done (threshold=%.2f hits=%u miss_decay=%u)",
+             "drone ai init done (threshold=%.2f hits=%u strong=%.2f+%u miss_decay=%u prio=%u)",
              (double)DRONE_AI_THRESHOLD,
              (unsigned)DRONE_AI_CONFIRM_HITS,
-             (unsigned)DRONE_AI_MISS_DECAY);
+             (double)DRONE_AI_STRONG_THRESHOLD,
+             (unsigned)DRONE_AI_STRONG_HITS,
+             (unsigned)DRONE_AI_MISS_DECAY,
+             (unsigned)DRONE_AI_TASK_PRIORITY);
     return ESP_OK;
 }
 
@@ -925,6 +935,8 @@ void app_drone_ai_get_stats(app_drone_ai_stats_t *out)
     out->submitted = s_submit_seq;
     out->inferred = s_infer_count;
     out->dropped = s_drop_count;
+    out->hit_count = s_hit_count;
+    out->confirm_hits = DRONE_AI_CONFIRM_HITS;
     out->confirmed = s_confirmed;
     taskEXIT_CRITICAL(&s_ai_mux);
 }

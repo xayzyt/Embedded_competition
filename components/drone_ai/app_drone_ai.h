@@ -11,6 +11,8 @@ typedef struct {
     uint32_t submitted;  // 已提交帧数。
     uint32_t inferred;   // 已完成推理帧数。
     uint32_t dropped;    // 忙碌时丢弃帧数。
+    uint8_t hit_count;   // 当前连续/衰减后的命中帧数。
+    uint8_t confirm_hits; // 需要达到的确认帧数。
     bool confirmed;      // 是否已确认无人机存在。
 } app_drone_ai_stats_t;
 // 初始化模型运行环境。

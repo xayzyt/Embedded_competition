@@ -374,14 +374,11 @@ static void app_ui_update_weather_sim_button_unlocked(void)
 {
     if (s_weather_sim_btn != NULL)
     {
-        lv_obj_set_style_bg_color(s_weather_sim_btn,
-            s_main_weather_simulated ? lv_color_hex(0x0F766E) : lv_color_hex(0xB91C1C),
-            0);
+        lv_obj_set_style_bg_color(s_weather_sim_btn, lv_color_hex(0xB91C1C), 0);
     }
     if (s_weather_sim_label != NULL)
     {
-        lv_label_set_text(s_weather_sim_label,
-            s_main_weather_simulated ? "恢复天气" : "天气模拟");
+        lv_label_set_text(s_weather_sim_label, "模拟天气");
         lv_obj_center(s_weather_sim_label);
     }
     if (s_weather_sim_btn != NULL)
@@ -834,7 +831,7 @@ bool app_ui_show_main_screen(void)
         lv_obj_set_style_text_color(s_weather_sim_label, lv_color_hex(0xFFFFFF), 0);
         lv_obj_set_style_text_font(s_weather_sim_label, &font_main_title_cn, 0);
         lv_obj_set_style_text_align(s_weather_sim_label, LV_TEXT_ALIGN_CENTER, 0);
-        lv_label_set_text(s_weather_sim_label, "天气模拟");
+        lv_label_set_text(s_weather_sim_label, "模拟天气");
         lv_obj_center(s_weather_sim_label);
         s_main_pickup_btn = app_ui_button_create(link_bar);
         lv_obj_set_size(s_main_pickup_btn, 116, 42);

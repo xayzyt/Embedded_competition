@@ -2,6 +2,25 @@
 #include <stdbool.h>
 #include "app_dock_types.h"
 #include "app_vision.h"
+#define APP_UI_FLOW_STEP_COUNT 4
+typedef enum {
+    APP_UI_FLOW_STEP_DRONE = 0,
+    APP_UI_FLOW_STEP_TAG,
+    APP_UI_FLOW_STEP_EXEC,
+    APP_UI_FLOW_STEP_DONE,
+} app_ui_flow_step_t;
+typedef enum {
+    APP_UI_FLOW_STATE_WAITING = 0,
+    APP_UI_FLOW_STATE_ACTIVE,
+    APP_UI_FLOW_STATE_DONE,
+    APP_UI_FLOW_STATE_ERROR,
+} app_ui_flow_state_t;
+typedef struct {
+    app_ui_flow_step_t active_step;
+    app_ui_flow_state_t step_state[APP_UI_FLOW_STEP_COUNT];
+    char headline[48];
+    char step_detail[APP_UI_FLOW_STEP_COUNT][48];
+} app_ui_flow_snapshot_t;
 // 创建全局 UI 资源和 HUD 层。
 bool app_ui_create(void);
 // 启动页显示、进度和隐藏。
@@ -21,7 +40,8 @@ void app_ui_update_control_state(const char *status,
                                  const char *vision_text,
                                  const char *dock_text,
                                  const app_vision_result_t *vision,
-                                 const app_dock_judge_result_t *dock);
+                                 const app_dock_judge_result_t *dock,
+                                 const app_ui_flow_snapshot_t *flow);
 // 主屏显示/隐藏和状态灯更新。
 bool app_ui_show_main_screen(void);
 void app_ui_hide_main_screen(void);

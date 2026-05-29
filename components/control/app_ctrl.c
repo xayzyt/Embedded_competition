@@ -515,6 +515,186 @@ static void app_ctrl_update_task_for_busy_transition(bool prev_dock_busy,
         (void)app_task_get_snapshot(task);
     }
 }
+static void app_ctrl_flow_init(app_ui_flow_snapshot_t *flow)
+{
+    if (flow == NULL)
+    {
+        return;
+    }
+    memset(flow, 0, sizeof(*flow));
+    flow->active_step = APP_UI_FLOW_STEP_DRONE;
+    for (int i = 0; i < APP_UI_FLOW_STEP_COUNT; i++) {
+        flow->step_state[i] = APP_UI_FLOW_STATE_WAITING;
+    }
+    snprintf(flow->headline, sizeof(flow->headline), "等待云端");
+    snprintf(flow->step_detail[APP_UI_FLOW_STEP_DRONE], sizeof(flow->step_detail[0]), "等待");
+    snprintf(flow->step_detail[APP_UI_FLOW_STEP_TAG], sizeof(flow->step_detail[0]), "等待Tag");
+    snprintf(flow->step_detail[APP_UI_FLOW_STEP_EXEC], sizeof(flow->step_detail[0]), "等待接驳");
+    snprintf(flow->step_detail[APP_UI_FLOW_STEP_DONE], sizeof(flow->step_detail[0]), "未完成");
+}
+static void app_ctrl_flow_set_detail(app_ui_flow_snapshot_t *flow,
+    app_ui_flow_step_t step,
+    const char *text)
+{
+    if (flow == NULL || step >= APP_UI_FLOW_STEP_COUNT || text == NULL)
+    {
+        return;
+    }
+    strlcpy(flow->step_detail[step], text, sizeof(flow->step_detail[0]));
+}
+static const char *app_ctrl_proto_stage_action_text(app_ch32_proto_stage_t stage)
+{
+    switch (stage) {
+    case APP_CH32_STAGE_DOOR_OPENING:    return "开";
+    case APP_CH32_STAGE_DOOR_OPENED:     return "已开";
+    case APP_CH32_STAGE_TRAY_EXTENDING:  return "接驳";
+    case APP_CH32_STAGE_TRAY_EXTENDED:   return "接驳";
+    case APP_CH32_STAGE_WAITING_CARGO:   return "取货";
+    case APP_CH32_STAGE_CARGO_DETECTED:  return "取货OK";
+    case APP_CH32_STAGE_TRAY_RETRACTING: return "接驳";
+    case APP_CH32_STAGE_TRAY_RETRACTED:  return "接驳OK";
+    case APP_CH32_STAGE_DOOR_CLOSING:    return "闭";
+    case APP_CH32_STAGE_SAFE_LOCKED:     return "完成";
+    case APP_CH32_STAGE_COMPLETE:        return "接驳完成";
+    case APP_CH32_STAGE_FAULT:           return "接驳ERR";
+    case APP_CH32_STAGE_READY:           return "READY";
+    case APP_CH32_STAGE_IDLE:            return "等待接驳";
+    case APP_CH32_STAGE_UNKNOWN:
+    default:                             return "接驳等待";
+    }
+}
+static int32_t app_ctrl_distance_cm_from_mm(int32_t distance_mm)
+{
+    if (distance_mm <= 0)
+    {
+        return -1;
+    }
+    return (distance_mm + 5) / 10;
+}
+static void app_ctrl_fill_flow_snapshot(const char *status,
+    const app_dock_judge_result_t *dock,
+    const app_task_snapshot_t *task,
+    bool dock_busy,
+    app_ch32_proto_stage_t proto_stage,
+    uint8_t proto_error,
+    bool apriltag_enabled,
+    app_ui_flow_snapshot_t *flow)
+{
+    app_ctrl_flow_init(flow);
+    if (flow == NULL || task == NULL || !task->inited)
+    {
+        return;
+    }
+
+    if (task->state == APP_TASK_STATE_IDLE || task->state == APP_TASK_STATE_CONFIGURED)
+    {
+        snprintf(flow->headline, sizeof(flow->headline), "等待云端");
+        snprintf(flow->step_detail[APP_UI_FLOW_STEP_DRONE], sizeof(flow->step_detail[0]), "Tag %u",
+            (unsigned)task->target_id);
+        return;
+    }
+
+    if (task->state == APP_TASK_STATE_CANCELLED)
+    {
+        flow->active_step = APP_UI_FLOW_STEP_DONE;
+        flow->step_state[APP_UI_FLOW_STEP_DONE] = APP_UI_FLOW_STATE_ERROR;
+        snprintf(flow->headline, sizeof(flow->headline), "STOP");
+        app_ctrl_flow_set_detail(flow,
+            APP_UI_FLOW_STEP_DONE,
+            "未完成");
+        return;
+    }
+
+    if (task->state == APP_TASK_STATE_FAULT || proto_error != APP_CH32_ERR_NONE)
+    {
+        flow->active_step = APP_UI_FLOW_STEP_EXEC;
+        flow->step_state[APP_UI_FLOW_STEP_DRONE] = APP_UI_FLOW_STATE_DONE;
+        flow->step_state[APP_UI_FLOW_STEP_TAG] = APP_UI_FLOW_STATE_DONE;
+        flow->step_state[APP_UI_FLOW_STEP_EXEC] = APP_UI_FLOW_STATE_ERROR;
+        snprintf(flow->headline, sizeof(flow->headline), "接驳ERR");
+        snprintf(flow->step_detail[APP_UI_FLOW_STEP_DRONE], sizeof(flow->step_detail[0]), "AI OK");
+        snprintf(flow->step_detail[APP_UI_FLOW_STEP_TAG], sizeof(flow->step_detail[0]), "Tag OK");
+        app_ctrl_flow_set_detail(flow,
+            APP_UI_FLOW_STEP_EXEC,
+            proto_error != APP_CH32_ERR_NONE ? "ERR" : "接驳ERR");
+        return;
+    }
+
+    if (task->state == APP_TASK_STATE_COMPLETED)
+    {
+        flow->active_step = APP_UI_FLOW_STEP_DONE;
+        for (int i = 0; i < APP_UI_FLOW_STEP_COUNT; i++) {
+            flow->step_state[i] = APP_UI_FLOW_STATE_DONE;
+        }
+        snprintf(flow->headline, sizeof(flow->headline), "接驳完成");
+        snprintf(flow->step_detail[APP_UI_FLOW_STEP_DRONE], sizeof(flow->step_detail[0]), "AI OK");
+        snprintf(flow->step_detail[APP_UI_FLOW_STEP_TAG], sizeof(flow->step_detail[0]), "Tag OK");
+        snprintf(flow->step_detail[APP_UI_FLOW_STEP_EXEC], sizeof(flow->step_detail[0]), "接驳完成");
+        snprintf(flow->step_detail[APP_UI_FLOW_STEP_DONE], sizeof(flow->step_detail[0]), "完成");
+        return;
+    }
+
+    if (dock_busy || task->state == APP_TASK_STATE_DOCKING || task->state == APP_TASK_STATE_AUTH_PASSED)
+    {
+        const char *action = app_ctrl_proto_stage_action_text(proto_stage);
+        flow->active_step = APP_UI_FLOW_STEP_EXEC;
+        flow->step_state[APP_UI_FLOW_STEP_DRONE] = APP_UI_FLOW_STATE_DONE;
+        flow->step_state[APP_UI_FLOW_STEP_TAG] = APP_UI_FLOW_STATE_DONE;
+        flow->step_state[APP_UI_FLOW_STEP_EXEC] = APP_UI_FLOW_STATE_ACTIVE;
+        snprintf(flow->headline, sizeof(flow->headline), "%s", action);
+        snprintf(flow->step_detail[APP_UI_FLOW_STEP_DRONE], sizeof(flow->step_detail[0]), "AI OK");
+        snprintf(flow->step_detail[APP_UI_FLOW_STEP_TAG], sizeof(flow->step_detail[0]), "Tag OK");
+        app_ctrl_flow_set_detail(flow, APP_UI_FLOW_STEP_EXEC, action);
+        return;
+    }
+
+    if (task->state == APP_TASK_STATE_WAIT_APPROACH && !apriltag_enabled)
+    {
+        app_drone_ai_stats_t ai = {0};
+        app_drone_ai_get_stats(&ai);
+        flow->active_step = APP_UI_FLOW_STEP_DRONE;
+        flow->step_state[APP_UI_FLOW_STEP_DRONE] = APP_UI_FLOW_STATE_ACTIVE;
+        snprintf(flow->headline, sizeof(flow->headline), "AI %u/%u",
+            (unsigned)ai.hit_count,
+            (unsigned)(ai.confirm_hits != 0U ? ai.confirm_hits : 1U));
+        snprintf(flow->step_detail[APP_UI_FLOW_STEP_DRONE], sizeof(flow->step_detail[0]), "AI %u/%u",
+            (unsigned)ai.hit_count,
+            (unsigned)(ai.confirm_hits != 0U ? ai.confirm_hits : 1U));
+        snprintf(flow->step_detail[APP_UI_FLOW_STEP_TAG], sizeof(flow->step_detail[0]), "等待Tag");
+        return;
+    }
+
+    if (task->state == APP_TASK_STATE_WAIT_APPROACH && apriltag_enabled)
+    {
+        int32_t distance_cm = -1;
+        flow->active_step = APP_UI_FLOW_STEP_TAG;
+        flow->step_state[APP_UI_FLOW_STEP_DRONE] = APP_UI_FLOW_STATE_DONE;
+        flow->step_state[APP_UI_FLOW_STEP_TAG] = APP_UI_FLOW_STATE_ACTIVE;
+        snprintf(flow->step_detail[APP_UI_FLOW_STEP_DRONE], sizeof(flow->step_detail[0]), "AI OK");
+        if (dock != NULL && dock->vision_valid)
+        {
+            distance_cm = app_ctrl_distance_cm_from_mm(dock->est_distance_mm);
+            if (distance_cm > 0)
+            {
+                snprintf(flow->headline, sizeof(flow->headline), "Tag %ldcm", (long)distance_cm);
+                snprintf(flow->step_detail[APP_UI_FLOW_STEP_TAG], sizeof(flow->step_detail[0]), "Tag %ldcm",
+                    (long)distance_cm);
+            }
+            else
+            {
+                snprintf(flow->headline, sizeof(flow->headline), "等待Tag");
+                snprintf(flow->step_detail[APP_UI_FLOW_STEP_TAG], sizeof(flow->step_detail[0]), "Tag %u",
+                    (unsigned)dock->tag_id);
+            }
+        }
+        else
+        {
+            snprintf(flow->headline, sizeof(flow->headline), "等待Tag");
+            snprintf(flow->step_detail[APP_UI_FLOW_STEP_TAG], sizeof(flow->step_detail[0]), "等待Tag");
+        }
+        return;
+    }
+}
 // 汇总控制状态、视觉结果和任务信息后刷新 UI。
 static void app_ctrl_publish_ui(uint32_t now_ms,
     const app_vision_result_t *vision,
@@ -564,7 +744,16 @@ static void app_ctrl_publish_ui(uint32_t now_ms,
     {
         strlcpy(status, notice, sizeof(status));
     }
-    app_ui_update_control_state(status, task_brief, detail, vision, dock);
+    app_ui_flow_snapshot_t flow = {0};
+    app_ctrl_fill_flow_snapshot(status,
+        dock,
+        task,
+        dock_busy,
+        proto_stage,
+        proto_error,
+        apriltag_enabled,
+        &flow);
+    app_ui_update_control_state(status, task_brief, detail, vision, dock, &flow);
 }
 // CH32 回调入口，由 UART 接收任务调用。
 void app_ctrl_on_ch32_line(const app_ch32_line_t *msg, void *user_ctx)
