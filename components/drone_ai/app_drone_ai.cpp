@@ -39,8 +39,13 @@ static const char *TAG = "drone_ai";
 #define DRONE_AI_TASK_CORE_ID         1
 #define DRONE_AI_THRESHOLD            0.85f
 #define DRONE_AI_STRONG_THRESHOLD     0.98f
-#define DRONE_AI_STRONG_HITS          2U
-#define DRONE_AI_CONFIRM_HITS         3U
+#define DRONE_AI_STRONG_HITS          1U
+#define DRONE_AI_CONFIRM_HITS         5U
+#define DRONE_AI_CONFIRM_MIN_SPAN_MS  1200U
+#define DRONE_AI_HIT_GAP_RESET_MS     1600U
+#define DRONE_AI_MOTION_STABLE_DIFF   45U
+#define DRONE_AI_MOTION_REJECT_DIFF   80U
+#define DRONE_AI_MOTION_COOLDOWN_MS   500U
 #define DRONE_AI_MISS_DECAY           1U
 #define DRONE_AI_MALLOC_PSRAM_LIMIT   0U
 #define DRONE_AI_STATUS_INTERVAL_MS   1000U
@@ -58,6 +63,7 @@ typedef struct {
     float nodrone_score;
     float drone_score;
     uint8_t hit_count;
+    uint32_t motion_score;
     uint32_t frame_seq;
     uint32_t infer_ms;
 } app_drone_ai_result_t;
@@ -68,6 +74,7 @@ typedef struct {
     uint32_t src_height;
     uint32_t seq;
     uint32_t tick_ms;
+    uint32_t motion_score;
 } app_drone_ai_slot_t;
 
 static portMUX_TYPE s_ai_mux = portMUX_INITIALIZER_UNLOCKED;
@@ -81,17 +88,29 @@ static bool s_model_ready = false;
 static esp_err_t s_model_status = ESP_ERR_INVALID_STATE;
 static bool s_confirmed = false;
 static uint8_t s_hit_count = 0;
+static uint32_t s_first_hit_ms = 0;
+static uint32_t s_last_hit_ms = 0;
+static uint32_t s_last_motion_reject_ms = 0;
 static uint32_t s_submit_seq = 0;
 static uint32_t s_infer_count = 0;
 static uint32_t s_drop_count = 0;
 static uint32_t s_last_status_ms = 0;
 static app_drone_ai_result_t s_latest = {};
+static uint8_t *s_motion_prev_gray = nullptr;
+static bool s_motion_prev_valid = false;
 
 static dl::Model *s_model = nullptr;
 static dl::TensorBase *s_model_input = nullptr;
 static dl::TensorBase *s_model_output = nullptr;
 static fbs::FbsLoader *s_fbs_loader = nullptr;
 static fbs::FbsModel *s_fbs_model = nullptr;
+
+static inline void app_drone_ai_clear_hit_window_locked(void)
+{
+    s_hit_count = 0;
+    s_first_hit_ms = 0;
+    s_last_hit_ms = 0;
+}
 
 static void app_drone_ai_restore_default_malloc(void)
 {
@@ -336,6 +355,36 @@ static void app_drone_ai_resize_rgb565_to_rgb888(const uint8_t *rgb565,
     }
 }
 
+static inline uint8_t app_drone_ai_rgb888_to_gray(const uint8_t *rgb)
+{
+    return (uint8_t)(((uint32_t)rgb[0] * 77U +
+                      (uint32_t)rgb[1] * 150U +
+                      (uint32_t)rgb[2] * 29U) >> 8);
+}
+
+static uint32_t app_drone_ai_update_motion_score(const uint8_t *rgb)
+{
+    if (rgb == nullptr || s_motion_prev_gray == nullptr)
+    {
+        return 0;
+    }
+    uint32_t diff_sum = 0;
+    uint32_t diff_count = 0;
+    const bool prev_valid = s_motion_prev_valid;
+    for (uint32_t i = 0; i < DRONE_AI_INPUT_PIXELS; i++) {
+        const uint8_t gray = app_drone_ai_rgb888_to_gray(&rgb[(size_t)i * DRONE_AI_INPUT_CH]);
+        if (prev_valid && ((i & 0x03U) == 0U))
+        {
+            const uint8_t prev = s_motion_prev_gray[i];
+            diff_sum += (gray > prev) ? (gray - prev) : (prev - gray);
+            diff_count++;
+        }
+        s_motion_prev_gray[i] = gray;
+    }
+    s_motion_prev_valid = true;
+    return (prev_valid && diff_count > 0U) ? (diff_sum / diff_count) : 0U;
+}
+
 static esp_err_t app_drone_ai_load_model(void)
 {
     if (s_model != nullptr)
@@ -547,7 +596,9 @@ static void app_drone_ai_softmax2(const float logits[2], float *nodrone, float *
 static void app_drone_ai_update_result(uint32_t frame_seq,
                                        uint32_t infer_ms,
                                        float nodrone_score,
-                                       float drone_score)
+                                       float drone_score,
+                                       uint32_t motion_score,
+                                       uint32_t tick_ms)
 {
     app_drone_ai_result_t latest = {};
 
@@ -557,13 +608,35 @@ static void app_drone_ai_update_result(uint32_t frame_seq,
     latest.drone_score = drone_score;
     latest.frame_seq = frame_seq;
     latest.infer_ms = infer_ms;
+    latest.motion_score = motion_score;
 
     taskENTER_CRITICAL(&s_ai_mux);
     if (!s_confirmed)
     {
-        if (latest.label == APP_DRONE_AI_CLASS_DRONE && drone_score >= DRONE_AI_THRESHOLD)
+        const bool candidate_hit = (latest.label == APP_DRONE_AI_CLASS_DRONE) &&
+                                   (drone_score >= DRONE_AI_THRESHOLD);
+        // Fast camera motion can spike the classifier, so shaky frames reset the hit gate.
+        const bool high_motion = motion_score >= DRONE_AI_MOTION_REJECT_DIFF;
+        if (high_motion)
+        {
+            s_last_motion_reject_ms = tick_ms;
+            app_drone_ai_clear_hit_window_locked();
+        }
+        const bool motion_cooldown_done = (s_last_motion_reject_ms == 0U) ||
+                                          ((tick_ms - s_last_motion_reject_ms) >= DRONE_AI_MOTION_COOLDOWN_MS);
+        const bool stable_frame = (motion_score <= DRONE_AI_MOTION_STABLE_DIFF) && motion_cooldown_done;
+        if (candidate_hit && stable_frame)
         {
             const uint8_t add_hits = (drone_score >= DRONE_AI_STRONG_THRESHOLD) ? DRONE_AI_STRONG_HITS : 1U;
+            if (s_last_hit_ms != 0U && (tick_ms - s_last_hit_ms) > DRONE_AI_HIT_GAP_RESET_MS)
+            {
+                app_drone_ai_clear_hit_window_locked();
+            }
+            if (s_hit_count == 0U)
+            {
+                s_first_hit_ms = tick_ms;
+            }
+            s_last_hit_ms = tick_ms;
             if (s_hit_count <= (uint8_t)(255U - add_hits))
             {
                 s_hit_count += add_hits;
@@ -572,12 +645,14 @@ static void app_drone_ai_update_result(uint32_t frame_seq,
             {
                 s_hit_count = 255U;
             }
-            if (s_hit_count >= DRONE_AI_CONFIRM_HITS)
+            if (s_hit_count >= DRONE_AI_CONFIRM_HITS &&
+                s_first_hit_ms != 0U &&
+                (tick_ms - s_first_hit_ms) >= DRONE_AI_CONFIRM_MIN_SPAN_MS)
             {
                 s_confirmed = true;
             }
         }
-        else
+        else if (!high_motion)
         {
             if (s_hit_count > DRONE_AI_MISS_DECAY)
             {
@@ -585,7 +660,7 @@ static void app_drone_ai_update_result(uint32_t frame_seq,
             }
             else
             {
-                s_hit_count = 0;
+                app_drone_ai_clear_hit_window_locked();
             }
         }
     }
@@ -643,15 +718,30 @@ static void app_drone_ai_task(void *arg)
                 float nodrone_score = 0.0f;
                 float drone_score = 0.0f;
                 app_drone_ai_softmax2(logits, &nodrone_score, &drone_score);
-                app_drone_ai_update_result(slot->seq, infer_ms, nodrone_score, drone_score);
+                app_drone_ai_update_result(slot->seq,
+                                           infer_ms,
+                                           nodrone_score,
+                                           drone_score,
+                                           slot->motion_score,
+                                           slot->tick_ms);
 
                 const uint32_t now_ms = app_drone_ai_now_ms();
                 uint32_t infer_count = 0;
+                uint8_t hit_count = 0;
+                uint32_t last_motion_reject_ms = 0;
+                bool confirmed = false;
                 taskENTER_CRITICAL(&s_ai_mux);
                 s_infer_count++;
                 infer_count = s_infer_count;
+                hit_count = s_hit_count;
+                last_motion_reject_ms = s_last_motion_reject_ms;
+                confirmed = s_confirmed;
                 taskEXIT_CRITICAL(&s_ai_mux);
                 const bool candidate_hit = (drone_score >= DRONE_AI_THRESHOLD);
+                const bool motion_cooldown_done = (last_motion_reject_ms == 0U) ||
+                                                  ((slot->tick_ms - last_motion_reject_ms) >= DRONE_AI_MOTION_COOLDOWN_MS);
+                const bool stable_frame = (slot->motion_score <= DRONE_AI_MOTION_STABLE_DIFF) &&
+                                          motion_cooldown_done;
                 if (candidate_hit || (now_ms - s_last_status_ms) >= DRONE_AI_STATUS_INTERVAL_MS)
                 {
                     app_drone_ai_publish_status();
@@ -661,14 +751,18 @@ static void app_drone_ai_task(void *arg)
                 if (candidate_hit || (infer_count % DRONE_AI_LOG_INTERVAL) == 0U)
                 {
                     ESP_LOGI(TAG,
-                             "infer %lums label=%s nodrone=%.3f drone=%.3f hits=%u/%u confirmed=%d",
+                             "infer %lums label=%s nodrone=%.3f drone=%.3f motion=%lu stable<=%u reject>=%u stable=%d hits=%u/%u confirmed=%d",
                              (unsigned long)infer_ms,
                              drone_score >= nodrone_score ? "DRONE" : "NODRONE",
                              (double)nodrone_score,
                              (double)drone_score,
-                             (unsigned)s_hit_count,
+                             (unsigned long)slot->motion_score,
+                             (unsigned)DRONE_AI_MOTION_STABLE_DIFF,
+                             (unsigned)DRONE_AI_MOTION_REJECT_DIFF,
+                             (int)stable_frame,
+                             (unsigned)hit_count,
                              (unsigned)DRONE_AI_CONFIRM_HITS,
-                             (int)s_confirmed);
+                             (int)confirmed);
                 }
             }
             else
@@ -703,6 +797,15 @@ esp_err_t app_drone_ai_init(void)
         }
     }
 
+    s_motion_prev_gray = (uint8_t *)heap_caps_malloc(DRONE_AI_INPUT_PIXELS,
+                                                     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (s_motion_prev_gray == NULL)
+    {
+        ESP_LOGE(TAG, "motion buffer alloc failed");
+        return ESP_ERR_NO_MEM;
+    }
+    memset(s_motion_prev_gray, 0, DRONE_AI_INPUT_PIXELS);
+
     s_free_queue = xQueueCreate(DRONE_AI_SLOT_COUNT, sizeof(app_drone_ai_slot_t *));
     s_infer_queue = xQueueCreate(DRONE_AI_SLOT_COUNT, sizeof(app_drone_ai_slot_t *));
     if (s_free_queue == NULL || s_infer_queue == NULL)
@@ -722,10 +825,12 @@ esp_err_t app_drone_ai_init(void)
     s_model_ready = false;
     s_model_status = ESP_ERR_INVALID_STATE;
     s_confirmed = false;
-    s_hit_count = 0;
+    app_drone_ai_clear_hit_window_locked();
+    s_last_motion_reject_ms = 0;
     s_infer_count = 0;
     s_drop_count = 0;
     s_last_status_ms = 0;
+    s_motion_prev_valid = false;
     memset(&s_latest, 0, sizeof(s_latest));
     taskEXIT_CRITICAL(&s_ai_mux);
 
@@ -751,9 +856,13 @@ esp_err_t app_drone_ai_init(void)
     }
 
     ESP_LOGI(TAG,
-             "drone ai init done (threshold=%.2f hits=%u strong=%.2f+%u miss_decay=%u prio=%u)",
+             "drone ai init done (threshold=%.2f hits=%u span=%lums stable_motion<=%u reject_motion>=%u cooldown=%lums strong=%.2f+%u miss_decay=%u prio=%u)",
              (double)DRONE_AI_THRESHOLD,
              (unsigned)DRONE_AI_CONFIRM_HITS,
+             (unsigned long)DRONE_AI_CONFIRM_MIN_SPAN_MS,
+             (unsigned)DRONE_AI_MOTION_STABLE_DIFF,
+             (unsigned)DRONE_AI_MOTION_REJECT_DIFF,
+             (unsigned long)DRONE_AI_MOTION_COOLDOWN_MS,
              (double)DRONE_AI_STRONG_THRESHOLD,
              (unsigned)DRONE_AI_STRONG_HITS,
              (unsigned)DRONE_AI_MISS_DECAY,
@@ -799,7 +908,17 @@ esp_err_t app_drone_ai_submit_frame(const uint8_t *rgb565,
     app_drone_ai_resize_rgb565_to_rgb888(rgb565, width, height, slot->rgb);
     slot->src_width = width;
     slot->src_height = height;
+    slot->motion_score = app_drone_ai_update_motion_score(slot->rgb);
     slot->tick_ms = app_drone_ai_now_ms();
+    if (slot->motion_score >= DRONE_AI_MOTION_REJECT_DIFF)
+    {
+        taskENTER_CRITICAL(&s_ai_mux);
+        s_last_motion_reject_ms = slot->tick_ms;
+        app_drone_ai_clear_hit_window_locked();
+        s_latest.hit_count = 0;
+        s_latest.motion_score = slot->motion_score;
+        taskEXIT_CRITICAL(&s_ai_mux);
+    }
 
     taskENTER_CRITICAL(&s_ai_mux);
     s_submit_seq++;
@@ -874,9 +993,12 @@ void app_drone_ai_reset_gate(void)
 {
     taskENTER_CRITICAL(&s_ai_mux);
     s_confirmed = false;
-    s_hit_count = 0;
+    app_drone_ai_clear_hit_window_locked();
+    s_last_motion_reject_ms = 0;
+    s_motion_prev_valid = false;
     s_latest.confirmed = false;
     s_latest.hit_count = 0;
+    s_latest.motion_score = 0;
     taskEXIT_CRITICAL(&s_ai_mux);
 }
 
@@ -916,11 +1038,12 @@ void app_drone_ai_format_status(char *buf, size_t buf_len)
     {
         snprintf(buf,
                  buf_len,
-                 "ai: %s %.2f %u/%u",
+                 "ai: %s %.2f %u/%u m%lu",
                  label,
                  (double)score,
                  (unsigned)latest.hit_count,
-                 (unsigned)DRONE_AI_CONFIRM_HITS);
+                 (unsigned)DRONE_AI_CONFIRM_HITS,
+                 (unsigned long)latest.motion_score);
     }
 }
 

@@ -359,13 +359,17 @@ static void app_vision_update_result(const app_vision_gray_slot_t *slot,
     if ((uint32_t)(now_ms - s_last_miss_info_log_ms) >= VISION_MISS_LOG_INTERVAL_MS)
     {
         ESP_LOGI(TAG,
-            "tag miss seq=%lu lost=%u st=%u detect=%lums gray=%lux%lu",
+            "tag miss seq=%lu lost=%u st=%u detect=%lums gray=%lux%lu crop=(%lu,%lu,%lu,%lu)",
             (unsigned long)result.frame_seq,
             (unsigned)*lost_count,
             (unsigned)*stable_count,
             (unsigned long)detect_ms,
             (unsigned long)result.gray_width,
-            (unsigned long)result.gray_height);
+            (unsigned long)result.gray_height,
+            (unsigned long)slot->info.crop_x,
+            (unsigned long)slot->info.crop_y,
+            (unsigned long)slot->info.crop_w,
+            (unsigned long)slot->info.crop_h);
         s_last_miss_info_log_ms = now_ms;
     }
 }

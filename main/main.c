@@ -31,11 +31,14 @@ static const char *TAG = "main";
 #define APP_MAX_DISTANCE_MM          (700)
 #define APP_CLOUD_START_TASK_STACK   (8 * 1024)
 #define APP_CLOUD_START_TASK_PRIO    4
+#define APP_CAMERA_START_TASK_STACK  (12 * 1024)
+#define APP_CAMERA_START_TASK_PRIO   5
 #define APP_TASK_EVENT_QUEUE_LEN      8
 #define APP_TASK_EVENT_TASK_STACK     (8 * 1024)
 #define APP_TASK_EVENT_TASK_PRIO      5
 #define APP_WEATHER_EMERGENCY_TASK_STACK (12 * 1024)
 #define APP_WEATHER_EMERGENCY_TASK_PRIO  5
+#define APP_PREVIEW_SWITCH_WAIT_MS       800U
 
 // 任务状态回调可能来自 MQTT 或控制任务，UI 切换统一交给本地 worker 处理。
 typedef struct {
@@ -221,6 +224,19 @@ static void app_show_ready_status(const app_dock_judge_config_t *dock_cfg)
 static bool s_camera_started = false;
 static bool s_cloud_start_requested = false;
 
+static bool app_task_wants_camera_preview(void)
+{
+    app_task_snapshot_t snap = {0};
+    if (!app_task_peek_snapshot(&snap))
+    {
+        return true;
+    }
+    return snap.active &&
+           (snap.state == APP_TASK_STATE_WAIT_APPROACH ||
+            snap.state == APP_TASK_STATE_AUTH_PASSED ||
+            snap.state == APP_TASK_STATE_DOCKING);
+}
+
 // 云端启动会等待 ESP-Hosted 和 Wi-Fi，放到后台避免阻塞主屏。
 static void app_cloud_start_task(void *arg)
 {
@@ -274,6 +290,10 @@ static void app_camera_start_task(void *arg)
     {
         app_ui_set_status("task: active");
         app_ui_main_screen_set_task_state(APP_UI_MAIN_TASK_ACTIVE);
+        if (app_task_wants_camera_preview())
+        {
+            app_ui_hide_main_screen();
+        }
     }
     else
     {
@@ -285,6 +305,9 @@ static void app_camera_start_task(void *arg)
         app_ui_main_screen_set_task_state(APP_UI_MAIN_TASK_CAMERA_FAILED);
         app_ui_show_main_screen();
     }
+    ESP_LOGI(TAG,
+        "camera start task done, stack_free=%u",
+        (unsigned)uxTaskGetStackHighWaterMark(NULL));
     vTaskDelete(NULL);
 }
 
@@ -296,7 +319,12 @@ static void app_start_camera_if_needed(void)
         return;
     }
     s_camera_started = true;
-    BaseType_t ok = xTaskCreate(app_camera_start_task, "cam_start", 4096, NULL, 5, NULL);
+    BaseType_t ok = xTaskCreate(app_camera_start_task,
+        "cam_start",
+        APP_CAMERA_START_TASK_STACK,
+        NULL,
+        APP_CAMERA_START_TASK_PRIO,
+        NULL);
     if (ok != pdPASS)
     {
         s_camera_started = false;
@@ -305,6 +333,29 @@ static void app_start_camera_if_needed(void)
         app_ui_main_screen_set_task_state(APP_UI_MAIN_TASK_CAMERA_FAILED);
         app_ui_show_main_screen();
     }
+}
+
+static void app_switch_to_camera_preview(void)
+{
+    const bool camera_was_started = s_camera_started;
+    const uint32_t display_count = app_camera_display_count();
+    app_camera_resume();
+    app_start_camera_if_needed();
+    if (!camera_was_started)
+    {
+        return;
+    }
+    if (app_camera_wait_display_count_after(display_count, APP_PREVIEW_SWITCH_WAIT_MS) ||
+        display_count > 0U)
+    {
+        if (app_task_wants_camera_preview())
+        {
+            app_ui_hide_main_screen();
+        }
+        return;
+    }
+    ESP_LOGW(TAG, "camera preview frame delayed, keep main screen visible");
+    app_ui_main_screen_set_task_text("camera frame delay");
 }
 
 // 根据任务状态切换主屏和相机预览。
@@ -316,9 +367,7 @@ static void app_handle_task_state_changed(const app_task_snapshot_t *snap)
     }
     switch (snap->state) {
     case APP_TASK_STATE_WAIT_APPROACH:
-        app_camera_resume();
-        app_ui_hide_main_screen();
-        app_start_camera_if_needed();
+        app_switch_to_camera_preview();
         break;
     case APP_TASK_STATE_COMPLETED:
         app_camera_pause();

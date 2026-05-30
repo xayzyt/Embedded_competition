@@ -1456,6 +1456,8 @@ bool app_ui_create(void)
         return false;
     }
     lv_obj_t *scr = app_get_active_screen();
+    lv_obj_set_style_bg_color(scr, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
     if (s_hud_layer == NULL)
     {
         s_hud_layer = lv_obj_create(scr);
