@@ -1,3 +1,4 @@
+// LVGL 图片资源：主屏和启动页使用的队标 logo，下面的大数组为 ARGB 像素数据。
 
 #if defined(LV_LVGL_H_INCLUDE_SIMPLE)
 #include "lvgl.h"

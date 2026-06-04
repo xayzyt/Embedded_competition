@@ -9,9 +9,9 @@ extern "C" {
 
 // 单帧路由决策：同一帧可被分发给 AI、AprilTag 或抓图保存。
 typedef struct {
-    bool ai_due;
-    bool vision_due;
-    bool capture_due;
+    bool ai_due;      // 本帧是否提交给无人机 AI。
+    bool vision_due;  // 本帧是否提交给 AprilTag 视觉检测。
+    bool capture_due; // 本帧是否保存为训练样本。
 } app_camera_frame_route_t;
 
 // 重置采样节拍和诊断计数。

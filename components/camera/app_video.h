@@ -5,6 +5,8 @@
 #include "esp_err.h"
 #include "linux/videodev2.h"
 #include "esp_video_device.h"
+// V4L2 视频层接口：屏蔽设备打开、格式协商、缓冲注册和流任务细节。
+
 #ifdef __cplusplus
 extern "C" {
 #endif

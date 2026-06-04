@@ -3,6 +3,8 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "esp_err.h"
+// 高层任务状态机接口：维护目标 ID、任务生命周期和事件通知。
+
 #ifdef __cplusplus
 extern "C" {
 #endif

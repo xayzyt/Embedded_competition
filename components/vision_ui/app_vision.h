@@ -3,6 +3,8 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "esp_err.h"
+// 视觉管线接口：相机提交 RGB565 帧，后台输出 AprilTag 检测结果和统计。
+
 #ifdef __cplusplus
 extern "C" {
 #endif

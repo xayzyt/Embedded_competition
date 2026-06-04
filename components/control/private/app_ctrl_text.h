@@ -5,6 +5,8 @@
 #include "app_ch32_link.h"
 #include "app_dock_judge.h"
 #include "app_task.h"
+// 控制状态文案生成：把业务判断和字符串格式化隔离，控制主循环只传快照。
+
 #ifdef __cplusplus
 extern "C" {
 #endif

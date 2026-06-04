@@ -3,6 +3,8 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "esp_err.h"
+// AprilTag 轻量检测接口：输入灰度图，输出 tag36h11 的位置和解码信息。
+
 #ifdef __cplusplus
 extern "C" {
 #endif

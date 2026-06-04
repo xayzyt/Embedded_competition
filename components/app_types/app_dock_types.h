@@ -1,6 +1,8 @@
 ﻿#pragma once
 #include <stdbool.h>
 #include <stdint.h>
+// 对接判定公共类型：视觉、控制、UI 和云端共享同一份状态快照定义。
+
 // 对接判定状态，描述从搜索标签到允许进入对接的完整阶段。
 typedef enum {
     APP_DOCK_STATE_SEARCHING = 0,

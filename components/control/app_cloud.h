@@ -2,6 +2,8 @@
 #define APP_CLOUD_H
 #include <stdbool.h>
 #include "esp_err.h"
+// 云端公共接口：负责 Wi-Fi/MQTT/天气状态，并把任务状态同步到外部平台。
+
 #ifdef __cplusplus
 extern "C" {
 #endif

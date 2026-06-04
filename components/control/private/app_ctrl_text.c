@@ -65,6 +65,7 @@ static void app_ctrl_compose_guidance(const app_dock_judge_result_t *dock,
     }
     if (!dock->vision_valid)
     {
+        // 没有稳定视觉结果时，先提示搜索目标，不继续检查后续门控。
         snprintf(buf, buf_len, "dock: searching target");
         return;
     }
@@ -90,6 +91,7 @@ static void app_ctrl_compose_guidance(const app_dock_judge_result_t *dock,
     }
     if (!dock->distance_ok)
     {
+        // 距离估计有效时给出远近方向，否则提示等待有效距离。
         if (dock->est_distance_mm > 0)
         {
             snprintf(buf,

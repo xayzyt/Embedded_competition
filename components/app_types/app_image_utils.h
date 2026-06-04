@@ -1,6 +1,8 @@
 #pragma once
 #include <stdint.h>
 
+// 图像通用工具：不依赖具体业务模块，可被相机、视觉和抓图路径复用。
+
 #ifdef __cplusplus
 extern "C" {
 #endif

@@ -5,6 +5,8 @@
 #include "esp_err.h"
 #include "app_dock_types.h"
 #include "app_vision.h"
+// 对接判定接口：把 AprilTag 视觉结果转成可执行的门控状态。
+
 #ifdef __cplusplus
 extern "C" {
 #endif

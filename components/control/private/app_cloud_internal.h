@@ -11,6 +11,8 @@
 #include "mqtt_client.h"
 #include "app_task.h"
 
+// 云端模块内部共享状态：app_cloud.c、消息处理和天气任务共用。
+
 #ifdef __cplusplus
 extern "C" {
 #endif

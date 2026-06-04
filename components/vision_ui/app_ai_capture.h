@@ -3,6 +3,8 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "esp_err.h"
+// AI 样本抓图接口：从相机路由接收抽样帧，后台保存为 BMP 训练样本。
+
 #ifdef __cplusplus
 extern "C" {
 #endif

@@ -4,6 +4,7 @@
 #include "lvgl/lvgl.h"
 #endif
 // LVGL 生成字体：主屏中文标题使用，下面的大数组为字形位图和字距表。
+// 资源文件由 LVGL 字体工具生成，业务代码只引用 font_main_title_cn 符号。
 #ifndef FONT_MAIN_TITLE_CN
 #define FONT_MAIN_TITLE_CN 1
 #endif

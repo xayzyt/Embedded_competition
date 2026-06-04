@@ -1,6 +1,8 @@
 ﻿#pragma once
 #include <stdint.h>
 #include "esp_err.h"
+// MQTT 命令解析接口：只把 JSON 中的业务字段折叠成固定长度结构体。
+
 #ifdef __cplusplus
 extern "C" {
 #endif

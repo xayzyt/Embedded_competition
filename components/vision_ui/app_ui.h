@@ -2,24 +2,29 @@
 #include <stdbool.h>
 #include "app_dock_types.h"
 #include "app_vision.h"
+// UI 对外接口：主屏、预览 HUD、启动页和按钮回调都通过这里被 main/control 调用。
+
 #define APP_UI_FLOW_STEP_COUNT 4
+// 任务流程条的固定阶段顺序。
 typedef enum {
     APP_UI_FLOW_STEP_DRONE = 0,
     APP_UI_FLOW_STEP_TAG,
     APP_UI_FLOW_STEP_EXEC,
     APP_UI_FLOW_STEP_DONE,
 } app_ui_flow_step_t;
+// 单个流程阶段在 UI 上的展示状态。
 typedef enum {
     APP_UI_FLOW_STATE_WAITING = 0,
     APP_UI_FLOW_STATE_ACTIVE,
     APP_UI_FLOW_STATE_DONE,
     APP_UI_FLOW_STATE_ERROR,
 } app_ui_flow_state_t;
+// 控制器推送给 UI 的流程快照，UI 只按快照刷新，不反查控制内部状态。
 typedef struct {
-    app_ui_flow_step_t active_step;
-    app_ui_flow_state_t step_state[APP_UI_FLOW_STEP_COUNT];
-    char headline[48];
-    char step_detail[APP_UI_FLOW_STEP_COUNT][48];
+    app_ui_flow_step_t active_step;                         // 当前高亮阶段。
+    app_ui_flow_state_t step_state[APP_UI_FLOW_STEP_COUNT]; // 每个阶段的状态灯。
+    char headline[48];                                      // 流程面板标题。
+    char step_detail[APP_UI_FLOW_STEP_COUNT][48];           // 每个阶段的简短说明。
 } app_ui_flow_snapshot_t;
 // 创建全局 UI 资源和 HUD 层。
 bool app_ui_create(void);
@@ -70,6 +75,7 @@ void app_ui_main_screen_apply_weather_state(const char *weather_text,
 // 主屏按钮回调。
 typedef void (*app_ui_pickup_cb_t)(void);
 void app_ui_set_pickup_callback(app_ui_pickup_cb_t cb);
+// 天气模拟和紧急保护按钮回调，由云端/控制模块实现具体策略。
 typedef void (*app_ui_weather_sim_cb_t)(void);
 void app_ui_set_weather_sim_callback(app_ui_weather_sim_cb_t cb);
 typedef void (*app_ui_weather_emergency_cb_t)(void);

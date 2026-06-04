@@ -2,6 +2,8 @@
 #include "esp_err.h"
 #include <stdbool.h>
 #include <stdint.h>
+// 摄像头预览公共接口：main 负责初始化/启动，UI 切屏时可等待首帧或暂停。
+
 #ifdef __cplusplus
 extern "C" {
 #endif

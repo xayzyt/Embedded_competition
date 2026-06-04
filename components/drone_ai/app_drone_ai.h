@@ -3,6 +3,8 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "esp_err.h"
+// 无人机 AI 对外接口：相机路由提交抽样帧，控制器读取确认门控结果。
+
 #ifdef __cplusplus
 extern "C" {
 #endif

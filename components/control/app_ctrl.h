@@ -1,6 +1,8 @@
 ﻿#pragma once
 #include "esp_err.h"
 #include "app_ch32_link.h"
+// 控制器公共接口：把 UI、任务、视觉和 CH32 串成自动对接主循环。
+
 #ifdef __cplusplus
 extern "C" {
 #endif

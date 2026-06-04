@@ -2,6 +2,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "esp_err.h"
+// CH32 UART 协议接口：控制器通过它发送动作命令并接收机械状态。
+
 #ifdef __cplusplus
 extern "C" {
 #endif

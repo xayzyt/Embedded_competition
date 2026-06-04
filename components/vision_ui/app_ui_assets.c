@@ -1,6 +1,7 @@
 #include "lvgl.h"
 
 // 天气图标索引表：把天气 API 的 code 映射到对应 LVGL 图片资源。
+// 只暴露查询函数，避免主屏 UI 直接依赖每个 weather_x 图标符号。
 
 LV_IMAGE_DECLARE(weather_0);
 LV_IMAGE_DECLARE(weather_1);
@@ -44,6 +45,7 @@ LV_IMAGE_DECLARE(weather_99);
 
 const lv_image_dsc_t *app_ui_weather_image_src(int weather_code)
 {
+    // 心知天气 code 与本地资源不是完全连续的，缺失项复用同类图标或兜底图。
     switch (weather_code) {
     case 0: return &weather_0;
     case 1: return &weather_1;

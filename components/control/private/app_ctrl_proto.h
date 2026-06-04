@@ -2,6 +2,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "app_ch32_link.h"
+// CH32 协议语义辅助：控制器用这些小函数避免直接散落阶段/flags 判断。
+
 #ifdef __cplusplus
 extern "C" {
 #endif

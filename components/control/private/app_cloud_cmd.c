@@ -56,6 +56,7 @@ esp_err_t app_cloud_cmd_parse_json(const char *payload, app_cloud_cmd_t *out)
     {
         return ESP_ERR_INVALID_ARG;
     }
+    // cmd 是唯一必填字段；其余字段按命令类型可选，保持默认清零即可。
     const bool has_cmd = app_cloud_cmd_get_string(root, "cmd", out->cmd, sizeof(out->cmd));
     if (!has_cmd || out->cmd[0] == '\0')
     {
