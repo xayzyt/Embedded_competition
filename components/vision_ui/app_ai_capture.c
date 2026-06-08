@@ -11,7 +11,6 @@
 #include "esp_log.h"
 #include "bsp/esp-bsp.h"
 #include "app_image_utils.h"
-#include "app_ui.h"
 
 // AI 样本抓图模块：把相机 RGB565 帧下采样为 BMP，按有/无人机目录保存到 SD 卡。
 
@@ -39,9 +38,6 @@ static bool s_sd_ready = false;
 static bool s_active = false;
 static app_ai_capture_mode_t s_mode = APP_AI_CAPTURE_MODE_DRONE;
 static uint32_t s_frame_skip = 0;
-static uint32_t s_saved_count[APP_AI_CAPTURE_MODE_COUNT] = {0};
-static uint32_t s_drop_count[APP_AI_CAPTURE_MODE_COUNT] = {0};
-static uint32_t s_wait_count = 0;
 static uint32_t s_next_index[APP_AI_CAPTURE_MODE_COUNT] = {1, 1};
 static TaskHandle_t s_writer_task = NULL;
 static QueueHandle_t s_free_queue = NULL;
@@ -135,47 +131,6 @@ static uint32_t app_ai_capture_find_next_index(const char *dir_path)
     }
     return max_index + 1U;
 }
-static void app_ai_capture_set_status(const char *status)
-{
-    if (status != NULL)
-    {
-        app_ui_set_capture_text(status);
-        app_ui_set_vision_text(status);
-    }
-}
-// 把当前抓图模式、保存数和丢帧数压成一行 HUD 文案。
-static void app_ai_capture_format_status(const char *state)
-{
-    char text[64];
-    app_ai_capture_mode_t mode = APP_AI_CAPTURE_MODE_DRONE;
-    uint32_t saved = 0;
-    uint32_t dropped = 0;
-    taskENTER_CRITICAL(&s_mux);
-    mode = s_mode;
-    saved = s_saved_count[mode];
-    dropped = s_drop_count[mode];
-    taskEXIT_CRITICAL(&s_mux);
-    if (dropped == 0)
-    {
-        snprintf(text,
-                 sizeof(text),
-                 "cap:%s %s #%lu",
-                 app_ai_capture_mode_label(mode),
-                 state != NULL ? state : "-",
-                 (unsigned long)saved);
-    }
-    else
-    {
-        snprintf(text,
-                 sizeof(text),
-                 "cap:%s %s #%lu drop:%lu",
-                 app_ai_capture_mode_label(mode),
-                 state != NULL ? state : "-",
-                 (unsigned long)saved,
-                 (unsigned long)dropped);
-    }
-    app_ai_capture_set_status(text);
-}
 // 挂载 SD 卡并创建 CAP/DRONE、CAP/NODRONE 两个样本目录。
 static esp_err_t app_ai_capture_prepare_storage(void)
 {
@@ -191,14 +146,12 @@ static esp_err_t app_ai_capture_prepare_storage(void)
     if (ret != ESP_OK)
     {
         ESP_LOGW(TAG, "sd mount failed: %s", esp_err_to_name(ret));
-        app_ai_capture_set_status("cap: sd fail");
         return ret;
     }
     if (mkdir(CAPTURE_ROOT_DIR, 0775) != 0 && errno != EEXIST)
     {
         ret = ESP_FAIL;
         ESP_LOGW(TAG, "mkdir %s failed, errno=%d", CAPTURE_ROOT_DIR, errno);
-        app_ai_capture_set_status("cap: mkdir fail");
         return ret;
     }
     for (int i = 0; i < APP_AI_CAPTURE_MODE_COUNT; i++) {
@@ -207,18 +160,11 @@ static esp_err_t app_ai_capture_prepare_storage(void)
         {
             ret = ESP_FAIL;
             ESP_LOGW(TAG, "mkdir %s failed, errno=%d", dir_path, errno);
-            app_ai_capture_set_status("cap: mkdir fail");
             return ret;
         }
         s_next_index[i] = app_ai_capture_find_next_index(dir_path);
     }
     s_sd_ready = true;
-    ESP_LOGD(TAG,
-             "capture dirs ready: %s next=%lu, %s next=%lu",
-             CAPTURE_DRONE_DIR,
-             (unsigned long)s_next_index[APP_AI_CAPTURE_MODE_DRONE],
-             CAPTURE_NO_DRONE_DIR,
-             (unsigned long)s_next_index[APP_AI_CAPTURE_MODE_NO_DRONE]);
     return ESP_OK;
 }
 // 居中裁剪后下采样到 320x240 BGR，直接匹配 BMP 的像素顺序。
@@ -314,11 +260,7 @@ static esp_err_t app_ai_capture_write_bmp(const app_ai_capture_slot_t *slot)
     {
         ret = ESP_FAIL;
     }
-    if (ret == ESP_OK)
-    {
-        ESP_LOGD(TAG, "saved %s", path);
-    }
-    else
+    if (ret != ESP_OK)
     {
         ESP_LOGW(TAG, "write %s failed", path);
     }
@@ -334,18 +276,7 @@ static void app_ai_capture_writer_task(void *arg)
         {
             continue;
         }
-        esp_err_t ret = app_ai_capture_write_bmp(slot);
-        taskENTER_CRITICAL(&s_mux);
-        if (ret == ESP_OK)
-        {
-            s_saved_count[slot->mode]++;
-        }
-        else
-        {
-            s_drop_count[slot->mode]++;
-        }
-        taskEXIT_CRITICAL(&s_mux);
-        app_ai_capture_format_status(ret == ESP_OK ? "saved" : "write fail");
+        (void)app_ai_capture_write_bmp(slot);
         (void)xQueueSend(s_free_queue, &slot, portMAX_DELAY);
     }
 }
@@ -387,7 +318,6 @@ esp_err_t app_ai_capture_init(void)
         return ESP_FAIL;
     }
     s_inited = true;
-    app_ai_capture_format_status("off");
     return ESP_OK;
 }
 esp_err_t app_ai_capture_start(void)
@@ -404,10 +334,7 @@ esp_err_t app_ai_capture_start(void)
     taskENTER_CRITICAL(&s_mux);
     s_active = true;
     s_frame_skip = 0;
-    s_wait_count = 0;
     taskEXIT_CRITICAL(&s_mux);
-    app_ai_capture_format_status("on");
-    ESP_LOGD(TAG, "continuous capture started");
     return ESP_OK;
 }
 void app_ai_capture_stop(void)
@@ -416,8 +343,6 @@ void app_ai_capture_stop(void)
     s_active = false;
     s_frame_skip = 0;
     taskEXIT_CRITICAL(&s_mux);
-    app_ai_capture_format_status("stopped");
-    ESP_LOGD(TAG, "continuous capture stopped");
 }
 esp_err_t app_ai_capture_set_mode(app_ai_capture_mode_t mode)
 {
@@ -429,8 +354,6 @@ esp_err_t app_ai_capture_set_mode(app_ai_capture_mode_t mode)
     s_mode = mode;
     s_frame_skip = 0;
     taskEXIT_CRITICAL(&s_mux);
-    app_ai_capture_format_status("mode");
-    ESP_LOGD(TAG, "capture mode: %s", app_ai_capture_mode_label(mode));
     return ESP_OK;
 }
 app_ai_capture_mode_t app_ai_capture_get_mode(void)
@@ -472,10 +395,9 @@ bool app_ai_capture_should_capture_frame(void)
     {
         if (s_free_queue != NULL && uxQueueMessagesWaiting(s_free_queue) == 0)
         {
-            taskENTER_CRITICAL(&s_mux);
-            s_wait_count++;
-            s_frame_skip = 0;
-            taskEXIT_CRITICAL(&s_mux);
+        taskENTER_CRITICAL(&s_mux);
+        s_frame_skip = 0;
+        taskEXIT_CRITICAL(&s_mux);
         }
         else
         {
@@ -509,10 +431,6 @@ esp_err_t app_ai_capture_submit_frame(const uint8_t *rgb565,
     app_ai_capture_slot_t *slot = NULL;
     if (xQueueReceive(s_free_queue, &slot, 0) != pdTRUE || slot == NULL)
     {
-        taskENTER_CRITICAL(&s_mux);
-        s_wait_count++;
-        taskEXIT_CRITICAL(&s_mux);
-        app_ai_capture_format_status("wait");
         return ESP_ERR_NO_MEM;
     }
     taskENTER_CRITICAL(&s_mux);
@@ -526,13 +444,8 @@ esp_err_t app_ai_capture_submit_frame(const uint8_t *rgb565,
     app_ai_capture_downsample_rgb565_to_bgr(rgb565, width, height, slot->bgr);
     if (xQueueSend(s_write_queue, &slot, 0) != pdTRUE)
     {
-        taskENTER_CRITICAL(&s_mux);
-        s_drop_count[slot->mode]++;
-        taskEXIT_CRITICAL(&s_mux);
         (void)xQueueSend(s_free_queue, &slot, 0);
-        app_ai_capture_format_status("busy");
         return ESP_ERR_TIMEOUT;
     }
-    app_ai_capture_format_status("queued");
     return ESP_OK;
 }

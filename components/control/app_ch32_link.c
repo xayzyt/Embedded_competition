@@ -89,21 +89,6 @@ static uint16_t app_ch32_read_u16_le(const uint8_t *p)
 {
     return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
 }
-// 兼容旧版单字符命令，把字符映射到新的二进制协议命令。
-static app_ch32_proto_cmd_t app_ch32_char_cmd_to_proto(char cmd)
-{
-    switch (cmd) {
-    case 'P': return APP_CH32_PROTO_CMD_PROBE_READY;
-    case 'A': return APP_CH32_PROTO_CMD_START_DOCK;
-    case 'I': return APP_CH32_PROTO_CMD_QUERY_STATUS;
-    case 'K': return APP_CH32_PROTO_CMD_RESET_FAULT;
-    case 'W': return APP_CH32_PROTO_CMD_READ_WEIGHT;
-    case 'S': return APP_CH32_PROTO_CMD_ABORT;
-    case 'D': return APP_CH32_PROTO_CMD_OPEN_INNER_DOOR;
-    case 'C': return APP_CH32_PROTO_CMD_SAFE_CLOSE;
-    default:  return APP_CH32_PROTO_CMD_NONE;
-    }
-}
 static void app_ch32_reset_ack_state(void)
 {
     s_ctx.last_ack_cmd = APP_CH32_PROTO_CMD_NONE;
@@ -454,13 +439,6 @@ esp_err_t app_ch32_link_init(app_ch32_line_cb_t cb, void *user_ctx)
     ESP_LOGI(TAG, "uart%d init ok, tx=%d rx=%d baud=%d",
         s_ctx.uart_num, APP_CH32_LINK_TX_GPIO, APP_CH32_LINK_RX_GPIO, APP_CH32_LINK_BAUD_RATE);
     return ESP_OK;
-}
-esp_err_t app_ch32_link_send_cmd_and_wait_ack(char cmd, uint32_t timeout_ms)
-{
-    const app_ch32_proto_cmd_t proto_cmd = app_ch32_char_cmd_to_proto(cmd);
-    ESP_RETURN_ON_FALSE(proto_cmd != APP_CH32_PROTO_CMD_NONE,
-        ESP_ERR_INVALID_ARG, TAG, "unknown cmd: %c", cmd);
-    return app_ch32_link_send_proto_cmd_and_wait_ack(proto_cmd, timeout_ms);
 }
 // 公共发送接口：串行化命令发送，清理旧 ACK 状态后等待本次响应。
 esp_err_t app_ch32_link_send_proto_cmd_and_wait_ack(app_ch32_proto_cmd_t proto_cmd, uint32_t timeout_ms)

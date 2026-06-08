@@ -123,8 +123,6 @@ typedef void (*app_ch32_line_cb_t)(const app_ch32_line_t *msg, void *user_ctx);
 esp_err_t app_ch32_link_init(app_ch32_line_cb_t cb, void *user_ctx);
 // 发送二进制协议命令并等待匹配 ACK。
 esp_err_t app_ch32_link_send_proto_cmd_and_wait_ack(app_ch32_proto_cmd_t cmd, uint32_t timeout_ms);
-// 兼容旧字符命令的发送接口。
-esp_err_t app_ch32_link_send_cmd_and_wait_ack(char cmd, uint32_t timeout_ms);
 // 探测 CH32 是否 ready。
 esp_err_t app_ch32_link_probe_ready(uint32_t timeout_ms);
 // 返回最近一次 ready 状态是否仍然新鲜。

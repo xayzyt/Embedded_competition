@@ -33,14 +33,9 @@ bool app_ui_show_loading(const char *text);
 void app_ui_set_loading_text(const char *text);
 void app_ui_set_loading_progress(int32_t percent);
 void app_ui_hide_loading(void);
-// 顶部/调试文本更新。
+// 顶部状态和控制器统一刷新入口。
 void app_ui_set_status(const char *text);
-void app_ui_set_vision_text(const char *text);
-void app_ui_set_dock_text(const char *text);
-void app_ui_set_capture_text(const char *text);
-// 叠加视觉框、锁定条和认证提示。
-void app_ui_update_hud(const app_vision_result_t *vision,
-                       const app_dock_judge_result_t *dock);
+// 控制器统一刷新状态栏、任务行、调试行和 HUD。
 void app_ui_update_control_state(const char *status,
                                  const char *vision_text,
                                  const char *dock_text,

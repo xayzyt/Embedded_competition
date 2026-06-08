@@ -2,7 +2,6 @@
 #include "freertos/idf_additions.h"
 #include "freertos/task.h"
 #include <stdbool.h>
-#include <inttypes.h>
 #include <string.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
@@ -51,102 +50,6 @@ static const char *fourcc_to_str(uint32_t fourcc, char out[5])
     out[3] = (char)((fourcc >> 24) & 0xFF);
     out[4] = '\0';
     return out;
-}
-// 按控件范围和步进裁剪目标值，避免 VIDIOC_S_EXT_CTRLS 被驱动拒绝。
-static int32_t app_video_clamp_ctrl_value(const struct v4l2_query_ext_ctrl *qctrl, int64_t value)
-{
-    int64_t min_value = qctrl->minimum;
-    int64_t max_value = qctrl->maximum;
-    if (value < min_value)
-    {
-        value = min_value;
-    }
-    else if (value > max_value)
-    {
-        value = max_value;
-    }
-    if (qctrl->step > 1 && value > min_value)
-    {
-        uint64_t offset = (uint64_t)(value - min_value);
-        value = min_value + (int64_t)((offset / qctrl->step) * qctrl->step);
-    }
-    return (int32_t)value;
-}
-// 设置单个 V4L2 扩展控件，成功时返回驱动实际采用的值。
-static esp_err_t app_video_set_ext_ctrl_value(int video_fd,
-    uint32_t ctrl_class,
-    uint32_t ctrl_id,
-    int64_t target_value,
-    int32_t *applied_value)
-{
-    struct v4l2_query_ext_ctrl qctrl = {
-        .id = ctrl_id,
-    };
-    if (ioctl(video_fd, VIDIOC_QUERY_EXT_CTRL, &qctrl) != 0)
-    {
-        return ESP_ERR_NOT_SUPPORTED;
-    }
-    struct v4l2_ext_control control[1] = {0};
-    struct v4l2_ext_controls controls = {
-        .ctrl_class = ctrl_class,
-        .count = 1,
-        .controls = control,
-    };
-    int32_t value = app_video_clamp_ctrl_value(&qctrl, target_value);
-    control[0].id = ctrl_id;
-    control[0].value = value;
-    if (ioctl(video_fd, VIDIOC_S_EXT_CTRLS, &controls) != 0)
-    {
-        return ESP_FAIL;
-    }
-    if (applied_value)
-    {
-        *applied_value = value;
-    }
-    return ESP_OK;
-}
-// 识别场景使用较短曝光和受控增益，减少运动模糊与过曝。
-esp_err_t app_video_apply_recognition_profile(int video_fd, uint32_t exposure_us, uint8_t gain_percent)
-{
-    if (video_fd < 0 || exposure_us == 0)
-    {
-        return ESP_ERR_INVALID_ARG;
-    }
-    int32_t applied_exposure = 0;
-    uint32_t exposure_units_100us = (exposure_us + 99U) / 100U;
-    esp_err_t first_error = app_video_set_ext_ctrl_value(video_fd,
-        V4L2_CID_CAMERA_CLASS,
-        V4L2_CID_EXPOSURE_ABSOLUTE,
-        exposure_units_100us,
-        &applied_exposure);
-    struct v4l2_query_ext_ctrl gain_qctrl = {
-        .id = V4L2_CID_GAIN,
-    };
-    int32_t applied_gain = 0;
-    if (ioctl(video_fd, VIDIOC_QUERY_EXT_CTRL, &gain_qctrl) == 0)
-    {
-        uint8_t clipped_percent = gain_percent > 100U ? 100U : gain_percent;
-        int64_t gain_range = gain_qctrl.maximum - gain_qctrl.minimum;
-        int64_t target_gain = gain_qctrl.minimum + (gain_range * clipped_percent) / 100;
-        esp_err_t gain_ret = app_video_set_ext_ctrl_value(video_fd,
-            V4L2_CID_USER_CLASS,
-            V4L2_CID_GAIN,
-            target_gain,
-            &applied_gain);
-        if (first_error == ESP_OK && gain_ret != ESP_OK)
-        {
-            first_error = gain_ret;
-        }
-    }
-    else if (first_error == ESP_OK)
-    {
-        first_error = ESP_ERR_NOT_SUPPORTED;
-    }
-    ESP_LOGD(TAG,
-        "recognition profile exposure=%" PRIi32 "00us gain_index=%" PRIi32,
-        applied_exposure,
-        applied_gain);
-    return first_error;
 }
 // 打开并配置视频设备；首选分辨率失败时可回退到传感器默认尺寸。
 static int app_video_open_configured(char *dev,
@@ -285,10 +188,6 @@ static int app_video_open_configured(char *dev,
     err:
     close(fd);
     return -1;
-}
-int app_video_open(char *dev, video_fmt_t init_fmt)
-{
-    return app_video_open_configured(dev, init_fmt, 0, 0, false);
 }
 int app_video_open_preferred(char *dev,
     video_fmt_t init_fmt,

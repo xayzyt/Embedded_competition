@@ -1874,18 +1874,6 @@ void app_ui_set_status(const char *text)
     s_control_cache_valid = false;
     bsp_display_unlock();
 }
-void app_ui_set_vision_text(const char *text)
-{
-    (void)text;
-}
-void app_ui_set_capture_text(const char *text)
-{
-    (void)text;
-}
-void app_ui_set_dock_text(const char *text)
-{
-    (void)text;
-}
 // 更新视觉框、准星颜色、锁定条和认证提示；调用者需持有 LVGL 锁。
 static void app_ui_update_hud_unlocked(const app_vision_result_t *vision,
     const app_dock_judge_result_t *dock)
@@ -1952,16 +1940,6 @@ static void app_ui_update_hud_unlocked(const app_vision_result_t *vision,
     app_ui_update_lock_bar(dock);
     app_ui_update_telemetry_unlocked(dock);
     app_ui_update_auth_banner(dock->state);
-}
-void app_ui_update_hud(const app_vision_result_t *vision,
-    const app_dock_judge_result_t *dock)
-{
-    if (!bsp_display_lock(UI_LOCK_SHORT_MS))
-    {
-        return;
-    }
-    app_ui_update_hud_unlocked(vision, dock);
-    bsp_display_unlock();
 }
 // 控制器一次性刷新状态栏、任务行、调试行和 HUD，减少多次抢 LVGL 锁。
 void app_ui_update_control_state(const char *status,

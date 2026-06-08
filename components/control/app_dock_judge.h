@@ -47,9 +47,6 @@ const char *app_dock_judge_state_to_text(app_dock_state_t state);
 void app_dock_judge_format_status(const app_dock_judge_result_t *result,
                                   char *buf,
                                   size_t buf_len);
-void app_dock_judge_format_detail(const app_dock_judge_result_t *result,
-                                  char *buf,
-                                  size_t buf_len);
 #ifdef __cplusplus
 }
 #endif

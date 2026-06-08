@@ -1,5 +1,4 @@
 ﻿#include "app_vision.h"
-#include <stdio.h>
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
@@ -11,7 +10,6 @@
 #include "app_apriltag.h"
 #include "app_ai_capture.h"
 #include "app_image_utils.h"
-#include "app_ui.h"
 
 // 视觉管线：从相机 RGB565 帧抽样生成 320x240 灰度图，后台检测 AprilTag 并发布最新结果。
 
@@ -25,9 +23,6 @@
 #define VISION_GRAY_BUF_SIZE           (VISION_GRAY_WIDTH * VISION_GRAY_HEIGHT)
 #define VISION_LOST_RESET_FRAMES       2U
 #define VISION_STABLE_DECAY_ON_LOST    1U
-#define VISION_FRAME_JUMP_LOG_MS       1000U
-#define VISION_TAG_LOG_INTERVAL_MS     1000U
-#define VISION_MISS_LOG_INTERVAL_MS    2000U
 static const char *TAG = "app_vision";
 typedef struct {
     app_vision_gray_frame_info_t info;
@@ -46,9 +41,6 @@ static app_vision_gray_slot_t *s_detect_slot = &s_slot_b;
 static app_vision_gray_slot_t *s_write_slot = &s_slot_c;
 static app_vision_result_t s_latest_result = {0};
 static uint32_t s_submit_seq = 0;
-static uint32_t s_submit_overwrite = 0;
-static uint32_t s_submit_busy_drop = 0;
-static bool s_first_submit_logged = false;
 static uint16_t s_sample_x[VISION_GRAY_WIDTH];
 static uint16_t s_sample_y[VISION_GRAY_HEIGHT];
 static uint32_t s_sample_map_width = 0;
@@ -57,20 +49,6 @@ static uint32_t s_sample_crop_x = 0;
 static uint32_t s_sample_crop_y = 0;
 static uint32_t s_sample_crop_w = 0;
 static uint32_t s_sample_crop_h = 0;
-static uint32_t s_last_tag_info_log_ms = 0;
-static uint32_t s_last_tag_info_seq = 0;
-static uint16_t s_last_tag_info_id = UINT16_MAX;
-static uint32_t s_last_miss_info_log_ms = 0;
-static void app_vision_log_heap(const char *stage)
-{
-    ESP_LOGI(TAG,
-        "%s heap: int8_free=%lu int8_largest=%lu psram_free=%lu psram_largest=%lu",
-        stage,
-        (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
-        (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
-        (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
-        (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
-}
 static inline uint32_t app_vision_now_ms(void)
 {
     return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
@@ -120,13 +98,11 @@ static void app_vision_prepare_sample_map(uint32_t width, uint32_t height)
     s_sample_crop_h = crop_h;
 }
 // 检测任务取走最新 pending 槽，并把旧 detect 槽换回 pending。
-static app_vision_gray_slot_t *app_vision_take_snapshot(app_vision_frame_info_t *meta_out,
-    uint32_t *overwrite_out)
+static app_vision_gray_slot_t *app_vision_take_snapshot(app_vision_frame_info_t *meta_out)
 {
     app_vision_gray_slot_t *slot = NULL;
     taskENTER_CRITICAL(&s_vision_mux);
     *meta_out = s_latest_frame;
-    *overwrite_out = s_submit_overwrite;
     if (s_pending_slot->info.seq != 0)
     {
         app_vision_gray_slot_t *ready_slot = s_pending_slot;
@@ -147,12 +123,6 @@ static bool app_vision_can_accept_frame(void)
     taskEXIT_CRITICAL(&s_vision_mux);
     return ready;
 }
-static void app_vision_mark_busy_drop(void)
-{
-    taskENTER_CRITICAL(&s_vision_mux);
-    s_submit_busy_drop++;
-    taskEXIT_CRITICAL(&s_vision_mux);
-}
 static void app_vision_store_result(const app_vision_result_t *result)
 {
     taskENTER_CRITICAL(&s_vision_mux);
@@ -169,28 +139,6 @@ bool app_vision_get_latest_result(app_vision_result_t *out)
     *out = s_latest_result;
     taskEXIT_CRITICAL(&s_vision_mux);
     return out->valid;
-}
-void app_vision_get_stats(app_vision_stats_t *out)
-{
-    if (out == NULL)
-    {
-        return;
-    }
-    taskENTER_CRITICAL(&s_vision_mux);
-    out->submitted = s_submit_seq;
-    out->busy_drop = s_submit_busy_drop;
-    out->overwrite = s_submit_overwrite;
-    taskEXIT_CRITICAL(&s_vision_mux);
-}
-static void app_vision_set_wait_text(uint32_t heartbeat)
-{
-    if (app_ai_capture_is_active())
-    {
-        return;
-    }
-    char buf[64];
-    snprintf(buf, sizeof(buf), "tag: wait #%lu", (unsigned long)heartbeat);
-    app_ui_set_vision_text(buf);
 }
 // 将灰度检测区域和原图尺寸写入结果，供 UI 映射回屏幕坐标。
 static void app_vision_fill_result_geometry(app_vision_result_t *result,
@@ -262,67 +210,6 @@ static void app_vision_update_result(const app_vision_gray_slot_t *slot,
         result.stable_count = *stable_count;
         result.lost_count = *lost_count;
         app_vision_store_result(&result);
-        char buf[128];
-        snprintf(buf,
-            sizeof(buf),
-            "id:%u hm:%u st:%u e:%.1f ang:%d",
-            (unsigned)result.tag_id,
-            (unsigned)result.hamming,
-            (unsigned)result.stable_count,
-            (double)result.edge_px_avg,
-            (int)result.top_edge_angle_deg);
-        if (!app_ai_capture_is_active())
-        {
-            app_ui_set_vision_text(buf);
-        }
-        const uint32_t now_ms = app_vision_now_ms();
-        if ((result.frame_seq != s_last_tag_info_seq) &&
-            ((result.tag_id != s_last_tag_info_id) ||
-             (result.stable_count == 1U) ||
-             ((uint32_t)(now_ms - s_last_tag_info_log_ms) >= VISION_TAG_LOG_INTERVAL_MS)))
-        {
-            ESP_LOGI(TAG,
-                "tag hit seq=%lu id=%u hm=%u st=%u edge=%.1f area=%ld center=(%ld,%ld) bbox=%ldx%ld detect=%lums gray=%lux%lu",
-                (unsigned long)result.frame_seq,
-                (unsigned)result.tag_id,
-                (unsigned)result.hamming,
-                (unsigned)result.stable_count,
-                (double)result.edge_px_avg,
-                (long)result.area,
-                (long)result.center_x,
-                (long)result.center_y,
-                (long)result.bbox_w,
-                (long)result.bbox_h,
-                (unsigned long)result.detect_ms,
-                (unsigned long)result.gray_width,
-                (unsigned long)result.gray_height);
-            s_last_tag_info_log_ms = now_ms;
-            s_last_tag_info_seq = result.frame_seq;
-            s_last_tag_info_id = result.tag_id;
-        }
-        ESP_LOGD(TAG,
-            "tag seq=%lu id=%u hm=%u rot=%u th=%u border=%u area=%ld center=(%ld,%ld) bbox=(%ld,%ld,%ld,%ld) edge=%.1f ang=%.1f stable=%u detect=%lums crop=(%lu,%lu,%lu,%lu)",
-            (unsigned long)result.frame_seq,
-            (unsigned)result.tag_id,
-            (unsigned)result.hamming,
-            (unsigned)result.rotation,
-            (unsigned)result.threshold,
-            (unsigned)result.border_dark_pct,
-            (long)result.area,
-            (long)result.center_x,
-            (long)result.center_y,
-            (long)result.bbox_x,
-            (long)result.bbox_y,
-            (long)result.bbox_w,
-            (long)result.bbox_h,
-            (double)result.edge_px_avg,
-            (double)result.top_edge_angle_deg,
-            (unsigned)result.stable_count,
-            (unsigned long)result.detect_ms,
-            (unsigned long)result.crop_x,
-            (unsigned long)result.crop_y,
-            (unsigned long)result.crop_w,
-            (unsigned long)result.crop_h);
         return;
     }
     if (*lost_count < UINT16_MAX)
@@ -344,62 +231,18 @@ static void app_vision_update_result(const app_vision_gray_slot_t *slot,
     result.stable_count = *stable_count;
     result.lost_count = *lost_count;
     app_vision_store_result(&result);
-    char buf[96];
-    snprintf(buf,
-        sizeof(buf),
-        "tag: lost #%u st:%u t:%lums",
-        (unsigned)*lost_count,
-        (unsigned)*stable_count,
-        (unsigned long)detect_ms);
-    if (!app_ai_capture_is_active())
-    {
-        app_ui_set_vision_text(buf);
-    }
-    const uint32_t now_ms = app_vision_now_ms();
-    if ((uint32_t)(now_ms - s_last_miss_info_log_ms) >= VISION_MISS_LOG_INTERVAL_MS)
-    {
-        ESP_LOGI(TAG,
-            "tag miss seq=%lu lost=%u st=%u detect=%lums gray=%lux%lu crop=(%lu,%lu,%lu,%lu)",
-            (unsigned long)result.frame_seq,
-            (unsigned)*lost_count,
-            (unsigned)*stable_count,
-            (unsigned long)detect_ms,
-            (unsigned long)result.gray_width,
-            (unsigned long)result.gray_height,
-            (unsigned long)slot->info.crop_x,
-            (unsigned long)slot->info.crop_y,
-            (unsigned long)slot->info.crop_w,
-            (unsigned long)slot->info.crop_h);
-        s_last_miss_info_log_ms = now_ms;
-    }
 }
 // 检测任务：等待新灰度帧，调用 AprilTag 检测器并记录跳帧/覆盖情况。
 static void app_vision_task(void *arg)
 {
     (void)arg;
-    uint32_t heartbeat = 0;
     uint32_t last_seq = 0;
-    uint32_t last_overwrite = 0;
-    uint32_t last_busy_drop = 0;
-    uint32_t jump_lost_accum = 0;
-    uint32_t jump_overwrite_accum = 0;
-    TickType_t last_heartbeat_tick = xTaskGetTickCount();
-    TickType_t last_jump_log_tick = 0;
     uint16_t stable_count = 0;
     uint16_t lost_count = 0;
     uint16_t last_tag_id = 0;
-    if (!app_ai_capture_is_active())
-    {
-        app_ui_set_vision_text("tag: wait frame");
-    }
     while (1) {
         app_vision_frame_info_t meta;
-        uint32_t overwrite = 0;
-        uint32_t busy_drop = 0;
-        app_vision_gray_slot_t *slot = app_vision_take_snapshot(&meta, &overwrite);
-        taskENTER_CRITICAL(&s_vision_mux);
-        busy_drop = s_submit_busy_drop;
-        taskEXIT_CRITICAL(&s_vision_mux);
+        app_vision_gray_slot_t *slot = app_vision_take_snapshot(&meta);
         if (slot->info.seq != 0 && slot->info.seq != last_seq)
         {
             int64_t start_us = esp_timer_get_time();
@@ -427,64 +270,11 @@ static void app_vision_task(void *arg)
                     &lost_count,
                     &last_tag_id);
             }
-            if (last_seq != 0 && slot->info.seq > (last_seq + 1))
-            {
-                jump_lost_accum += (slot->info.seq - last_seq - 1);
-                jump_overwrite_accum += (overwrite - last_overwrite);
-                TickType_t now_tick = xTaskGetTickCount();
-                if ((last_jump_log_tick == 0) ||
-                    ((now_tick - last_jump_log_tick) >= pdMS_TO_TICKS(VISION_FRAME_JUMP_LOG_MS)))
-                {
-                    ESP_LOGW(TAG,
-                        "vision frame jump: last=%lu now=%lu lost_total=%lu overwrite_total=%lu",
-                        (unsigned long)last_seq,
-                        (unsigned long)slot->info.seq,
-                        (unsigned long)jump_lost_accum,
-                        (unsigned long)jump_overwrite_accum);
-                    jump_lost_accum = 0;
-                    jump_overwrite_accum = 0;
-                    last_jump_log_tick = now_tick;
-                }
-            }
             last_seq = slot->info.seq;
-            last_overwrite = overwrite;
-            last_busy_drop = busy_drop;
-            last_heartbeat_tick = xTaskGetTickCount();
         }
         else if (meta.seq != 0 && meta.seq != last_seq)
         {
-            char buf[64];
-            snprintf(buf,
-                sizeof(buf),
-                "frame#%lu %lux%lu",
-                (unsigned long)meta.seq,
-                (unsigned long)meta.width,
-                (unsigned long)meta.height);
-            if (!app_ai_capture_is_active())
-            {
-                app_ui_set_vision_text(buf);
-            }
             last_seq = meta.seq;
-            last_busy_drop = busy_drop;
-            last_heartbeat_tick = xTaskGetTickCount();
-        }
-        else
-        {
-            TickType_t now = xTaskGetTickCount();
-            if ((now - last_heartbeat_tick) >= pdMS_TO_TICKS(VISION_HEARTBEAT_MS))
-            {
-                heartbeat++;
-                app_vision_set_wait_text(heartbeat);
-                if (busy_drop != last_busy_drop)
-                {
-                    ESP_LOGD(TAG,
-                        "vision busy drop: total=%lu delta=%lu",
-                        (unsigned long)busy_drop,
-                        (unsigned long)(busy_drop - last_busy_drop));
-                    last_busy_drop = busy_drop;
-                }
-                last_heartbeat_tick = now;
-            }
         }
         (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(VISION_POLL_PERIOD_MS));
     }
@@ -512,21 +302,13 @@ esp_err_t app_vision_init(void)
     s_write_slot = &s_slot_c;
     memset(&s_latest_result, 0, sizeof(s_latest_result));
     s_submit_seq = 0;
-    s_submit_overwrite = 0;
-    s_submit_busy_drop = 0;
-    s_first_submit_logged = false;
     s_sample_map_width = 0;
     s_sample_map_height = 0;
     s_sample_crop_x = 0;
     s_sample_crop_y = 0;
     s_sample_crop_w = 0;
     s_sample_crop_h = 0;
-    s_last_tag_info_log_ms = 0;
-    s_last_tag_info_seq = 0;
-    s_last_tag_info_id = UINT16_MAX;
-    s_last_miss_info_log_ms = 0;
     taskEXIT_CRITICAL(&s_vision_mux);
-    ESP_LOGI(TAG, "vision init done, gray=%dx%d", VISION_GRAY_WIDTH, VISION_GRAY_HEIGHT);
     s_vision_inited = true;
     return ESP_OK;
 }
@@ -541,7 +323,6 @@ esp_err_t app_vision_start(void)
     {
         return ESP_OK;
     }
-    app_vision_log_heap("before vision task start");
 #if defined(CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY) && CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY
     BaseType_t ret = xTaskCreatePinnedToCoreWithCaps(app_vision_task,
         "app_vision",
@@ -574,11 +355,9 @@ esp_err_t app_vision_start(void)
     if (ret != pdPASS)
     {
         ESP_LOGE(TAG, "create vision task failed");
-        app_vision_log_heap("vision task create failed");
         s_vision_task = NULL;
         return ESP_FAIL;
     }
-    ESP_LOGI(TAG, "vision task started");
     return ESP_OK;
 }
 // 相机回调提交 RGB565 帧：居中裁剪、下采样并转换为灰度 pending 槽。
@@ -598,7 +377,6 @@ esp_err_t app_vision_submit_frame(const uint8_t *rgb565,
     }
     if (!app_vision_can_accept_frame())
     {
-        app_vision_mark_busy_drop();
         return ESP_OK;
     }
     app_vision_gray_slot_t *write_slot = s_write_slot;
@@ -628,10 +406,6 @@ esp_err_t app_vision_submit_frame(const uint8_t *rgb565,
         }
     }
     taskENTER_CRITICAL(&s_vision_mux);
-    if (s_pending_slot->info.seq != 0)
-    {
-        s_submit_overwrite++;
-    }
     s_submit_seq++;
     s_latest_frame.width = width;
     s_latest_frame.height = height;
@@ -648,21 +422,6 @@ esp_err_t app_vision_submit_frame(const uint8_t *rgb565,
     if (s_vision_task != NULL)
     {
         xTaskNotifyGive(s_vision_task);
-    }
-    if (!s_first_submit_logged)
-    {
-        ESP_LOGD(TAG,
-            "first gray frame ready: src=%lux%lu crop=(%lu,%lu,%lu,%lu) gray=%dx%d len=%lu",
-            (unsigned long)width,
-            (unsigned long)height,
-            (unsigned long)s_sample_crop_x,
-            (unsigned long)s_sample_crop_y,
-            (unsigned long)s_sample_crop_w,
-            (unsigned long)s_sample_crop_h,
-            VISION_GRAY_WIDTH,
-            VISION_GRAY_HEIGHT,
-            (unsigned long)len);
-        s_first_submit_logged = true;
     }
     return ESP_OK;
 }

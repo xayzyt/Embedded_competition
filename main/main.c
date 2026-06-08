@@ -1,6 +1,5 @@
 ﻿#include <stdbool.h>
 #include <stdint.h>
-#include <stdio.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -19,10 +18,8 @@
 #include "app_vision.h"
 #include "bsp_display_port.h"
 
-// 应用入口：负责串起显示、视觉、AI、云端、CH32 控制和任务状态机。
 static const char *TAG = "main";
 
-// 演示默认参数集中放在入口处，方便按一次启动流程阅读。
 #define APP_TARGET_TAG_ID            (1U)
 #define APP_TAG_SIZE_MM              (60)
 #define APP_DISTANCE_GATE_ENABLE     (0)
@@ -38,6 +35,7 @@ static const char *TAG = "main";
 #define APP_TASK_EVENT_TASK_PRIO      5
 #define APP_WEATHER_EMERGENCY_TASK_STACK (12 * 1024)
 #define APP_WEATHER_EMERGENCY_TASK_PRIO  5
+#define APP_PREVIEW_FIRST_FRAME_WAIT_MS  12000U
 #define APP_PREVIEW_SWITCH_WAIT_MS       800U
 
 // 任务状态回调可能来自 MQTT 或控制任务，UI 切换统一交给本地 worker 处理。
@@ -66,32 +64,22 @@ static void app_init_nvs(void)
 // 启动显示屏和基础 UI；失败时保留日志并让 app_main 提前返回。
 static bool app_start_display_ui(void)
 {
-    ESP_LOGI(TAG, "display step: init begin");
     if (!app_display_init())
     {
         ESP_LOGE(TAG, "display init failed");
         return false;
     }
-    ESP_LOGI(TAG, "display step: init done");
-    ESP_LOGI(TAG, "display step: ui create begin");
     if (!app_ui_create())
     {
         ESP_LOGE(TAG, "ui create failed");
         return false;
     }
-    ESP_LOGI(TAG, "display step: ui create done");
-    ESP_LOGI(TAG, "display step: loading begin");
     if (!app_ui_show_loading("显示屏就绪"))
     {
         ESP_LOGE(TAG, "loading UI create failed");
         return false;
     }
-    ESP_LOGI(TAG, "display step: loading done, backlight on");
     app_display_backlight_on();
-    ESP_LOGI(TAG, "display step: backlight done");
-    app_ui_set_status("dock: booting");
-    app_ui_set_vision_text("vision: init");
-    app_ui_set_dock_text("dock dbg: init");
     return true;
 }
 
@@ -108,19 +96,6 @@ static app_dock_judge_config_t app_make_dock_config(void)
     cfg.min_distance_mm = APP_MIN_DISTANCE_MM;
     cfg.max_distance_mm = APP_MAX_DISTANCE_MM;
     return cfg;
-}
-
-// 打印对接判定关键参数，方便串口日志和现场调试对齐配置。
-static void app_log_dock_config(const app_dock_judge_config_t *cfg)
-{
-    ESP_LOGI(TAG,
-             "dock cfg: target=%u tag=%ldmm focal=%.1f dist_gate=%d range=[%ld,%ld]",
-             (unsigned)cfg->target_tag_id,
-             (long)cfg->tag_size_mm,
-             (double)cfg->focal_length_px,
-             (int)cfg->use_distance_gate,
-             (long)cfg->min_distance_mm,
-             (long)cfg->max_distance_mm);
 }
 
 // 按启动页进度逐个初始化运行期模块。
@@ -151,7 +126,6 @@ static void app_init_runtime_modules(const app_dock_judge_config_t *dock_cfg)
     if (capture_ret != ESP_OK)
     {
         ESP_LOGW(TAG, "AI capture disabled: %s", esp_err_to_name(capture_ret));
-        app_ui_set_capture_text("cap: disabled");
     }
 }
 
@@ -167,7 +141,6 @@ static esp_err_t app_start_camera_pipeline(void)
         ESP_LOGW(TAG,
                  "drone AI model not ready yet (%s), start preview first",
                  esp_err_to_name(ai_ready_ret));
-        app_ui_set_capture_text("ai: load timeout");
         app_ui_set_loading_text("启动摄像头 (AI未就绪)");
     }
     app_ui_set_loading_text("启动摄像头");
@@ -193,7 +166,7 @@ static esp_err_t app_start_camera_pipeline(void)
     }
     app_ui_set_loading_text("等待摄像头帧");
     app_ui_set_loading_progress(100);
-    if (!app_camera_wait_first_frame(5000))
+    if (!app_camera_wait_first_frame(APP_PREVIEW_FIRST_FRAME_WAIT_MS))
     {
         ESP_LOGW(TAG, "first camera frame did not reach LVGL before loading timeout");
         app_ui_set_loading_text("等待摄像头信号");
@@ -203,10 +176,9 @@ static esp_err_t app_start_camera_pipeline(void)
     return ESP_OK;
 }
 
-// 主屏进入“已配置”状态，提示当前目标码和距离门控配置。
+// 主屏进入“已配置”状态。
 static void app_show_ready_status(const app_dock_judge_config_t *dock_cfg)
 {
-    char vision_text[64];
     if (dock_cfg->use_distance_gate)
     {
         app_ui_set_status("task: configured / dist gate on");
@@ -215,11 +187,6 @@ static void app_show_ready_status(const app_dock_judge_config_t *dock_cfg)
         app_ui_set_status("task: configured / demo loose");
     }
     app_ui_main_screen_set_task_state(APP_UI_MAIN_TASK_CONFIGURED);
-    snprintf(vision_text,
-             sizeof(vision_text),
-             "task:configured target:%u src:local",
-             (unsigned)dock_cfg->target_tag_id);
-    app_ui_set_vision_text(vision_text);
 }
 static bool s_camera_started = false;
 static bool s_cloud_start_requested = false;
@@ -241,7 +208,6 @@ static bool app_task_wants_camera_preview(void)
 static void app_cloud_start_task(void *arg)
 {
     (void)arg;
-    ESP_LOGI(TAG, "cloud async init begin");
     esp_err_t ret = app_cloud_init();
     if (ret != ESP_OK)
     {
@@ -250,10 +216,6 @@ static void app_cloud_start_task(void *arg)
                  esp_err_to_name(ret));
         app_ui_set_status("task: local mode / cloud offline");
         app_ui_main_screen_set_task_state(APP_UI_MAIN_TASK_LOCAL_WAIT);
-    }
-    else
-    {
-        ESP_LOGI(TAG, "cloud async init done");
     }
     vTaskDelete(NULL);
 }
@@ -305,9 +267,6 @@ static void app_camera_start_task(void *arg)
         app_ui_main_screen_set_task_state(APP_UI_MAIN_TASK_CAMERA_FAILED);
         app_ui_show_main_screen();
     }
-    ESP_LOGI(TAG,
-        "camera start task done, stack_free=%u",
-        (unsigned)uxTaskGetStackHighWaterMark(NULL));
     vTaskDelete(NULL);
 }
 
@@ -517,11 +476,7 @@ static void app_weather_emergency_finish(void)
 static void app_weather_emergency_task(void *arg)
 {
     (void)arg;
-    ESP_LOGW(TAG, "weather emergency guard begin");
     app_cloud_trigger_weather_emergency();
-    ESP_LOGI(TAG,
-        "weather emergency guard done, stack_free=%u",
-        (unsigned)uxTaskGetStackHighWaterMark(NULL));
     app_weather_emergency_finish();
     vTaskDelete(NULL);
 }
@@ -572,16 +527,12 @@ static void app_main_screen_status_task(void *arg)
 // ESP-IDF 应用入口。
 void app_main(void)
 {
-    ESP_LOGI(TAG, "app_main enter");
-    ESP_LOGI(TAG, "nvs init begin");
     app_init_nvs();
-    ESP_LOGI(TAG, "nvs init done");
     if (!app_start_display_ui())
     {
         return;
     }
     app_dock_judge_config_t dock_cfg = app_make_dock_config();
-    app_log_dock_config(&dock_cfg);
     app_init_runtime_modules(&dock_cfg);
     app_ui_set_pickup_callback(app_pickup_cb);
     app_ui_set_weather_sim_callback(app_weather_sim_cb);
@@ -617,5 +568,4 @@ void app_main(void)
     {
         ESP_LOGE(TAG, "create main status task failed");
     }
-    ESP_LOGI(TAG, "system ready - main screen displayed");
 }

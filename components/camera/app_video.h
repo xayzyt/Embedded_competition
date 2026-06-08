@@ -26,15 +26,11 @@ typedef void (*app_video_frame_operation_cb_t)(uint8_t *camera_buf,
                                                uint32_t camera_buf_hes,
                                                uint32_t camera_buf_ves,
                                                size_t camera_buf_len);
-// 打开指定 V4L2 设备并配置初始格式。
-int app_video_open(char *dev, video_fmt_t init_fmt);
 // 打开设备并优先请求指定分辨率。
 int app_video_open_preferred(char *dev,
                              video_fmt_t init_fmt,
                              uint32_t preferred_width,
                              uint32_t preferred_height);
-// 为识别场景设置曝光和增益。
-esp_err_t app_video_apply_recognition_profile(int video_fd, uint32_t exposure_us, uint8_t gain_percent);
 // 注册用户态帧缓存。
 esp_err_t app_video_set_bufs(int video_fd, uint32_t fb_num, const void **fb);
 // 返回当前协商到的单帧缓存大小。

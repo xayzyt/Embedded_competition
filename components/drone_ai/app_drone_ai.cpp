@@ -21,10 +21,6 @@
 #include "freertos/task.h"
 #include "sdkconfig.h"
 
-extern "C" {
-#include "app_ui.h"
-}
-
 static const char *TAG = "drone_ai";
 
 #define DRONE_AI_MODEL_PARTITION_LABEL "model"
@@ -48,8 +44,6 @@ static const char *TAG = "drone_ai";
 #define DRONE_AI_MOTION_COOLDOWN_MS   500U
 #define DRONE_AI_MISS_DECAY           1U
 #define DRONE_AI_MALLOC_PSRAM_LIMIT   0U
-#define DRONE_AI_STATUS_INTERVAL_MS   1000U
-#define DRONE_AI_LOG_INTERVAL         10U
 
 typedef enum {
     APP_DRONE_AI_CLASS_NODRONE = 0,
@@ -94,7 +88,6 @@ static uint32_t s_last_motion_reject_ms = 0;
 static uint32_t s_submit_seq = 0;
 static uint32_t s_infer_count = 0;
 static uint32_t s_drop_count = 0;
-static uint32_t s_last_status_ms = 0;
 static app_drone_ai_result_t s_latest = {};
 static uint8_t *s_motion_prev_gray = nullptr;
 static bool s_motion_prev_valid = false;
@@ -247,34 +240,12 @@ static void app_drone_ai_calc_center_crop(uint32_t src_width,
     if (crop_h) *crop_h = h;
 }
 
-static void app_drone_ai_log_heap(const char *stage)
-{
-    const UBaseType_t stack_free_words = uxTaskGetStackHighWaterMark(NULL);
-
-    ESP_LOGI(TAG,
-             "%s heap: int_free=%lu int_largest=%lu psram_free=%lu psram_largest=%lu stack_free=%lu",
-             stage,
-             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-             (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
-             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
-             (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM),
-             (unsigned long)(stack_free_words * sizeof(StackType_t)));
-}
-
 static bool app_drone_ai_input_is_nhwc(const std::vector<int> &shape)
 {
     return shape.size() == 4U &&
            shape[1] == (int)DRONE_AI_INPUT_H &&
            shape[2] == (int)DRONE_AI_INPUT_W &&
            shape[3] == (int)DRONE_AI_INPUT_CH;
-}
-
-static bool app_drone_ai_input_is_nchw(const std::vector<int> &shape)
-{
-    return shape.size() == 4U &&
-           shape[1] == (int)DRONE_AI_INPUT_CH &&
-           shape[2] == (int)DRONE_AI_INPUT_H &&
-           shape[3] == (int)DRONE_AI_INPUT_W;
 }
 
 static inline size_t app_drone_ai_input_offset(bool is_nhwc,
@@ -294,7 +265,8 @@ static void app_drone_ai_release_model_objects(void)
 {
     if (s_model != nullptr)
     {
-        delete s_model;
+        s_model->dl::Model::~Model();
+        heap_caps_free(s_model);
         s_model = nullptr;
     }
     if (s_fbs_model != nullptr)
@@ -304,7 +276,8 @@ static void app_drone_ai_release_model_objects(void)
     }
     if (s_fbs_loader != nullptr)
     {
-        delete s_fbs_loader;
+        s_fbs_loader->fbs::FbsLoader::~FbsLoader();
+        heap_caps_free(s_fbs_loader);
         s_fbs_loader = nullptr;
     }
     s_model_input = nullptr;
@@ -393,23 +366,15 @@ static esp_err_t app_drone_ai_load_model(void)
     }
 
     const app_drone_ai_malloc_psram_scope_t malloc_scope;
-    const int64_t load_start_us = esp_timer_get_time();
-    ESP_LOGI(TAG, "model load: default malloc temporarily prefers PSRAM");
-    app_drone_ai_log_heap("before fbs loader");
-
-    ESP_LOGI(TAG, "model load step 1/3: create fbs loader partition=%s", DRONE_AI_MODEL_PARTITION_LABEL);
-    s_fbs_loader = new (std::nothrow) fbs::FbsLoader(DRONE_AI_MODEL_PARTITION_LABEL,
-                                                     fbs::MODEL_LOCATION_IN_FLASH_PARTITION);
-    if (s_fbs_loader == nullptr)
+    void *loader_mem = heap_caps_malloc(sizeof(fbs::FbsLoader), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (loader_mem == nullptr)
     {
         ESP_LOGE(TAG, "fbs loader alloc failed");
         return ESP_ERR_NO_MEM;
     }
-    ESP_LOGI(TAG, "model load step 1/3 done in %lldms", (esp_timer_get_time() - load_start_us) / 1000LL);
-    app_drone_ai_log_heap("after fbs loader");
+    s_fbs_loader = new (loader_mem) fbs::FbsLoader(DRONE_AI_MODEL_PARTITION_LABEL,
+                                                   fbs::MODEL_LOCATION_IN_FLASH_PARTITION);
 
-    const int64_t fbs_load_start_us = esp_timer_get_time();
-    ESP_LOGI(TAG, "model load step 2/3: parse fbs model");
     s_fbs_model = s_fbs_loader->load(nullptr, false);
     if (s_fbs_model == nullptr)
     {
@@ -417,20 +382,15 @@ static esp_err_t app_drone_ai_load_model(void)
         app_drone_ai_release_model_objects();
         return ESP_FAIL;
     }
-    ESP_LOGI(TAG, "model load step 2/3 done in %lldms", (esp_timer_get_time() - fbs_load_start_us) / 1000LL);
-    app_drone_ai_log_heap("after fbs model");
 
-    const int64_t build_start_us = esp_timer_get_time();
-    ESP_LOGI(TAG, "model load step 3/3: build dl model");
-    s_model = new (std::nothrow) dl::Model(s_fbs_model, 0, dl::MEMORY_MANAGER_GREEDY);
-    if (s_model == nullptr)
+    void *model_mem = heap_caps_malloc(sizeof(dl::Model), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (model_mem == nullptr)
     {
         ESP_LOGE(TAG, "dl model alloc failed");
         app_drone_ai_release_model_objects();
         return ESP_ERR_NO_MEM;
     }
-    ESP_LOGI(TAG, "model load step 3/3 done in %lldms", (esp_timer_get_time() - build_start_us) / 1000LL);
-    app_drone_ai_log_heap("after dl model");
+    s_model = new (model_mem) dl::Model(s_fbs_model, 0, dl::MEMORY_MANAGER_GREEDY);
 
     std::map<std::string, dl::TensorBase *> &inputs = s_model->get_inputs();
     std::map<std::string, dl::TensorBase *> &outputs = s_model->get_outputs();
@@ -443,20 +403,6 @@ static esp_err_t app_drone_ai_load_model(void)
 
     s_model_input = inputs.begin()->second;
     s_model_output = outputs.begin()->second;
-    ESP_LOGI(TAG,
-             "model ready: input dtype=%s exp=%d bytes=%d shape=%dx%dx%dx%d output dtype=%s exp=%d size=%d",
-             s_model_input->get_dtype_string(),
-             s_model_input->exponent.get(),
-             s_model_input->get_bytes(),
-             s_model_input->shape.size() > 0U ? s_model_input->shape[0] : 0,
-             s_model_input->shape.size() > 1U ? s_model_input->shape[1] : 0,
-             s_model_input->shape.size() > 2U ? s_model_input->shape[2] : 0,
-             s_model_input->shape.size() > 3U ? s_model_input->shape[3] : 0,
-             s_model_output->get_dtype_string(),
-             s_model_output->exponent.get(),
-             s_model_output->get_size());
-    ESP_LOGI(TAG, "model load total %lldms", (esp_timer_get_time() - load_start_us) / 1000LL);
-    app_ui_set_capture_text("ai: model ready");
     return ESP_OK;
 }
 
@@ -484,10 +430,6 @@ static esp_err_t app_drone_ai_fill_input(const uint8_t *rgb)
 
     const std::vector<int> &shape = s_model_input->shape;
     const bool is_nhwc = app_drone_ai_input_is_nhwc(shape);
-    if (!is_nhwc && !app_drone_ai_input_is_nchw(shape))
-    {
-        ESP_LOGW(TAG, "unexpected input shape, fallback to NCHW fill");
-    }
 
     if (s_model_input->dtype == dl::DATA_TYPE_INT8)
     {
@@ -670,21 +612,12 @@ static void app_drone_ai_update_result(uint32_t frame_seq,
     taskEXIT_CRITICAL(&s_ai_mux);
 }
 
-static void app_drone_ai_publish_status(void)
-{
-    char text[64] = {};
-    app_drone_ai_format_status(text, sizeof(text));
-    app_ui_set_capture_text(text);
-}
-
 static void app_drone_ai_task(void *arg)
 {
     (void)arg;
 
-    app_ui_set_capture_text("ai: idle");
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
-    app_ui_set_capture_text("ai: loading model");
     while (1) {
         esp_err_t load_ret = app_drone_ai_load_model();
         app_drone_ai_set_model_status(load_ret);
@@ -692,8 +625,6 @@ static void app_drone_ai_task(void *arg)
         {
             break;
         }
-        app_ui_set_capture_text("ai: model load fail");
-        ESP_LOGW(TAG, "model load failed: %s", esp_err_to_name(load_ret));
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 
@@ -725,54 +656,10 @@ static void app_drone_ai_task(void *arg)
                                            slot->motion_score,
                                            slot->tick_ms);
 
-                const uint32_t now_ms = app_drone_ai_now_ms();
-                uint32_t infer_count = 0;
-                uint8_t hit_count = 0;
-                uint32_t last_motion_reject_ms = 0;
-                bool confirmed = false;
                 taskENTER_CRITICAL(&s_ai_mux);
                 s_infer_count++;
-                infer_count = s_infer_count;
-                hit_count = s_hit_count;
-                last_motion_reject_ms = s_last_motion_reject_ms;
-                confirmed = s_confirmed;
                 taskEXIT_CRITICAL(&s_ai_mux);
-                const bool candidate_hit = (drone_score >= DRONE_AI_THRESHOLD);
-                const bool motion_cooldown_done = (last_motion_reject_ms == 0U) ||
-                                                  ((slot->tick_ms - last_motion_reject_ms) >= DRONE_AI_MOTION_COOLDOWN_MS);
-                const bool stable_frame = (slot->motion_score <= DRONE_AI_MOTION_STABLE_DIFF) &&
-                                          motion_cooldown_done;
-                if (candidate_hit || (now_ms - s_last_status_ms) >= DRONE_AI_STATUS_INTERVAL_MS)
-                {
-                    app_drone_ai_publish_status();
-                    s_last_status_ms = now_ms;
-                }
-
-                if (candidate_hit || (infer_count % DRONE_AI_LOG_INTERVAL) == 0U)
-                {
-                    ESP_LOGI(TAG,
-                             "infer %lums label=%s nodrone=%.3f drone=%.3f motion=%lu stable<=%u reject>=%u stable=%d hits=%u/%u confirmed=%d",
-                             (unsigned long)infer_ms,
-                             drone_score >= nodrone_score ? "DRONE" : "NODRONE",
-                             (double)nodrone_score,
-                             (double)drone_score,
-                             (unsigned long)slot->motion_score,
-                             (unsigned)DRONE_AI_MOTION_STABLE_DIFF,
-                             (unsigned)DRONE_AI_MOTION_REJECT_DIFF,
-                             (int)stable_frame,
-                             (unsigned)hit_count,
-                             (unsigned)DRONE_AI_CONFIRM_HITS,
-                             (int)confirmed);
-                }
             }
-            else
-            {
-                ESP_LOGW(TAG, "read output failed: %s", esp_err_to_name(ret));
-            }
-        }
-        else
-        {
-            ESP_LOGW(TAG, "fill input failed: %s", esp_err_to_name(ret));
         }
 
         (void)xQueueSend(s_free_queue, &slot, portMAX_DELAY);
@@ -829,7 +716,6 @@ esp_err_t app_drone_ai_init(void)
     s_last_motion_reject_ms = 0;
     s_infer_count = 0;
     s_drop_count = 0;
-    s_last_status_ms = 0;
     s_motion_prev_valid = false;
     memset(&s_latest, 0, sizeof(s_latest));
     taskEXIT_CRITICAL(&s_ai_mux);
@@ -855,18 +741,6 @@ esp_err_t app_drone_ai_init(void)
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG,
-             "drone ai init done (threshold=%.2f hits=%u span=%lums stable_motion<=%u reject_motion>=%u cooldown=%lums strong=%.2f+%u miss_decay=%u prio=%u)",
-             (double)DRONE_AI_THRESHOLD,
-             (unsigned)DRONE_AI_CONFIRM_HITS,
-             (unsigned long)DRONE_AI_CONFIRM_MIN_SPAN_MS,
-             (unsigned)DRONE_AI_MOTION_STABLE_DIFF,
-             (unsigned)DRONE_AI_MOTION_REJECT_DIFF,
-             (unsigned long)DRONE_AI_MOTION_COOLDOWN_MS,
-             (double)DRONE_AI_STRONG_THRESHOLD,
-             (unsigned)DRONE_AI_STRONG_HITS,
-             (unsigned)DRONE_AI_MISS_DECAY,
-             (unsigned)DRONE_AI_TASK_PRIORITY);
     return ESP_OK;
 }
 

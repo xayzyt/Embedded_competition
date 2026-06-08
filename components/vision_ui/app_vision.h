@@ -68,12 +68,6 @@ typedef struct {
     uint32_t seq;
     uint32_t tick_ms;
 } app_vision_gray_frame_info_t;
-// 视觉任务吞吐统计。
-typedef struct {
-    uint32_t submitted; // 已提交帧数。
-    uint32_t busy_drop; // 检测线程忙碌导致丢弃帧数。
-    uint32_t overwrite; // 新帧覆盖未检测旧帧次数。
-} app_vision_stats_t;
 // 初始化、启动和提交 RGB565 帧。
 esp_err_t app_vision_init(void);
 esp_err_t app_vision_start(void);
@@ -81,9 +75,8 @@ esp_err_t app_vision_submit_frame(const uint8_t *rgb565,
                                   uint32_t width,
                                   uint32_t height,
                                   size_t len);
-// 查询最近一次检测结果和统计。
+// 查询最近一次检测结果。
 bool app_vision_get_latest_result(app_vision_result_t *out);
-void app_vision_get_stats(app_vision_stats_t *out);
 #ifdef __cplusplus
 }
 #endif
