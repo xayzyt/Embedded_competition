@@ -29,7 +29,6 @@ static const char *TAG = "app_ctrl";
 #define CTRL_BUSY_TIMEOUT_MS            20000U
 #define CTRL_NOTICE_SHOW_MS             1600U
 #define CTRL_RETRIGGER_COOLDOWN_MS      1800U
-#define CTRL_AUTO_DOCK_ENABLE           (1)
 typedef struct {
     bool inited;
     bool ch32_ready;
@@ -403,7 +402,6 @@ static void app_ctrl_try_auto_dock(uint32_t now_ms,
     bool *dock_busy,
     bool *cargo_wait_window_seen)
 {
-#if CTRL_AUTO_DOCK_ENABLE
     if ((dock == NULL) || (task == NULL) || (dock_busy == NULL) || (cargo_wait_window_seen == NULL))
     {
         return;
@@ -456,17 +454,6 @@ static void app_ctrl_try_auto_dock(uint32_t now_ms,
         CTRL_NOTICE_SHOW_MS);
     app_task_mark_fault(ch32_rejected ? "CH32 rejected cmd" : "CH32 ack timeout");
     (void)app_task_get_snapshot(task);
-#else
-    (void)now_ms;
-    (void)dock;
-    (void)task;
-    (void)ch32_ready;
-    (void)retrigger_blocked;
-    (void)prev_ready_level;
-    (void)ready_level;
-    (void)dock_busy;
-    (void)cargo_wait_window_seen;
-#endif
 }
 // 根据 CH32 busy 边沿推进任务状态：开始对接、完成或故障。
 static void app_ctrl_update_task_for_busy_transition(bool prev_dock_busy,

@@ -471,23 +471,6 @@ bool app_dock_judge_process(const app_vision_result_t *vision,
     out->invalid_hold_count = s_rt.invalid_hold_count;
     return true;
 }
-const char *app_dock_judge_state_to_text(app_dock_state_t state)
-{
-    switch (state) {
-    case APP_DOCK_STATE_SEARCHING:
-        return "searching";
-    case APP_DOCK_STATE_WRONG_ID:
-        return "wrong_id";
-    case APP_DOCK_STATE_TRACKING:
-        return "tracking";
-    case APP_DOCK_STATE_ALIGNED:
-        return "aligned";
-    case APP_DOCK_STATE_READY_TO_DOCK:
-        return "ready";
-    default:
-        return "unknown";
-    }
-}
 // 简短状态文案给主状态栏使用。
 void app_dock_judge_format_status(const app_dock_judge_result_t *result,
     char *buf,

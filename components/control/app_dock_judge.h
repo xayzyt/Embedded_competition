@@ -42,8 +42,7 @@ void app_dock_judge_reset(void);
 // 输入视觉结果，输出带滞回和滤波后的对接判定。
 bool app_dock_judge_process(const app_vision_result_t *vision,
                             app_dock_judge_result_t *out);
-// 状态与结果格式化，供 UI/日志使用。
-const char *app_dock_judge_state_to_text(app_dock_state_t state);
+// 结果格式化，供 UI/日志使用。
 void app_dock_judge_format_status(const app_dock_judge_result_t *result,
                                   char *buf,
                                   size_t buf_len);

@@ -17,7 +17,6 @@
 #define VISION_TASK_PRIORITY           4
 #define VISION_TASK_CORE_ID            1
 #define VISION_POLL_PERIOD_MS          25
-#define VISION_HEARTBEAT_MS            1000
 #define VISION_GRAY_WIDTH              320
 #define VISION_GRAY_HEIGHT             240
 #define VISION_GRAY_BUF_SIZE           (VISION_GRAY_WIDTH * VISION_GRAY_HEIGHT)

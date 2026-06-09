@@ -22,10 +22,7 @@ static const char *TAG = "main";
 
 #define APP_TARGET_TAG_ID            (1U)
 #define APP_TAG_SIZE_MM              (60)
-#define APP_DISTANCE_GATE_ENABLE     (0)
 #define APP_FOCAL_LENGTH_PX          (314.0f)
-#define APP_MIN_DISTANCE_MM          (120)
-#define APP_MAX_DISTANCE_MM          (700)
 #define APP_CLOUD_START_TASK_STACK   (8 * 1024)
 #define APP_CLOUD_START_TASK_PRIO    4
 #define APP_CAMERA_START_TASK_STACK  (12 * 1024)
@@ -92,9 +89,6 @@ static app_dock_judge_config_t app_make_dock_config(void)
     cfg.target_tag_id = APP_TARGET_TAG_ID;
     cfg.tag_size_mm = APP_TAG_SIZE_MM;
     cfg.focal_length_px = APP_FOCAL_LENGTH_PX;
-    cfg.use_distance_gate = (APP_DISTANCE_GATE_ENABLE != 0);
-    cfg.min_distance_mm = APP_MIN_DISTANCE_MM;
-    cfg.max_distance_mm = APP_MAX_DISTANCE_MM;
     return cfg;
 }
 
@@ -510,7 +504,6 @@ static void app_main_screen_status_task(void *arg)
     }
 }
 
-// ESP-IDF 应用入口。
 void app_main(void)
 {
     app_init_nvs();
