@@ -1,12 +1,10 @@
 ﻿#include "app_dock_judge.h"
 #include <stdio.h>
 #include <string.h>
-#include "esp_log.h"
 
 // 对接判定器：对 AprilTag 结果做目标 ID、居中、靠近、稳定和距离门控，
 // 并用 EMA 与滞回减少抖动导致的误触发。
 
-static const char *TAG = "app_dock";
 typedef struct {
     bool have_filter;
     uint16_t last_tag_id;
@@ -253,23 +251,6 @@ esp_err_t app_dock_judge_init(const app_dock_judge_config_t *cfg)
     s_cfg = *cfg;
     app_dock_judge_reset();
     s_inited = true;
-    ESP_LOGI(TAG,
-        "dock init: target_en=%d target_id=%u ref=(%ld,%ld) tol=(%ld,%ld) area>=%ld bbox>=(%ld,%ld) stable>=%u tag=%ldmm focal=%.1fpx dist_gate=%d dist=[%ld,%ld]",
-        s_cfg.use_target_id,
-        (unsigned)s_cfg.target_tag_id,
-        (long)s_cfg.center_x_ref,
-        (long)s_cfg.center_y_ref,
-        (long)s_cfg.center_x_tol,
-        (long)s_cfg.center_y_tol,
-        (long)s_cfg.min_area,
-        (long)s_cfg.min_bbox_w,
-        (long)s_cfg.min_bbox_h,
-        (unsigned)s_cfg.min_stable_count,
-        (long)s_cfg.tag_size_mm,
-        (double)s_cfg.focal_length_px,
-        s_cfg.use_distance_gate,
-        (long)s_cfg.min_distance_mm,
-        (long)s_cfg.max_distance_mm);
     return ESP_OK;
 }
 // 云端或任务更新目标 ID 后重置历史滤波/滞回状态。
@@ -291,7 +272,6 @@ esp_err_t app_dock_judge_set_target_id(uint16_t target_tag_id, bool enable_filte
     s_rt.have_processed_frame = false;
     s_rt.last_processed_frame_seq = 0;
     s_rt.last_state = APP_DOCK_STATE_SEARCHING;
-    ESP_LOGI(TAG, "dock target updated: enable=%d target_id=%u", s_cfg.use_target_id, (unsigned)s_cfg.target_tag_id);
     return ESP_OK;
 }
 void app_dock_judge_reset(void)

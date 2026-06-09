@@ -331,7 +331,6 @@ static esp_err_t app_cloud_fetch_weather_once(void)
     s_cloud.weather_docking_blocked = false;
     s_cloud.weather_mode = APP_CLOUD_WEATHER_MODE_NORMAL;
     app_ui_main_screen_apply_weather_state(weather_text, weather_code, false, NULL);
-    ESP_LOGI(TAG, "weather updated: %s code=%d", weather_text, weather_code);
     return ESP_OK;
 }
 // 天气任务：定时刷新真实天气，模拟/恢复状态变化时被通知唤醒。
@@ -402,7 +401,6 @@ void app_cloud_set_weather_simulated(bool simulated)
     if (s_cloud.weather_last_toggle_tick != 0 &&
         (now - s_cloud.weather_last_toggle_tick) < pdMS_TO_TICKS(APP_CLOUD_WEATHER_TOGGLE_DEBOUNCE_MS))
     {
-        ESP_LOGD(TAG, "ignore weather toggle debounce");
         return;
     }
     const bool was_simulated = s_cloud.weather_simulated;
@@ -438,7 +436,6 @@ void app_cloud_set_weather_simulated(bool simulated)
         s_cloud.weather_mode = APP_CLOUD_WEATHER_MODE_NORMAL;
         s_cloud.weather_restore_pending = restore_pending;
         app_cloud_show_restored_weather_ui(true);
-        ESP_LOGI(TAG, "restore weather requested");
     }
     app_cloud_publish_current_state();
     app_cloud_notify_weather_task();

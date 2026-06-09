@@ -122,7 +122,6 @@ static esp_err_t app_cloud_publish_raw(const char *topic,
         ESP_LOGW(TAG, "mqtt publish failed, topic=%s", topic);
         return ESP_FAIL;
     }
-    ESP_LOGD(TAG, "mqtt tx topic=%s msg_id=%d", topic, msg_id);
     return ESP_OK;
 }
 // 给云端命令回复 ACK，包含请求/订单信息和执行结果码。
@@ -241,7 +240,6 @@ void app_cloud_on_task_event(app_task_event_t event,
 }
 static esp_err_t app_cloud_receive_set_target(uint16_t target_id)
 {
-    ESP_LOGI(TAG, "cloud rx: set_target=%u", (unsigned)target_id);
     return app_task_set_target_id(target_id, true);
 }
 // 处理云端 start_task；天气保护期间拒绝接单并保持原订单上下文。
@@ -273,11 +271,6 @@ static esp_err_t app_cloud_receive_start_task(const app_cloud_cmd_t *cmd)
     app_cloud_order_name_from_cmd(cmd,
         s_cloud.current_order_name,
         sizeof(s_cloud.current_order_name));
-    ESP_LOGI(TAG,
-        "cloud rx: start_task target=%u request_id=%s order=%s",
-        (unsigned)cmd->target_id,
-        (cmd->request_id[0] != '\0') ? cmd->request_id : "-",
-        (s_cloud.current_order_name[0] != '\0') ? s_cloud.current_order_name : "-");
     esp_err_t ret = app_task_submit_remote_request(cmd->target_id, "emqx");
     if (ret != ESP_OK)
     {
@@ -289,7 +282,6 @@ static esp_err_t app_cloud_receive_start_task(const app_cloud_cmd_t *cmd)
 }
 static esp_err_t app_cloud_receive_cancel(void)
 {
-    ESP_LOGI(TAG, "cloud rx: cancel");
     app_task_cancel("cancelled by cloud");
     return ESP_OK;
 }
@@ -315,12 +307,6 @@ static esp_err_t app_cloud_handle_command(const char *payload, size_t payload_le
         ESP_LOGW(TAG, "bad EMQX cmd payload, len=%u", (unsigned)copy_len);
         return ret;
     }
-    ESP_LOGD(TAG,
-        "EMQX cmd rx cmd=%s target=%u request_id=%s order=%s",
-        cmd.cmd,
-        (unsigned)cmd.target_id,
-        (cmd.request_id[0] != '\0') ? cmd.request_id : "-",
-        (cmd.order_name[0] != '\0') ? cmd.order_name : "-");
     if (strcmp(cmd.cmd, "start_task") == 0)
     {
         ret = app_cloud_receive_start_task(&cmd);
@@ -391,7 +377,6 @@ void app_cloud_handle_mqtt_data_event(esp_mqtt_event_handle_t event)
     }
     (void)app_cloud_copy_event_slice(topic, sizeof(topic), event->topic, event->topic_len);
     const int data_len = app_cloud_copy_event_slice(payload, sizeof(payload), event->data, event->data_len);
-    ESP_LOGD(TAG, "mqtt rx topic=%s len=%d", topic, data_len);
     if (strcmp(topic, s_cloud.topic_cmd) == 0)
     {
         (void)app_cloud_handle_command(payload, (size_t)data_len);

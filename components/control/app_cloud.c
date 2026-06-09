@@ -9,7 +9,6 @@
 #include "esp_crt_bundle.h"
 #include "esp_err.h"
 #include "esp_event.h"
-#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_hosted.h"
 #include "esp_netif.h"
@@ -25,16 +24,6 @@ static void app_cloud_mqtt_event_handler(void *handler_args,
     esp_event_base_t base,
     int32_t event_id,
     void *event_data);
-static void app_cloud_log_heap(const char *stage)
-{
-    ESP_LOGI(TAG,
-        "%s heap: int_free=%lu int_largest=%lu psram_free=%lu psram_largest=%lu",
-        stage,
-        (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-        (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
-        (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
-        (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
-}
 // ESP-IDF 全局网络栈/事件循环可能被别的模块初始化过，重复调用视为成功。
 static esp_err_t app_cloud_init_netif_once(void)
 {
@@ -73,14 +62,6 @@ static void app_cloud_build_topics(void)
         CONFIG_SKY_MQTT_TOPIC_PREFIX,
         CONFIG_SKY_MQTT_DEVICE_NAME);
 }
-static void app_cloud_log_topics_once(void)
-{
-    ESP_LOGD(TAG,
-        "mqtt topics ready: cmd=%s ack=%s state=%s",
-        s_cloud.topic_cmd,
-        s_cloud.topic_ack,
-        s_cloud.topic_state);
-}
 // 统一封装 Wi-Fi 重连请求，保留触发原因方便排查。
 static void app_cloud_request_wifi_connect(const char *reason)
 {
@@ -93,19 +74,6 @@ static void app_cloud_request_wifi_connect(const char *reason)
             esp_err_to_name(ret));
     }
 }
-static void app_cloud_log_dns_info(const char *label, const esp_netif_dns_info_t *dns)
-{
-    if (dns == NULL || dns->ip.u_addr.ip4.addr == 0)
-    {
-        ESP_LOGW(TAG, "%s dns: not configured", label);
-        return;
-    }
-    char ip[16] = {0};
-    ESP_LOGI(TAG,
-        "%s dns: %s",
-        label,
-        esp_ip4addr_ntoa(&dns->ip.u_addr.ip4, ip, sizeof(ip)));
-}
 // 某些 ESP-Hosted 场景 DHCP DNS 可能为空，拿到 IP 后补一个兜底 DNS。
 static void app_cloud_ensure_dns_after_ip(void)
 {
@@ -117,7 +85,6 @@ static void app_cloud_ensure_dns_after_ip(void)
     esp_err_t ret = esp_netif_get_dns_info(s_cloud.sta_netif, ESP_NETIF_DNS_MAIN, &dns);
     if (ret == ESP_OK && dns.ip.u_addr.ip4.addr != 0)
     {
-        app_cloud_log_dns_info("main", &dns);
         return;
     }
     ESP_LOGW(TAG,
@@ -140,19 +107,6 @@ static void app_cloud_ensure_dns_after_ip(void)
         ESP_LOGW(TAG, "set fallback dns failed: %s", esp_err_to_name(ret));
         return;
     }
-    app_cloud_log_dns_info("fallback", &fallback);
-}
-// SNTP 同步完成后打印本地时间，供日志时间线校准。
-static void app_cloud_time_sync_cb(struct timeval *tv)
-{
-    (void)tv;
-    time_t now = 0;
-    time(&now);
-    struct tm tm_now;
-    localtime_r(&now, &tm_now);
-    char time_buf[32] = {0};
-    strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", &tm_now);
-    ESP_LOGI(TAG, "time synced: %s", time_buf);
 }
 // Wi-Fi 拿到 IP 后启动 SNTP；时区采用中国标准时间。
 static void app_cloud_start_sntp_once(void)
@@ -164,7 +118,6 @@ static void app_cloud_start_sntp_once(void)
     setenv("TZ", APP_CLOUD_TIMEZONE, 1);
     tzset();
     esp_sntp_config_t sntp_config = ESP_NETIF_SNTP_DEFAULT_CONFIG(APP_CLOUD_NTP_SERVER);
-    sntp_config.sync_cb = app_cloud_time_sync_cb;
     esp_err_t ret = esp_netif_sntp_init(&sntp_config);
     if (ret == ESP_ERR_INVALID_STATE)
     {
@@ -178,7 +131,6 @@ static void app_cloud_start_sntp_once(void)
         return;
     }
     s_cloud.sntp_started = true;
-    ESP_LOGI(TAG, "SNTP started, server=%s", APP_CLOUD_NTP_SERVER);
 }
 // 检查 menuconfig 中必须填写的 Wi-Fi/MQTT 参数。
 static esp_err_t app_cloud_validate_config(void)
@@ -279,7 +231,6 @@ static esp_err_t app_cloud_start_mqtt_if_needed(void)
         ESP_LOGW(TAG, "register mqtt event failed: %s", esp_err_to_name(ret));
         return ret;
     }
-    app_cloud_log_heap("before mqtt start");
     ret = esp_mqtt_client_start(s_cloud.mqtt_client);
     if (ret != ESP_OK)
     {
@@ -288,7 +239,6 @@ static esp_err_t app_cloud_start_mqtt_if_needed(void)
         return ret;
     }
     s_cloud.mqtt_started = true;
-    ESP_LOGI(TAG, "EMQX mqtt client started");
     return ESP_OK;
 }
 // 云端后台任务：消费“启动 MQTT”事件，避免事件回调里做重操作。
@@ -303,7 +253,6 @@ static void app_cloud_task(void *arg)
             portMAX_DELAY);
         if ((bits & APP_CLOUD_START_MQTT_BIT) != 0)
         {
-            ESP_LOGD(TAG, "cloud task: start mqtt");
             esp_err_t ret = app_cloud_start_mqtt_if_needed();
             if (ret != ESP_OK)
             {
@@ -325,7 +274,6 @@ static void app_cloud_wifi_event_handler(void *arg,
     {
         switch (event_id) {
         case WIFI_EVENT_STA_START:
-            ESP_LOGD(TAG, "wifi sta start -> connect");
             app_cloud_request_wifi_connect("sta_start");
             break;
         case WIFI_EVENT_STA_DISCONNECTED: {
@@ -348,7 +296,6 @@ static void app_cloud_wifi_event_handler(void *arg,
     }
     else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP)
     {
-        ESP_LOGI(TAG, "wifi got ip");
         app_cloud_ensure_dns_after_ip();
         app_cloud_start_sntp_once();
         app_cloud_start_weather_task_once();
@@ -368,15 +315,11 @@ static void app_cloud_mqtt_event_handler(void *handler_args,
     esp_mqtt_event_handle_t event = (esp_mqtt_event_handle_t)event_data;
     switch ((esp_mqtt_event_id_t)event_id) {
     case MQTT_EVENT_CONNECTED:
-        ESP_LOGI(TAG, "EMQX mqtt connected");
         s_cloud.mqtt_connected = true;
         xEventGroupSetBits(s_cloud.event_group, APP_CLOUD_MQTT_CONNECTED_BIT);
-        {
-            int sub_cmd = esp_mqtt_client_subscribe(s_cloud.mqtt_client,
-                s_cloud.topic_cmd,
-                CONFIG_SKY_MQTT_QOS);
-            ESP_LOGD(TAG, "subscribe sent cmd=%d", sub_cmd);
-        }
+        (void)esp_mqtt_client_subscribe(s_cloud.mqtt_client,
+            s_cloud.topic_cmd,
+            CONFIG_SKY_MQTT_QOS);
         if (s_cloud.have_last_snapshot)
         {
             app_cloud_publish_task_snapshot_internal(&s_cloud.last_snapshot);
@@ -386,12 +329,6 @@ static void app_cloud_mqtt_event_handler(void *handler_args,
         ESP_LOGW(TAG, "EMQX mqtt disconnected");
         s_cloud.mqtt_connected = false;
         xEventGroupClearBits(s_cloud.event_group, APP_CLOUD_MQTT_CONNECTED_BIT);
-        break;
-    case MQTT_EVENT_SUBSCRIBED:
-        ESP_LOGD(TAG, "mqtt subscribed, msg_id=%d", event->msg_id);
-        break;
-    case MQTT_EVENT_PUBLISHED:
-        ESP_LOGD(TAG, "mqtt published, msg_id=%d", event->msg_id);
         break;
     case MQTT_EVENT_DATA:
         app_cloud_handle_mqtt_data_event(event);
@@ -475,11 +412,8 @@ esp_err_t app_cloud_init(void)
     ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg), TAG, "wifi set config failed");
     ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "wifi start failed");
     ESP_RETURN_ON_ERROR(esp_wifi_set_ps(WIFI_PS_NONE), TAG, "wifi set ps failed");
-    ESP_LOGI(TAG, "wifi started, mqtt waits for ip");
-    app_cloud_log_topics_once();
     s_cloud.inited = true;
     app_cloud_start_weather_task_once();
-    ESP_LOGI(TAG, "EMQX init done (official host Wi-Fi path via ESP32-C6)");
     return ESP_OK;
 }
 // 汇总给主屏状态灯使用的连接/天气状态。

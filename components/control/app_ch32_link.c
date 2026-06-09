@@ -196,7 +196,6 @@ static void app_ch32_dispatch_msg(const app_ch32_line_t *msg)
     app_ch32_apply_common_side_effects(msg);
     if (s_ctx.cb != NULL)
         s_ctx.cb(msg, s_ctx.user_ctx);
-    ESP_LOGD(TAG, "CH32 rx: %s", msg->line);
 }
 // 校验并解析一帧 CH32 二进制协议，输出统一的 app_ch32_line_t。
 static bool app_ch32_parse_proto_frame(const uint8_t *frame, size_t frame_len, app_ch32_line_t *out)
@@ -210,7 +209,6 @@ static bool app_ch32_parse_proto_frame(const uint8_t *frame, size_t frame_len, a
     const uint16_t crc_actual = app_ch32_crc16_ibm(frame, (size_t)(6U + payload_len));
     if (crc_expect != crc_actual)
     {
-        ESP_LOGD(TAG, "proto crc mismatch, expect=0x%04x actual=0x%04x", crc_expect, crc_actual);
         return false;
     }
     memset(out, 0, sizeof(*out));
@@ -368,8 +366,6 @@ static esp_err_t app_ch32_link_send_proto(app_ch32_proto_cmd_t cmd,
     int written = uart_write_bytes(s_ctx.uart_num, (const char *)frame, idx);
     ESP_RETURN_ON_FALSE(written == (int)idx, ESP_FAIL, TAG, "uart_write_bytes proto failed");
     if (out_seq != NULL) *out_seq = seq;
-    ESP_LOGD(TAG, "ESP32 => CH32 proto: cmd=0x%02X seq=%u len=%u",
-        (unsigned)cmd, (unsigned)seq, (unsigned)payload_len);
     return ESP_OK;
 }
 // 在指定时间内等待与 cmd/seq 匹配的 ACK 或 NACK。
@@ -436,8 +432,6 @@ esp_err_t app_ch32_link_init(app_ch32_line_cb_t cb, void *user_ctx)
     BaseType_t ok = xTaskCreate(app_ch32_link_rx_task, "ch32_rx", 4096, NULL, 8, &s_ctx.rx_task);
     ESP_RETURN_ON_FALSE(ok == pdPASS, ESP_ERR_NO_MEM, TAG, "rx task create failed");
     s_ctx.inited = true;
-    ESP_LOGI(TAG, "uart%d init ok, tx=%d rx=%d baud=%d",
-        s_ctx.uart_num, APP_CH32_LINK_TX_GPIO, APP_CH32_LINK_RX_GPIO, APP_CH32_LINK_BAUD_RATE);
     return ESP_OK;
 }
 // 公共发送接口：串行化命令发送，清理旧 ACK 状态后等待本次响应。

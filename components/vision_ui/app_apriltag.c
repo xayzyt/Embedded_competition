@@ -4,7 +4,6 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
-#include "esp_log.h"
 #include "esp_heap_caps.h"
 
 // 轻量 AprilTag tag36h11 检测器：二值化、连通域找候选、透视采样并与码表匹配。
@@ -24,7 +23,6 @@
 #define AT_EDGE_MARGIN          1U
 #define AT_MAX_BOX_PCT          78U
 #define AT_MAX_BOX_AREA_PCT     72U
-static const char *TAG = "app_apriltag";
 static uint8_t *s_binary = NULL;
 static uint8_t *s_visited = NULL;
 static uint32_t *s_queue = NULL;
@@ -1305,7 +1303,6 @@ esp_err_t app_apriltag_init(void)
         return ESP_ERR_NO_MEM;
     }
     s_inited = true;
-    ESP_LOGI(TAG, "local perspective tag36h11 detector ready");
     return ESP_OK;
 }
 // 检测入口：从候选中选择汉明距离最低、边框更可靠的标签结果。

@@ -74,7 +74,7 @@ static bool app_start_display_ui(void)
         ESP_LOGE(TAG, "ui create failed");
         return false;
     }
-    if (!app_ui_show_loading("显示屏就绪"))
+    if (!app_ui_show_loading())
     {
         ESP_LOGE(TAG, "loading UI create failed");
         return false;
@@ -101,26 +101,19 @@ static app_dock_judge_config_t app_make_dock_config(void)
 // 按启动页进度逐个初始化运行期模块。
 static void app_init_runtime_modules(const app_dock_judge_config_t *dock_cfg)
 {
-    app_ui_set_loading_text("启动 CH32 通信");
     app_ui_set_loading_progress(5);
     ESP_ERROR_CHECK(app_ch32_link_init(app_ctrl_on_ch32_line, NULL));
-    app_ui_set_loading_text("准备视觉模块");
     app_ui_set_loading_progress(15);
     ESP_ERROR_CHECK(app_vision_init());
-    app_ui_set_loading_text("加载对接判定");
     app_ui_set_loading_progress(25);
     ESP_ERROR_CHECK(app_dock_judge_init(dock_cfg));
-    app_ui_set_loading_text("加载任务状态");
     app_ui_set_loading_progress(35);
     ESP_ERROR_CHECK(app_task_init(APP_TARGET_TAG_ID));
-    app_ui_set_loading_text("加载无人机 AI");
     app_ui_set_loading_progress(45);
     ESP_ERROR_CHECK(app_drone_ai_init());
-    app_ui_set_loading_text("启动控制器");
     app_ui_set_loading_progress(55);
     ESP_ERROR_CHECK(app_ctrl_init());
     ESP_ERROR_CHECK(app_ctrl_start());
-    app_ui_set_loading_text("准备抓图模块");
     app_ui_set_loading_progress(65);
     esp_err_t capture_ret = app_ai_capture_init();
     if (capture_ret != ESP_OK)
@@ -133,7 +126,6 @@ static void app_init_runtime_modules(const app_dock_judge_config_t *dock_cfg)
 static esp_err_t app_start_camera_pipeline(void)
 {
     esp_err_t ai_ready_ret;
-    app_ui_set_loading_text("加载无人机 AI 模型");
     app_ui_set_loading_progress(80);
     ai_ready_ret = app_drone_ai_wait_ready(8000);
     if (ai_ready_ret != ESP_OK)
@@ -141,35 +133,29 @@ static esp_err_t app_start_camera_pipeline(void)
         ESP_LOGW(TAG,
                  "drone AI model not ready yet (%s), start preview first",
                  esp_err_to_name(ai_ready_ret));
-        app_ui_set_loading_text("启动摄像头 (AI未就绪)");
     }
-    app_ui_set_loading_text("启动摄像头");
     app_ui_set_loading_progress(85);
     esp_err_t ret = app_camera_init();
     if (ret != ESP_OK)
     {
         return ret;
     }
-    app_ui_set_loading_text("启动视觉流");
     app_ui_set_loading_progress(90);
     ret = app_vision_start();
     if (ret != ESP_OK)
     {
         return ret;
     }
-    app_ui_set_loading_text("开启预览");
     app_ui_set_loading_progress(95);
     ret = app_camera_preview_start();
     if (ret != ESP_OK)
     {
         return ret;
     }
-    app_ui_set_loading_text("等待摄像头帧");
     app_ui_set_loading_progress(100);
     if (!app_camera_wait_first_frame(APP_PREVIEW_FIRST_FRAME_WAIT_MS))
     {
         ESP_LOGW(TAG, "first camera frame did not reach LVGL before loading timeout");
-        app_ui_set_loading_text("等待摄像头信号");
         return ESP_ERR_TIMEOUT;
     }
     app_ui_hide_loading();

@@ -1,6 +1,5 @@
 ﻿#include "app_ui.h"
 #include <stdio.h>
-#include <inttypes.h>
 #include <string.h>
 #include "lvgl.h"
 #include "esp_log.h"
@@ -403,14 +402,6 @@ static void app_ui_style_loading_detail(lv_obj_t *obj)
     lv_obj_set_style_text_color(obj, lv_color_hex(0x263544), 0);
     lv_obj_set_style_text_align(obj, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_font(obj, &font_loading_cn, 0);
-}
-static void app_ui_set_loading_text_unlocked(const char *text)
-{
-    (void)text;
-    if (s_loading_detail != NULL)
-    {
-        lv_label_set_text(s_loading_detail, "系统正在启动");
-    }
 }
 static lv_obj_t *app_ui_button_create(lv_obj_t *parent)
 {
@@ -1000,10 +991,6 @@ static void app_ui_set_vision_text_unlocked(const char *text)
 {
     app_ui_set_label_text_unlocked(s_vision, app_ui_vision_display_text(text, NULL));
 }
-static void app_ui_set_capture_text_unlocked(const char *text)
-{
-    (void)text;
-}
 static bool app_ui_control_needs_update(const char *status_text,
     const char *vision_text,
     const app_vision_result_t *vision,
@@ -1115,14 +1102,11 @@ static void app_ui_capture_start_event_cb(lv_event_t *e)
     {
         return;
     }
-    ESP_LOGD(TAG, "CAP pressed");
-    app_ui_set_capture_text_unlocked("cap: starting");
     app_ui_set_vision_text_unlocked("cap: starting");
     esp_err_t ret = app_ai_capture_start();
     if (ret != ESP_OK)
     {
         ESP_LOGW(TAG, "CAP start failed: %s", esp_err_to_name(ret));
-        app_ui_set_capture_text_unlocked("cap: start fail");
         app_ui_set_vision_text_unlocked("cap: start fail");
     }
 }
@@ -1132,7 +1116,6 @@ static void app_ui_capture_stop_event_cb(lv_event_t *e)
     {
         return;
     }
-    ESP_LOGD(TAG, "STOP pressed");
     app_ai_capture_stop();
 }
 static void app_ui_capture_mode_event_cb(lv_event_t *e)
@@ -1143,7 +1126,6 @@ static void app_ui_capture_mode_event_cb(lv_event_t *e)
     }
     app_ai_capture_mode_t mode = app_ai_capture_toggle_mode();
     const char *label = app_ai_capture_mode_label(mode);
-    ESP_LOGD(TAG, "CAP mode pressed: %s", label);
     if (s_mode_label != NULL)
     {
         lv_label_set_text(s_mode_label, label);
@@ -1728,7 +1710,7 @@ bool app_ui_create(void)
     return true;
 }
 // 创建/显示启动页，包含 logo、进度条、队名和竞赛名称。
-bool app_ui_show_loading(const char *text)
+bool app_ui_show_loading(void)
 {
     if (!bsp_display_lock(UI_LOCK_BOOT_MS))
     {
@@ -1785,27 +1767,11 @@ bool app_ui_show_loading(const char *text)
     else
     {
         lv_obj_clear_flag(s_loading_layer, LV_OBJ_FLAG_HIDDEN);
-        app_ui_set_loading_text_unlocked(text);
     }
     lv_obj_move_foreground(s_loading_layer);
     lv_refr_now(NULL);
     bsp_display_unlock();
     return true;
-}
-void app_ui_set_loading_text(const char *text)
-{
-    if ((text == NULL) || (s_loading_layer == NULL))
-    {
-        return;
-    }
-    if (!bsp_display_lock(UI_LOCK_BOOT_MS))
-    {
-        return;
-    }
-    app_ui_set_loading_text_unlocked(text);
-    lv_obj_move_foreground(s_loading_layer);
-    lv_refr_now(NULL);
-    bsp_display_unlock();
 }
 void app_ui_set_loading_progress(int32_t percent)
 {

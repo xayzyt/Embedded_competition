@@ -1,5 +1,4 @@
 ﻿#include "app_ctrl.h"
-#include <inttypes.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
@@ -258,7 +257,6 @@ static void app_ctrl_apply_task_target_if_needed(const app_task_snapshot_t *task
     taskENTER_CRITICAL(&s_ctrl_mux);
     s_rt.applied_target_id = task->target_id;
     taskEXIT_CRITICAL(&s_ctrl_mux);
-    ESP_LOGI(TAG, "applied target id => %u", (unsigned)task->target_id);
 }
 // CH32 未 ready 时周期性探测，避免每轮主循环都占用 UART。
 static void app_ctrl_probe_ready_if_needed(uint32_t now_ms,
@@ -429,13 +427,6 @@ static void app_ctrl_try_auto_dock(uint32_t now_ms,
         app_ctrl_set_notice("dock: ready but CH32 not ready", CTRL_NOTICE_SHOW_MS);
         return;
     }
-    ESP_LOGI(TAG,
-        "READY rising edge -> send CH32 cmd START_DOCK (id=%u dx=%ld dy=%ld z=%ld score=%u)",
-        (unsigned)dock->tag_id,
-        (long)dock->dx,
-        (long)dock->dy,
-        (long)dock->est_distance_mm,
-        (unsigned)dock->hover_score);
     esp_err_t ret = app_ch32_link_send_proto_cmd_and_wait_ack(CTRL_DOCK_CMD, CTRL_ACK_WAIT_MS);
     if (ret == ESP_OK)
     {
@@ -881,7 +872,6 @@ esp_err_t app_ctrl_init(void)
     {
         ESP_LOGW(TAG, "register ctrl task callback failed: %s", esp_err_to_name(cb_ret));
     }
-    ESP_LOGI(TAG, "ctrl init done (auto_dock=%d)", CTRL_AUTO_DOCK_ENABLE);
     return ESP_OK;
 }
 // 创建 pinned 控制任务，固定到指定核心减少调度抖动。
@@ -907,6 +897,5 @@ esp_err_t app_ctrl_start(void)
         s_ctrl_task = NULL;
         return ESP_FAIL;
     }
-    ESP_LOGI(TAG, "ctrl task started");
     return ESP_OK;
 }

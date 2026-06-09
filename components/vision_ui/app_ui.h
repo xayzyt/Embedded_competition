@@ -29,8 +29,7 @@ typedef struct {
 // 创建全局 UI 资源和 HUD 层。
 bool app_ui_create(void);
 // 启动页显示、进度和隐藏。
-bool app_ui_show_loading(const char *text);
-void app_ui_set_loading_text(const char *text);
+bool app_ui_show_loading(void);
 void app_ui_set_loading_progress(int32_t percent);
 void app_ui_hide_loading(void);
 // 顶部状态和控制器统一刷新入口。

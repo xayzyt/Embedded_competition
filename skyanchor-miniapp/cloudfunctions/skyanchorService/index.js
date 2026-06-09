@@ -722,11 +722,11 @@ async function handleListOrders(payload) {
     query = query.where({ receiver_id: userId });
   }
 
-  const result = await query.limit(100).get();
+  const result = await query.orderBy('created_at', 'desc').limit(100).get();
   const orders = [];
   const deviceStateCache = new Map();
 
-  for (const item of (result.data || []).slice().sort((left, right) => Number(right.created_at || 0) - Number(left.created_at || 0))) {
+  for (const item of (result.data || []).slice()) {
     const syncedOrder = await syncOrderProgress(item, deviceStateCache);
     orders.push(stripOrderDoc(syncedOrder));
   }

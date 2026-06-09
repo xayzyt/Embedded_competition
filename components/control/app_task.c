@@ -151,7 +151,6 @@ esp_err_t app_task_init(uint16_t default_target_id)
     strlcpy(s_rt.source, "local", sizeof(s_rt.source));
     app_task_change_state_locked(APP_TASK_STATE_CONFIGURED, "configured");
     taskEXIT_CRITICAL(&s_mux);
-    ESP_LOGI(TAG, "task init done, target_id=%u", (unsigned)loaded_target);
     app_task_emit_event(APP_TASK_EVENT_INIT);
     return ESP_OK;
 }
@@ -180,7 +179,6 @@ esp_err_t app_task_set_target_id(uint16_t target_id, bool persist)
             return ret;
         }
     }
-    ESP_LOGI(TAG, "target_id set to %u", (unsigned)target_id);
     app_task_emit_event(APP_TASK_EVENT_TARGET_UPDATED);
     return ESP_OK;
 }
@@ -199,7 +197,6 @@ esp_err_t app_task_start_with_target(uint16_t target_id, const char *source)
     strlcpy(s_rt.source, (source != NULL) ? source : "local", sizeof(s_rt.source));
     app_task_change_state_locked(APP_TASK_STATE_WAIT_APPROACH, "waiting target approach");
     taskEXIT_CRITICAL(&s_mux);
-    ESP_LOGI(TAG, "task started, target_id=%u source=%s", (unsigned)target_id, (source != NULL) ? source : "local");
     app_task_emit_event(APP_TASK_EVENT_STATE_CHANGED);
     return ESP_OK;
 }
@@ -221,7 +218,6 @@ void app_task_mark_auth_passed(uint16_t matched_tag_id)
     taskEXIT_CRITICAL(&s_mux);
     if (changed)
     {
-        ESP_LOGI(TAG, "auth passed, matched_tag_id=%u", (unsigned)matched_tag_id);
         app_task_emit_event(APP_TASK_EVENT_STATE_CHANGED);
     }
 }

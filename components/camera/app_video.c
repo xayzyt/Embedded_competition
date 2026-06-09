@@ -37,20 +37,9 @@ typedef struct {
     app_video_frame_operation_cb_t user_camera_video_frame_operation_cb;
     TaskHandle_t video_stream_task_handle;
     int video_fd_task_arg;
-    bool first_frame_logged;
 } app_video_t;
 static app_video_t s_video;
 
-// 将 fourcc 整数转成可读字符串，便于日志检查实际像素格式。
-static const char *fourcc_to_str(uint32_t fourcc, char out[5])
-{
-    out[0] = (char)(fourcc & 0xFF);
-    out[1] = (char)((fourcc >> 8) & 0xFF);
-    out[2] = (char)((fourcc >> 16) & 0xFF);
-    out[3] = (char)((fourcc >> 24) & 0xFF);
-    out[4] = '\0';
-    return out;
-}
 // 打开并配置视频设备；首选分辨率失败时可回退到传感器默认尺寸。
 static int app_video_open_configured(char *dev,
     video_fmt_t init_fmt,
@@ -73,28 +62,11 @@ static int app_video_open_configured(char *dev,
         ESP_LOGE(TAG, "VIDIOC_QUERYCAP failed");
         goto err;
     }
-    ESP_LOGD(TAG, "version: %d.%d.%d",
-        (uint16_t)(capability.version >> 16),
-        (uint8_t)(capability.version >> 8),
-        (uint8_t)capability.version);
-    ESP_LOGD(TAG, "driver:  %s", capability.driver);
-    ESP_LOGD(TAG, "card:    %s", capability.card);
-    ESP_LOGD(TAG, "bus:     %s", capability.bus_info);
     default_format.type = type;
     if (ioctl(fd, VIDIOC_G_FMT, &default_format) != 0)
     {
         ESP_LOGE(TAG, "VIDIOC_G_FMT failed");
         goto err;
-    }
-    {
-        char pix[5];
-        ESP_LOGD(TAG,
-            "default fmt: %" PRIu32 "x%" PRIu32 ", pix=%s, bytesperline=%" PRIu32 ", sizeimage=%" PRIu32,
-            default_format.fmt.pix.width,
-            default_format.fmt.pix.height,
-            fourcc_to_str(default_format.fmt.pix.pixelformat, pix),
-            default_format.fmt.pix.bytesperline,
-            default_format.fmt.pix.sizeimage);
     }
     const bool need_set_format =
         (default_format.fmt.pix.pixelformat != init_fmt) ||
@@ -147,16 +119,6 @@ static int app_video_open_configured(char *dev,
     {
         ESP_LOGE(TAG, "read actual format failed");
         goto err;
-    }
-    {
-        char pix[5];
-        ESP_LOGI(TAG,
-            "actual fmt:  %" PRIu32 "x%" PRIu32 ", pix=%s, bytesperline=%" PRIu32 ", sizeimage=%" PRIu32,
-            actual_format.fmt.pix.width,
-            actual_format.fmt.pix.height,
-            fourcc_to_str(actual_format.fmt.pix.pixelformat, pix),
-            actual_format.fmt.pix.bytesperline,
-            actual_format.fmt.pix.sizeimage);
     }
     if (has_preferred_size &&
         ((actual_format.fmt.pix.width != preferred_width) ||
@@ -280,14 +242,6 @@ static inline esp_err_t video_receive_video_frame(int video_fd)
         ESP_LOGW(TAG, "VIDIOC_DQBUF failed errno=%d", errno);
         return ESP_FAIL;
     }
-    if (!s_video.first_frame_logged)
-    {
-        ESP_LOGI(TAG, "first frame: index=%" PRIu32 ", bytesused=%" PRIu32 ", length=%" PRIu32,
-            s_video.v4l2_buf.index,
-            s_video.v4l2_buf.bytesused,
-            s_video.v4l2_buf.length);
-        s_video.first_frame_logged = true;
-    }
     return ESP_OK;
 }
 // 把当前帧交给业务回调处理。
@@ -327,7 +281,6 @@ static inline esp_err_t video_stream_start(int video_fd)
         ESP_LOGE(TAG, "VIDIOC_STREAMON failed");
         return ESP_FAIL;
     }
-    s_video.first_frame_logged = false;
     return ESP_OK;
 }
 static inline esp_err_t video_stream_stop(int video_fd)
