@@ -57,8 +57,14 @@ static float app_filter_ema_f32(float prev, float sample, uint8_t shift)
 }
 static int32_t app_clip_i32(int32_t v, int32_t lo, int32_t hi)
 {
-    if (v < lo) return lo;
-    if (v > hi) return hi;
+    if (v < lo)
+    {
+        return lo;
+    }
+    if (v > hi)
+    {
+        return hi;
+    }
     return v;
 }
 // 同一帧可能被 UI/control 多次读取，计数器只允许处理一次。

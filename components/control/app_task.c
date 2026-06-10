@@ -11,16 +11,18 @@
 static const char *TAG = "app_task";
 static const char *NVS_NS = "sky_task";
 static const char *NVS_KEY_TARGET_ID = "target_id";
+
+// 任务状态只在 s_mux 保护下修改，对外一律返回值拷贝快照。
 typedef struct {
-    bool inited;
-    bool active;
-    bool target_dirty;
-    uint16_t target_id;
-    uint16_t matched_tag_id;
-    app_task_state_t state;
-    char source[20];
-    char note[64];
-    uint32_t state_since_ms;
+    bool inited;             // 模块初始化完成。
+    bool active;             // 当前是否有未结束任务。
+    bool target_dirty;       // 新目标尚未被控制循环应用。
+    uint16_t target_id;      // 期望匹配的 AprilTag ID。
+    uint16_t matched_tag_id; // 已通过鉴权的标签 ID。
+    app_task_state_t state;  // 高层任务阶段。
+    char source[20];         // 请求来源，例如 local/cloud。
+    char note[64];           // 状态变化原因或完成说明。
+    uint32_t state_since_ms; // 进入当前状态的时间。
 } app_task_runtime_t;
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 static app_task_runtime_t s_rt = {0};
@@ -30,6 +32,9 @@ typedef struct {
     void *user_ctx;
 } app_task_event_slot_t;
 static app_task_event_slot_t s_event_cbs[APP_TASK_MAX_EVENT_CBS] = {0};
+
+/* ---------- 锁内状态与事件快照 ---------- */
+
 static uint32_t app_task_now_ms(void)
 {
     return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
@@ -77,6 +82,8 @@ static void app_task_emit_event(app_task_event_t event)
         }
     }
 }
+/* ---------- 目标 ID 持久化 ---------- */
+
 // 将目标标签 ID 保存到 NVS，重启后继续使用上次配置。
 static esp_err_t app_task_persist_target_id(uint16_t target_id)
 {
@@ -134,6 +141,8 @@ esp_err_t app_task_register_event_callback(app_task_event_cb_t cb, void *user_ct
     return ESP_ERR_NO_MEM;
 }
 // 初始化任务状态，并广播 INIT 事件给 UI/云端/控制器。
+/* ---------- 任务生命周期 ---------- */
+
 esp_err_t app_task_init(uint16_t default_target_id)
 {
     taskENTER_CRITICAL(&s_mux);
@@ -289,6 +298,8 @@ bool app_task_peek_snapshot(app_task_snapshot_t *out)
     taskEXIT_CRITICAL(&s_mux);
     return true;
 }
+/* ---------- 状态文案 ---------- */
+
 const char *app_task_state_to_text(app_task_state_t state)
 {
     switch (state) {

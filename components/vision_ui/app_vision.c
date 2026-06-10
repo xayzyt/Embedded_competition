@@ -24,8 +24,8 @@
 #define VISION_STABLE_DECAY_ON_LOST    1U
 static const char *TAG = "app_vision";
 typedef struct {
-    app_vision_gray_frame_info_t info;
-    uint8_t gray[VISION_GRAY_BUF_SIZE];
+    app_vision_gray_frame_info_t info;  // 原图、裁剪区域和帧序号。
+    uint8_t gray[VISION_GRAY_BUF_SIZE]; // 固定 320x240 灰度检测图。
 } app_vision_gray_slot_t;
 static TaskHandle_t s_vision_task = NULL;
 static bool s_vision_inited = false;
@@ -48,6 +48,9 @@ static uint32_t s_sample_crop_x = 0;
 static uint32_t s_sample_crop_y = 0;
 static uint32_t s_sample_crop_w = 0;
 static uint32_t s_sample_crop_h = 0;
+
+/* ---------- 采样映射与三槽所有权 ---------- */
+
 static inline uint32_t app_vision_now_ms(void)
 {
     return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
@@ -232,6 +235,8 @@ static void app_vision_update_result(const app_vision_gray_slot_t *slot,
     app_vision_store_result(&result);
 }
 // 检测任务：等待新灰度帧，调用 AprilTag 检测器并记录跳帧/覆盖情况。
+/* ---------- 后台检测任务 ---------- */
+
 static void app_vision_task(void *arg)
 {
     (void)arg;
@@ -279,6 +284,8 @@ static void app_vision_task(void *arg)
     }
 }
 // 初始化 AprilTag 检测器和三槽缓冲状态。
+/* ---------- 公共生命周期与帧提交 ---------- */
+
 esp_err_t app_vision_init(void)
 {
     if (s_vision_inited)

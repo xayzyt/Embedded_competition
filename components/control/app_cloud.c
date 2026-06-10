@@ -24,6 +24,9 @@ static void app_cloud_mqtt_event_handler(void *handler_args,
     esp_event_base_t base,
     int32_t event_id,
     void *event_data);
+
+/* ---------- ESP-IDF 网络基础设施 ---------- */
+
 // ESP-IDF 全局网络栈/事件循环可能被别的模块初始化过，重复调用视为成功。
 static esp_err_t app_cloud_init_netif_once(void)
 {
@@ -44,6 +47,8 @@ static esp_err_t app_cloud_init_event_loop_once(void)
     return ret;
 }
 // 根据 topic 前缀和设备名生成 cmd/ack/state 三类 MQTT 主题。
+/* ---------- Wi-Fi、DNS 与时间同步 ---------- */
+
 static void app_cloud_build_topics(void)
 {
     snprintf(s_cloud.topic_cmd,
@@ -173,6 +178,8 @@ static esp_err_t app_cloud_validate_config(void)
     return ESP_OK;
 }
 // 创建 MQTT 客户端，证书校验策略由 menuconfig 控制。
+/* ---------- MQTT 客户端生命周期 ---------- */
+
 static esp_err_t app_cloud_create_mqtt_client(void)
 {
     if (s_cloud.mqtt_client != NULL)
@@ -264,6 +271,8 @@ static void app_cloud_task(void *arg)
     }
 }
 // Wi-Fi/IP 事件处理：断线清理 MQTT，拿到 IP 后启动时间、天气和 MQTT。
+/* ---------- 系统事件回调 ---------- */
+
 static void app_cloud_wifi_event_handler(void *arg,
     esp_event_base_t event_base,
     int32_t event_id,
@@ -341,6 +350,8 @@ static void app_cloud_mqtt_event_handler(void *handler_args,
     }
 }
 // 云端模块总初始化入口，由 main 以后台任务方式启动。
+/* ---------- 公共初始化与状态查询 ---------- */
+
 esp_err_t app_cloud_init(void)
 {
     if (s_cloud.inited)

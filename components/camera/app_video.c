@@ -252,7 +252,6 @@ static inline void video_operation_video_frame(void)
     {
         s_video.user_camera_video_frame_operation_cb(
             s_video.camera_buffer[buf_index],
-            buf_index,
             s_video.camera_buf_hes,
             s_video.camera_buf_ves,
             s_video.v4l2_buf.bytesused ? s_video.v4l2_buf.bytesused : s_video.camera_buf_size);

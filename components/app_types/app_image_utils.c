@@ -11,12 +11,14 @@ void app_image_calc_center_crop(uint32_t src_width,
                                 uint32_t *crop_w,
                                 uint32_t *crop_h)
 {
+    // 默认保留整张源图；只有宽高比不一致时才裁掉较长方向。
     uint32_t x = 0;
     uint32_t y = 0;
     uint32_t w = src_width;
     uint32_t h = src_height;
     if (src_width == 0U || src_height == 0U || dst_width == 0U || dst_height == 0U)
     {
+        // 无效尺寸统一返回零大小区域，避免后续除零。
         w = 0;
         h = 0;
     }
@@ -40,26 +42,42 @@ void app_image_calc_center_crop(uint32_t src_width,
         }
         y = (src_height - h) / 2U;
     }
-    if (crop_x) *crop_x = x;
-    if (crop_y) *crop_y = y;
-    if (crop_w) *crop_w = w;
-    if (crop_h) *crop_h = h;
+    // 输出参数允许传空指针，调用者可以只取自己关心的坐标或尺寸。
+    if (crop_x)
+    {
+        *crop_x = x;
+    }
+    if (crop_y)
+    {
+        *crop_y = y;
+    }
+    if (crop_w)
+    {
+        *crop_w = w;
+    }
+    if (crop_h)
+    {
+        *crop_h = h;
+    }
 }
 
 uint8_t app_image_rgb565_to_r(uint16_t pixel)
 {
+    // 5 bit 红色通过高位复制扩展到 8 bit，覆盖完整 0~255 范围。
     uint8_t r = (uint8_t)((pixel >> 11) & 0x1F);
     return (uint8_t)((r << 3) | (r >> 2));
 }
 
 uint8_t app_image_rgb565_to_g(uint16_t pixel)
 {
+    // 绿色在 RGB565 中占 6 bit，因此使用 6->8 bit 的位复制方式。
     uint8_t g = (uint8_t)((pixel >> 5) & 0x3F);
     return (uint8_t)((g << 2) | (g >> 4));
 }
 
 uint8_t app_image_rgb565_to_b(uint16_t pixel)
 {
+    // 蓝色位于最低 5 bit。
     uint8_t b = (uint8_t)(pixel & 0x1F);
     return (uint8_t)((b << 3) | (b >> 2));
 }

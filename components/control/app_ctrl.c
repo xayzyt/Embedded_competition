@@ -29,22 +29,24 @@ static const char *TAG = "app_ctrl";
 #define CTRL_BUSY_TIMEOUT_MS            20000U
 #define CTRL_NOTICE_SHOW_MS             1600U
 #define CTRL_RETRIGGER_COOLDOWN_MS      1800U
+
+// 由 UART 回调和控制任务共同访问的共享状态，所有读写必须经过 s_ctrl_mux。
 typedef struct {
-    bool inited;
-    bool ch32_ready;
-    bool dock_busy;
-    bool cargo_wait_window_seen;
-    bool has_weight;
-    int32_t last_weight_g;
-    uint16_t last_proto_flags;
-    app_ch32_proto_stage_t last_proto_stage;
-    uint8_t last_proto_error;
-    uint16_t applied_target_id;
-    uint32_t last_ready_probe_ms;
-    uint32_t busy_deadline_ms;
-    uint32_t notice_deadline_ms;
-    uint32_t retrigger_deadline_ms;
-    char notice[96];
+    bool inited;                            // 控制模块是否完成初始化。
+    bool ch32_ready;                        // 从 CH32 状态帧推导的在线/可执行状态。
+    bool dock_busy;                         // 机械对接流程是否仍在运行。
+    bool cargo_wait_window_seen;            // 是否进入可恢复的等待放货阶段。
+    bool has_weight;                        // 是否收到过有效重量字段。
+    int32_t last_weight_g;                  // 最近重量，单位 g。
+    uint16_t last_proto_flags;              // 最近 CH32 状态位。
+    app_ch32_proto_stage_t last_proto_stage; // 最近机械阶段。
+    uint8_t last_proto_error;               // 最近协议错误码。
+    uint16_t applied_target_id;             // 已同步给判定器的目标标签。
+    uint32_t last_ready_probe_ms;            // 上次主动探测 CH32 的时间。
+    uint32_t busy_deadline_ms;               // 普通机械动作超时点，0 表示不计时。
+    uint32_t notice_deadline_ms;             // 临时 UI 提示失效时间。
+    uint32_t retrigger_deadline_ms;          // 防止重复触发对接命令的冷却时间。
+    char notice[96];                         // 临时覆盖常规状态的提示。
 } app_ctrl_runtime_t;
 // 主循环使用的只读快照，避免长时间持有临界区锁。
 typedef struct {
@@ -66,6 +68,9 @@ typedef struct {
 static TaskHandle_t s_ctrl_task = NULL;
 static portMUX_TYPE s_ctrl_mux = portMUX_INITIALIZER_UNLOCKED;
 static app_ctrl_runtime_t s_rt = {0};
+
+/* ---------- 任务事件与共享运行态 ---------- */
+
 // 任务重新进入等待/结束/异常时重置 AI 门控，下一单重新确认无人机。
 static void app_ctrl_on_task_event(app_task_event_t event,
     const app_task_snapshot_t *snap,
@@ -493,6 +498,8 @@ static void app_ctrl_update_task_for_busy_transition(bool prev_dock_busy,
         (void)app_task_get_snapshot(task);
     }
 }
+/* ---------- UI 流程快照 ---------- */
+
 static void app_ctrl_flow_init(app_ui_flow_snapshot_t *flow)
 {
     if (flow == NULL)
@@ -746,6 +753,8 @@ void app_ctrl_on_ch32_line(const app_ch32_line_t *msg, void *user_ctx)
     taskEXIT_CRITICAL(&s_ctrl_mux);
 }
 // 控制主循环：轮询视觉/任务快照，执行门控、超时、自动对接和 UI 发布。
+/* ---------- 控制任务生命周期 ---------- */
+
 static void app_ctrl_task(void *arg)
 {
     (void)arg;

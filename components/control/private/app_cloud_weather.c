@@ -19,11 +19,14 @@
 static const char *TAG = "app_cloud";
 static TaskHandle_t s_weather_task = NULL;
 typedef struct {
-    char *buf;
-    int len;
-    int cap;
-    bool truncated;
+    char *buf;       // 调用方提供的 HTTP 响应缓存。
+    int len;         // 已写入字节数，不含末尾 '\0'。
+    int cap;         // 可写数据容量。
+    bool truncated; // 响应是否超过固定缓存。
 } app_cloud_http_buf_t;
+
+/* ---------- HTTP 响应与天气解析 ---------- */
+
 // 判断当前任务是否已经进入需要天气保护介入的活动阶段。
 static bool app_cloud_snapshot_is_active_task(const app_task_snapshot_t *snap)
 {
@@ -114,6 +117,8 @@ static esp_err_t app_cloud_parse_weather_response(const char *json,
     return ret;
 }
 // 缓存最近一次真实天气，退出模拟模式时可快速恢复显示。
+/* ---------- 天气缓存与保护策略 ---------- */
+
 static void app_cloud_cache_weather(const char *text, int weather_code)
 {
     if (text == NULL)
@@ -334,6 +339,8 @@ static esp_err_t app_cloud_fetch_weather_once(void)
     return ESP_OK;
 }
 // 天气任务：定时刷新真实天气，模拟/恢复状态变化时被通知唤醒。
+/* ---------- 后台刷新任务与公共控制接口 ---------- */
+
 static void app_cloud_weather_task(void *arg)
 {
     (void)arg;

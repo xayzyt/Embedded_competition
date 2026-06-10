@@ -1,11 +1,12 @@
 ﻿#include "app_ui.h"
 #include <stdio.h>
 #include <string.h>
-#include "lvgl.h"
-#include "esp_log.h"
+
+#include "app_ai_capture.h"
 #include "bsp/esp-bsp.h"
 #include "bsp/display.h"
-#include "app_ai_capture.h"
+#include "esp_log.h"
+#include "lvgl.h"
 
 // 相机预览 HUD 与启动页 UI：负责状态文字、对接框、锁定条、抓图按钮和天气保护按钮。
 
@@ -16,6 +17,7 @@ LV_FONT_DECLARE(font_loading_cn)
 LV_FONT_DECLARE(font_main_title_cn)
 LV_FONT_DECLARE(font_title_en)
 LV_IMAGE_DECLARE(logo);
+
 #define HUD_SRC_W               320
 #define HUD_SRC_H               240
 #define HUD_LOCK_SEG_COUNT      2
@@ -59,7 +61,10 @@ LV_IMAGE_DECLARE(logo);
 #define UI_TRACK_LABEL_H        24
 #define UI_CONTEST_NAME         "第九届（2026）全国大学生嵌入式芯片与系统设计竞赛"
 #define UI_TEAM_NAME            "地线引力队"
+
 static const char *TAG = "app_ui";
+
+// HUD、流程面板和启动页对象。
 static lv_obj_t *s_top_bar = NULL;
 static lv_obj_t *s_status = NULL;
 static lv_obj_t *s_coord = NULL;
@@ -93,8 +98,10 @@ static lv_obj_t *s_flow_step_detail[APP_UI_FLOW_STEP_COUNT] = {0};
 static lv_obj_t *s_loading_layer = NULL;
 static lv_obj_t *s_loading_detail = NULL;
 static lv_obj_t *s_loading_bar = NULL;
+
 static app_ui_weather_emergency_cb_t s_weather_emergency_cb = NULL;
-static void app_ui_weather_emergency_event_cb(lv_event_t *e);
+
+// 上一帧识别框和认证提示状态。
 static bool s_have_last_box = false;
 static int32_t s_last_box_x = 0;
 static int32_t s_last_box_y = 0;
@@ -102,6 +109,8 @@ static int32_t s_last_box_w = 0;
 static int32_t s_last_box_h = 0;
 static app_dock_state_t s_last_hud_state = APP_DOCK_STATE_SEARCHING;
 static uint32_t s_auth_deadline_ms = 0;
+
+// 控制器快照缓存，用于跳过内容未变化的 LVGL 刷新。
 static bool s_control_cache_valid = false;
 static char s_control_status_text[32] = {0};
 static char s_control_vision_text[32] = {0};
@@ -121,7 +130,10 @@ static int32_t s_control_distance_mm = 0;
 static uint8_t s_control_hover_score = 0;
 static uint8_t s_control_ready_pass_count = 0;
 static app_ui_flow_snapshot_t s_control_flow_cache = {0};
-static lv_obj_t *app_get_active_screen(void)
+
+static void app_ui_weather_emergency_event_cb(lv_event_t *e);
+
+static lv_obj_t *app_ui_get_active_screen(void)
 {
 #if LVGL_VERSION_MAJOR >= 9
     return lv_screen_active();
@@ -129,6 +141,10 @@ static lv_obj_t *app_get_active_screen(void)
     return lv_scr_act();
 #endif
 }
+
+/* ---------- LVGL 对象样式 ---------- */
+
+// 以下函数只设置外观，不创建对象；调用者负责传入有效的 LVGL 对象。
 static void app_ui_style_hud_layer(lv_obj_t *obj)
 {
     lv_obj_set_style_bg_opa(obj, LV_OPA_TRANSP, 0);
@@ -456,6 +472,33 @@ static void app_ui_label_set_dots(lv_obj_t *label)
     lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
 #endif
 }
+
+static void app_ui_set_hidden(lv_obj_t *obj, bool hidden)
+{
+    if (obj == NULL)
+    {
+        return;
+    }
+    if (hidden)
+    {
+        lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
+    }
+    else
+    {
+        lv_obj_clear_flag(obj, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void app_ui_move_foreground(lv_obj_t *obj)
+{
+    if (obj != NULL)
+    {
+        lv_obj_move_foreground(obj);
+    }
+}
+
+/* ---------- 文本转换与流程面板 ---------- */
+
 // LVGL 锁内更新标签；文本未变化时跳过，减少刷新抖动。
 static void app_ui_set_label_text_unlocked(lv_obj_t *label, const char *text)
 {
@@ -471,14 +514,21 @@ static void app_ui_set_label_text_unlocked(lv_obj_t *label, const char *text)
 }
 static const char *app_ui_flow_step_title(app_ui_flow_step_t step)
 {
-    switch (step) {
-    case APP_UI_FLOW_STEP_DRONE: return "无人机";
-    case APP_UI_FLOW_STEP_TAG:   return "Tag";
-    case APP_UI_FLOW_STEP_EXEC:  return "接驳";
-    case APP_UI_FLOW_STEP_DONE:  return "完成";
-    default:                    return "";
+    switch (step)
+    {
+    case APP_UI_FLOW_STEP_DRONE:
+        return "无人机";
+    case APP_UI_FLOW_STEP_TAG:
+        return "Tag";
+    case APP_UI_FLOW_STEP_EXEC:
+        return "接驳";
+    case APP_UI_FLOW_STEP_DONE:
+        return "完成";
+    default:
+        return "";
     }
 }
+
 static void app_ui_flow_snapshot_default(const char *headline, app_ui_flow_snapshot_t *out)
 {
     if (out == NULL)
@@ -487,7 +537,8 @@ static void app_ui_flow_snapshot_default(const char *headline, app_ui_flow_snaps
     }
     memset(out, 0, sizeof(*out));
     out->active_step = APP_UI_FLOW_STEP_DRONE;
-    for (int i = 0; i < APP_UI_FLOW_STEP_COUNT; i++) {
+    for (int i = 0; i < APP_UI_FLOW_STEP_COUNT; i++)
+    {
         out->step_state[i] = APP_UI_FLOW_STATE_WAITING;
     }
     snprintf(out->headline, sizeof(out->headline), "%s",
@@ -497,6 +548,7 @@ static void app_ui_flow_snapshot_default(const char *headline, app_ui_flow_snaps
     snprintf(out->step_detail[APP_UI_FLOW_STEP_EXEC], sizeof(out->step_detail[0]), "等待接驳");
     snprintf(out->step_detail[APP_UI_FLOW_STEP_DONE], sizeof(out->step_detail[0]), "未完成");
 }
+
 static bool app_ui_flow_snapshot_equal(const app_ui_flow_snapshot_t *a,
     const app_ui_flow_snapshot_t *b)
 {
@@ -510,16 +562,23 @@ static bool app_ui_flow_snapshot_equal(const app_ui_flow_snapshot_t *a,
     }
     return memcmp(a, b, sizeof(*a)) == 0;
 }
+
 static lv_color_t app_ui_flow_state_color(app_ui_flow_state_t state)
 {
-    switch (state) {
-    case APP_UI_FLOW_STATE_ACTIVE: return lv_color_hex(0x64D2FF);
-    case APP_UI_FLOW_STATE_DONE:   return lv_color_hex(0x4FE0B0);
-    case APP_UI_FLOW_STATE_ERROR:  return lv_color_hex(0xF87171);
+    switch (state)
+    {
+    case APP_UI_FLOW_STATE_ACTIVE:
+        return lv_color_hex(0x64D2FF);
+    case APP_UI_FLOW_STATE_DONE:
+        return lv_color_hex(0x4FE0B0);
+    case APP_UI_FLOW_STATE_ERROR:
+        return lv_color_hex(0xF87171);
     case APP_UI_FLOW_STATE_WAITING:
-    default:                      return lv_color_hex(0x71858E);
+    default:
+        return lv_color_hex(0x71858E);
     }
 }
+
 static const char *app_ui_flow_headline_display_text(const char *headline)
 {
     if (headline == NULL || headline[0] == '\0')
@@ -544,6 +603,7 @@ static const char *app_ui_flow_headline_display_text(const char *headline)
     }
     return headline;
 }
+
 static const char *app_ui_flow_detail_display_text(app_ui_flow_step_t step, const char *detail)
 {
     if (detail == NULL || detail[0] == '\0')
@@ -573,6 +633,7 @@ static const char *app_ui_flow_detail_display_text(app_ui_flow_step_t step, cons
     }
     return detail;
 }
+
 static void app_ui_update_flow_step_unlocked(uint32_t index,
     app_ui_flow_state_t state,
     bool active,
@@ -649,6 +710,7 @@ static void app_ui_update_flow_step_unlocked(uint32_t index,
             app_ui_flow_detail_display_text((app_ui_flow_step_t)index, detail));
     }
 }
+
 static void app_ui_update_flow_unlocked(const app_ui_flow_snapshot_t *flow)
 {
     app_ui_flow_snapshot_t fallback = {0};
@@ -662,17 +724,21 @@ static void app_ui_update_flow_unlocked(const app_ui_flow_snapshot_t *flow)
         app_ui_set_label_text_unlocked(s_flow_title,
             app_ui_flow_headline_display_text(flow->headline));
     }
-    for (uint32_t i = 0; i < APP_UI_FLOW_STEP_COUNT; i++) {
+    for (uint32_t i = 0; i < APP_UI_FLOW_STEP_COUNT; i++)
+    {
         app_ui_update_flow_step_unlocked(i,
             flow->step_state[i],
             ((app_ui_flow_step_t)i == flow->active_step),
             flow->step_detail[i]);
     }
 }
+
 static bool app_ui_text_has(const char *text, const char *needle)
 {
     return (text != NULL) && (needle != NULL) && (strstr(text, needle) != NULL);
 }
+
+// 控制器保持稳定的英文状态字符串，显示层在这里集中转换为现场文案。
 static const char *app_ui_task_text_from_dock(const app_dock_judge_result_t *dock)
 {
     if (dock == NULL)
@@ -1095,6 +1161,9 @@ static void app_ui_store_control_cache(const char *status_text,
     }
     s_control_cache_valid = true;
 }
+
+/* ---------- 抓图按钮事件 ---------- */
+
 // 抓图按钮：启动连续样本采集。
 static void app_ui_capture_start_event_cb(lv_event_t *e)
 {
@@ -1153,6 +1222,8 @@ static lv_color_t app_ui_state_color(app_dock_state_t state, bool hold_box)
         return lv_color_hex(0xA6B2BD);
     }
 }
+/* ---------- 相机坐标到屏幕坐标映射 ---------- */
+
 // 计算相机画面在 LCD 上等比例显示后的尺寸。
 static void app_ui_calc_fit_dims(int32_t src_w, int32_t src_h, int32_t *fit_w, int32_t *fit_h)
 {
@@ -1224,10 +1295,17 @@ static void app_ui_transform_src_point(float x,
 }
 static int32_t app_ui_clamp_i32(int32_t v, int32_t lo, int32_t hi)
 {
-    if (v < lo) return lo;
-    if (v > hi) return hi;
+    if (v < lo)
+    {
+        return lo;
+    }
+    if (v > hi)
+    {
+        return hi;
+    }
     return v;
 }
+
 // 将灰度检测坐标系下的 bbox 映射回 LCD 坐标系，包含裁剪和旋转修正。
 static void app_ui_map_bbox_to_screen(const app_vision_result_t *vision,
     int32_t *x,
@@ -1273,16 +1351,29 @@ static void app_ui_map_bbox_to_screen(const app_vision_result_t *vision,
     float min_y = 100000.0f;
     float max_x = -100000.0f;
     float max_y = -100000.0f;
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 4; i++)
+    {
         float rx = 0.0f;
         float ry = 0.0f;
         app_ui_transform_src_point(pts[i][0], pts[i][1], src_w, src_h, &rx, &ry);
         float sx = (float)off_x + rx * (float)fit_w / (float)rot_w;
         float sy = (float)off_y + ry * (float)fit_h / (float)rot_h;
-        if (sx < min_x) min_x = sx;
-        if (sy < min_y) min_y = sy;
-        if (sx > max_x) max_x = sx;
-        if (sy > max_y) max_y = sy;
+        if (sx < min_x)
+        {
+            min_x = sx;
+        }
+        if (sy < min_y)
+        {
+            min_y = sy;
+        }
+        if (sx > max_x)
+        {
+            max_x = sx;
+        }
+        if (sy > max_y)
+        {
+            max_y = sy;
+        }
     }
     *x = app_ui_clamp_i32((int32_t)(min_x + 0.5f), 0, BSP_LCD_H_RES - 1);
     *y = app_ui_clamp_i32((int32_t)(min_y + 0.5f), 0, BSP_LCD_V_RES - 1);
@@ -1430,6 +1521,8 @@ static void app_ui_set_track_box(bool show,
         lv_obj_clear_flag(s_track_label, LV_OBJ_FLAG_HIDDEN);
     }
 }
+/* ---------- 公共 UI 生命周期 ---------- */
+
 // 创建预览 HUD 和右侧调试按钮；对象只创建一次，后续复用。
 bool app_ui_create(void)
 {
@@ -1437,7 +1530,7 @@ bool app_ui_create(void)
     {
         return false;
     }
-    lv_obj_t *scr = app_get_active_screen();
+    lv_obj_t *scr = app_ui_get_active_screen();
     lv_obj_set_style_bg_color(scr, lv_color_hex(0x000000), 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
     if (s_hud_layer == NULL)
@@ -1684,28 +1777,31 @@ bool app_ui_create(void)
         lv_obj_add_event_cb(s_weather_guard_btn, app_ui_weather_emergency_event_cb, LV_EVENT_CLICKED, NULL);
         lv_obj_align(s_weather_guard_btn, LV_ALIGN_BOTTOM_RIGHT, -18, -18);
     }
-    if (s_mode_btn) lv_obj_add_flag(s_mode_btn, LV_OBJ_FLAG_HIDDEN);
-    if (s_cap_btn) lv_obj_add_flag(s_cap_btn, LV_OBJ_FLAG_HIDDEN);
-    if (s_stop_btn) lv_obj_add_flag(s_stop_btn, LV_OBJ_FLAG_HIDDEN);
-    if (s_capture) lv_obj_add_flag(s_capture, LV_OBJ_FLAG_HIDDEN);
-    if (s_top_bar) lv_obj_add_flag(s_top_bar, LV_OBJ_FLAG_HIDDEN);
-    if (s_dock) lv_obj_add_flag(s_dock, LV_OBJ_FLAG_HIDDEN);
-    if (s_weather_guard_btn) lv_obj_clear_flag(s_weather_guard_btn, LV_OBJ_FLAG_HIDDEN);
-    for (int i = 0; i < HUD_LOCK_SEG_COUNT; i++) {
-        if (s_lock_seg[i]) lv_obj_add_flag(s_lock_seg[i], LV_OBJ_FLAG_HIDDEN);
+    app_ui_set_hidden(s_mode_btn, true);
+    app_ui_set_hidden(s_cap_btn, true);
+    app_ui_set_hidden(s_stop_btn, true);
+    app_ui_set_hidden(s_capture, true);
+    app_ui_set_hidden(s_top_bar, true);
+    app_ui_set_hidden(s_dock, true);
+    app_ui_set_hidden(s_weather_guard_btn, false);
+
+    for (int i = 0; i < HUD_LOCK_SEG_COUNT; i++)
+    {
+        app_ui_set_hidden(s_lock_seg[i], true);
     }
-    if (s_hud_layer) lv_obj_move_foreground(s_hud_layer);
-    if (s_status) lv_obj_move_foreground(s_status);
-    if (s_vision) lv_obj_move_foreground(s_vision);
-    if (s_coord) lv_obj_move_foreground(s_coord);
-    if (s_hint) lv_obj_move_foreground(s_hint);
-    if (s_flow_panel) lv_obj_move_foreground(s_flow_panel);
-    if (s_auth) lv_obj_move_foreground(s_auth);
-    if (s_mode_btn) lv_obj_move_foreground(s_mode_btn);
-    if (s_cap_btn) lv_obj_move_foreground(s_cap_btn);
-    if (s_stop_btn) lv_obj_move_foreground(s_stop_btn);
-    if (s_capture) lv_obj_move_foreground(s_capture);
-    if (s_weather_guard_btn) lv_obj_move_foreground(s_weather_guard_btn);
+
+    app_ui_move_foreground(s_hud_layer);
+    app_ui_move_foreground(s_status);
+    app_ui_move_foreground(s_vision);
+    app_ui_move_foreground(s_coord);
+    app_ui_move_foreground(s_hint);
+    app_ui_move_foreground(s_flow_panel);
+    app_ui_move_foreground(s_auth);
+    app_ui_move_foreground(s_mode_btn);
+    app_ui_move_foreground(s_cap_btn);
+    app_ui_move_foreground(s_stop_btn);
+    app_ui_move_foreground(s_capture);
+    app_ui_move_foreground(s_weather_guard_btn);
     bsp_display_unlock();
     return true;
 }
@@ -1716,7 +1812,7 @@ bool app_ui_show_loading(void)
     {
         return false;
     }
-    lv_obj_t *scr = app_get_active_screen();
+    lv_obj_t *scr = app_ui_get_active_screen();
     if (s_loading_layer == NULL)
     {
         s_loading_layer = lv_obj_create(scr);

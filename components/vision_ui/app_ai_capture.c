@@ -28,9 +28,9 @@
 #define CAPTURE_TASK_CORE_ID        1
 #define CAPTURE_MAX_INDEX           99999U
 typedef struct {
-    uint8_t *bgr;
-    uint32_t image_index;
-    app_ai_capture_mode_t mode;
+    uint8_t *bgr;               // 独立 BGR888 缓冲，交给写盘任务持有。
+    uint32_t image_index;       // 文件名中的递增编号。
+    app_ai_capture_mode_t mode; // 决定 DRONE/NODRONE 保存目录。
 } app_ai_capture_slot_t;
 static const char *TAG = "app_ai_capture";
 static bool s_inited = false;
@@ -44,6 +44,9 @@ static QueueHandle_t s_free_queue = NULL;
 static QueueHandle_t s_write_queue = NULL;
 static app_ai_capture_slot_t s_slots[CAPTURE_SLOT_COUNT] = {0};
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
+
+/* ---------- BMP 编码与文件编号 ---------- */
+
 static void app_ai_capture_put_le16(uint8_t *dst, uint16_t value)
 {
     dst[0] = (uint8_t)(value & 0xFFU);
@@ -267,6 +270,9 @@ static esp_err_t app_ai_capture_write_bmp(const app_ai_capture_slot_t *slot)
     return ret;
 }
 // 写文件放到后台任务，避免相机帧回调被 SD 卡 I/O 阻塞。
+/* ---------- RGB565 转换与异步写盘 ---------- */
+
+// 写任务从 write_queue 取得所有权，完成后必须把槽位归还 free_queue。
 static void app_ai_capture_writer_task(void *arg)
 {
     (void)arg;
@@ -281,6 +287,8 @@ static void app_ai_capture_writer_task(void *arg)
     }
 }
 // 初始化双缓冲 slot 和写入任务。
+/* ---------- 公共生命周期与帧提交 ---------- */
+
 esp_err_t app_ai_capture_init(void)
 {
     if (s_inited)

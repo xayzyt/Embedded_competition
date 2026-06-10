@@ -29,22 +29,24 @@
 
 typedef struct
 {
-    uint8_t proto_cmd;
-    uint8_t proto_seq;
+    uint8_t proto_cmd; // 触发当前状态变化的命令。
+    uint8_t proto_seq; // 与 ESP32 侧 ACK/状态匹配的序号。
 } ch32_proto_ctx_t;
 
+// CH32 业务运行时状态。
+// action_ctx 在长动作期间固定保存原始命令，避免轮询到的新查询命令改变状态归属。
 typedef struct
 {
-    uint8_t hx711_ready;
-    uint8_t action_busy;
-    uint8_t current_stage;
-    uint8_t last_error;
-    uint8_t locked;
-    int32_t last_weight_g;
-    uint32_t idle_ms;
-    ch32_proto_ctx_t request_ctx;
-    ch32_proto_ctx_t action_ctx;
-    uint8_t action_ctx_valid;
+    uint8_t hx711_ready;             // 称重模块是否完成去皮并可用于货物检测。
+    uint8_t action_busy;             // 机械流程执行期间置 1，用于拒绝冲突命令。
+    uint8_t current_stage;           // 最近发布给 ESP32 的机械阶段。
+    uint8_t last_error;              // 保留故障，直到收到 RESET_FAULT。
+    uint8_t locked;                  // 外门和托盘是否已经回到安全锁止状态。
+    int32_t last_weight_g;           // 最近一次有效称重结果。
+    uint32_t idle_ms;                // 空闲状态广播计时。
+    ch32_proto_ctx_t request_ctx;     // 最近收到的命令上下文。
+    ch32_proto_ctx_t action_ctx;      // 当前长动作的固定上下文。
+    uint8_t action_ctx_valid;         // action_ctx 是否可用于状态上报。
 } ch32_app_runtime_t;
 
 static ch32_app_runtime_t s_app = {
@@ -62,6 +64,9 @@ static ch32_app_runtime_t s_app = {
 
 static uint8_t ch32_app_close_to_safe_locked(uint8_t emit_safe_event);
 
+/* ---------- 协议上下文与状态发布 ---------- */
+
+// 从入站命令提取最小上下文；空包用于主动状态广播。
 static ch32_proto_ctx_t ch32_app_ctx_from_packet(const ESP32_Comm_Packet_t *pkt)
 {
     ch32_proto_ctx_t ctx = {0U, 0U};
@@ -88,6 +93,7 @@ static const ch32_proto_ctx_t *ch32_app_active_status_ctx(void)
     return &s_app.request_ctx;
 }
 
+// flags 是 ESP32 快速判断 ready/busy/cargo 的摘要，详细阶段仍以 stage 为准。
 static uint16_t ch32_app_build_status_flags(void)
 {
     uint16_t flags = 0U;
@@ -148,6 +154,7 @@ static void ch32_app_publish_stage(uint8_t stage, uint8_t detail)
                                 detail);
 }
 
+// 故障状态会结束当前动作并持续保留，防止下一次空闲广播误报 ready。
 static void ch32_app_publish_fault(uint8_t err_code)
 {
     s_app.last_error = err_code;
@@ -186,6 +193,9 @@ static void ch32_app_publish_idle_status(void)
     }
 }
 
+/* ---------- 动作生命周期与传感器 ---------- */
+
+// 开始长动作时冻结请求上下文，之后的 STATUS 都关联到同一 cmd/seq。
 static void ch32_app_begin_action(void)
 {
     s_app.action_busy = 1U;
@@ -209,6 +219,7 @@ static void ch32_app_finish_action(void)
     s_app.action_ctx_valid = 0U;
 }
 
+// 多次称重取平均，减少托盘振动造成的瞬时误判。
 static int32_t ch32_app_read_weight_average(uint8_t times)
 {
     int64_t sum = 0;
@@ -240,6 +251,9 @@ static uint8_t ch32_app_ensure_hx711_ready(void)
     return 0U;
 }
 
+/* ---------- 忙碌期间的可中断命令 ---------- */
+
+// 长动作轮询期间仍允许 ABORT、SAFE_CLOSE 和状态查询，避免机械动作失控。
 static uint8_t ch32_app_handle_runtime_abort(const ESP32_Comm_Packet_t *pkt)
 {
     ESP32_Comm_SendProtoAck(pkt->proto_cmd, pkt->proto_seq);
@@ -335,6 +349,7 @@ static uint8_t ch32_app_pump_runtime_commands(void)
     return 0U;
 }
 
+// 将长延时拆成小片段，每个片段之间检查紧急命令。
 static uint8_t ch32_app_delay_ms_interruptible(uint32_t total_ms)
 {
     uint32_t elapsed = 0U;
@@ -383,6 +398,8 @@ static uint8_t ch32_app_stepper_move_interruptible(uint8_t dir,
     TMC2209_Disable();
     return 0U;
 }
+
+/* ---------- 单个机械动作 ---------- */
 
 static uint8_t ch32_app_open_outer_door(void)
 {
@@ -487,6 +504,9 @@ static uint8_t ch32_app_wait_for_cargo(uint32_t timeout_ms)
     return 0U;
 }
 
+/* ---------- 安全回收与完整配送流程 ---------- */
+
+// 无论正常完成还是中止，托盘都应先收回，再关闭外门并进入锁止阶段。
 static uint8_t ch32_app_close_to_safe_locked(uint8_t emit_safe_event)
 {
     if(ch32_app_retract_tray() == 0U)
@@ -540,6 +560,9 @@ static uint8_t ch32_app_run_delivery_flow(void)
     return 1U;
 }
 
+/* ---------- 命令分发 ---------- */
+
+// busy 期间只接受不会与当前机械动作冲突的查询或安全命令。
 static uint8_t ch32_app_command_allowed_while_busy(uint8_t cmd)
 {
     switch(cmd)
@@ -683,6 +706,7 @@ void CH32_App_Init(void)
     ch32_app_publish_idle_status();
 }
 
+// 主循环每次最多处理一个普通命令；无命令时周期广播 READY/FAULT 状态。
 void CH32_App_RunOnce(void)
 {
     ESP32_Comm_Packet_t pkt;

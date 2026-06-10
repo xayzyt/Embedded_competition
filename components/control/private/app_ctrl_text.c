@@ -4,6 +4,9 @@
 
 // 控制/UI 文案组装集中在这里，避免控制状态机里混入大量 snprintf。
 
+// 生成面向调试的完整遥测行。
+// vision 无效但判定器仍处于 hold 状态时，继续显示上一帧偏差并标注丢失计数；
+// 完全搜索状态则只显示等待提示，避免把无效数值误认为实时测量。
 void app_ctrl_compose_detail(const app_dock_judge_result_t *dock,
     bool has_weight,
     int32_t weight_g,
@@ -55,6 +58,9 @@ void app_ctrl_compose_detail(const app_dock_judge_result_t *dock,
         has_weight ? "" : "-",
         has_weight ? (long)weight_g : 0L);
 }
+
+// 按门控顺序只报告第一个未通过条件。
+// 该顺序与 app_dock_judge_process() 的判定顺序一致，现场人员可以直接按提示调整。
 static void app_ctrl_compose_guidance(const app_dock_judge_result_t *dock,
     char *buf,
     size_t buf_len)
@@ -106,6 +112,9 @@ static void app_ctrl_compose_guidance(const app_dock_judge_result_t *dock,
     }
     app_dock_judge_format_status(dock, buf, buf_len);
 }
+
+// 将高层任务状态转换为主状态栏文案。
+// WAIT_APPROACH 阶段根据 apriltag_enabled 在 AI 确认提示与对接引导之间切换。
 void app_ctrl_compose_task_status(const app_task_snapshot_t *task,
     const app_dock_judge_result_t *dock,
     bool ch32_ready,

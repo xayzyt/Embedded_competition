@@ -4,17 +4,20 @@
 #include "app_drone_ai.h"
 #include "app_task.h"
 
+// 视觉检测频率高于无人机分类频率，避免两个重任务每帧同时运行。
 #define VISION_SAMPLE_INTERVAL   2
 #define DRONE_AI_SAMPLE_INTERVAL 8
 
+// 这些计数器只由相机帧回调访问，不需要额外加锁。
 typedef struct {
-    uint32_t vision_sample_skip;
-    uint32_t drone_ai_sample_skip;
-    bool apriltag_gate_was_open;
+    uint32_t vision_sample_skip;   // 距离上次视觉提交已经跳过的帧数。
+    uint32_t drone_ai_sample_skip; // 距离上次 AI 提交已经跳过的帧数。
+    bool apriltag_gate_was_open;   // 用于识别门控从关闭到打开的边沿。
 } app_camera_route_runtime_t;
 
 static app_camera_route_runtime_t s_route = {0};
 
+// AprilTag 只在任务等待靠近/已鉴权阶段运行，并要求先确认画面中存在无人机。
 static bool app_camera_route_apriltag_gate_open(void)
 {
     app_task_snapshot_t task = {0};
@@ -28,6 +31,7 @@ static bool app_camera_route_apriltag_gate_open(void)
            app_drone_ai_is_drone_confirmed();
 }
 
+// 无人机分类只负责打开视觉门控；确认后立即停止继续消耗推理算力。
 static bool app_camera_route_ai_gate_active(void)
 {
     app_task_snapshot_t task = {0};
@@ -52,6 +56,7 @@ app_camera_frame_route_t app_camera_route_select(void)
     const bool ai_gate_active = app_camera_route_ai_gate_active();
     const bool apriltag_gate_open = app_camera_route_apriltag_gate_open();
 
+    // AI 门控关闭时重置计数，保证下次任务从完整抽样周期开始。
     if (!ai_gate_active)
     {
         s_route.drone_ai_sample_skip = 0;
@@ -62,6 +67,7 @@ app_camera_frame_route_t app_camera_route_select(void)
         route.ai_due = true;
     }
 
+    // 抓图时暂停视觉提交，避免文件采样与 AprilTag 检测争抢同一帧资源。
     if (capture_active || !apriltag_gate_open)
     {
         s_route.vision_sample_skip = 0;
@@ -69,6 +75,7 @@ app_camera_frame_route_t app_camera_route_select(void)
     }
     else if (!s_route.apriltag_gate_was_open)
     {
+        // 门控刚打开时立即提交首帧，避免额外等待一个抽样周期。
         s_route.vision_sample_skip = 0;
         s_route.apriltag_gate_was_open = true;
         route.vision_due = true;
@@ -79,6 +86,7 @@ app_camera_frame_route_t app_camera_route_select(void)
         route.vision_due = true;
     }
 
+    // 抓图模块内部维护采样间隔和队列容量，路由层直接采用其决策。
     route.capture_due = app_ai_capture_should_capture_frame();
     return route;
 }

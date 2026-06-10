@@ -20,16 +20,16 @@
 
 static const char *TAG = "main";
 
-#define APP_TARGET_TAG_ID            (1U)
-#define APP_TAG_SIZE_MM              (60)
-#define APP_FOCAL_LENGTH_PX          (314.0f)
-#define APP_CLOUD_START_TASK_STACK   (8 * 1024)
-#define APP_CLOUD_START_TASK_PRIO    4
-#define APP_CAMERA_START_TASK_STACK  (12 * 1024)
-#define APP_CAMERA_START_TASK_PRIO   5
-#define APP_TASK_EVENT_QUEUE_LEN      8
-#define APP_TASK_EVENT_TASK_STACK     (8 * 1024)
-#define APP_TASK_EVENT_TASK_PRIO      5
+#define APP_TARGET_TAG_ID                (1U)
+#define APP_TAG_SIZE_MM                  (60)
+#define APP_FOCAL_LENGTH_PX              (314.0f)
+#define APP_CLOUD_START_TASK_STACK       (8 * 1024)
+#define APP_CLOUD_START_TASK_PRIO        4
+#define APP_CAMERA_START_TASK_STACK      (12 * 1024)
+#define APP_CAMERA_START_TASK_PRIO       5
+#define APP_TASK_EVENT_QUEUE_LEN         8
+#define APP_TASK_EVENT_TASK_STACK        (8 * 1024)
+#define APP_TASK_EVENT_TASK_PRIO         5
 #define APP_WEATHER_EMERGENCY_TASK_STACK (12 * 1024)
 #define APP_WEATHER_EMERGENCY_TASK_PRIO  5
 #define APP_PREVIEW_FIRST_FRAME_WAIT_MS  12000U
@@ -40,11 +40,14 @@ typedef struct {
     app_task_event_t event;
     app_task_snapshot_t snap;
 } app_main_task_event_msg_t;
+
 static TaskHandle_t s_weather_emergency_task = NULL;
 static TaskHandle_t s_task_event_task = NULL;
 static QueueHandle_t s_task_event_queue = NULL;
 static portMUX_TYPE s_weather_emergency_mux = portMUX_INITIALIZER_UNLOCKED;
 static bool s_weather_emergency_running = false;
+static bool s_camera_started = false;
+static bool s_cloud_start_requested = false;
 
 // 初始化 NVS，遇到分区版本变化或空间不足时自动擦除后重试。
 static void app_init_nvs(void)
@@ -162,14 +165,13 @@ static void app_show_ready_status(const app_dock_judge_config_t *dock_cfg)
     if (dock_cfg->use_distance_gate)
     {
         app_ui_set_status("task: configured / dist gate on");
-    } else
+    }
+    else
     {
         app_ui_set_status("task: configured / demo loose");
     }
     app_ui_main_screen_set_task_state(APP_UI_MAIN_TASK_CONFIGURED);
 }
-static bool s_camera_started = false;
-static bool s_cloud_start_requested = false;
 
 static bool app_task_wants_camera_preview(void)
 {

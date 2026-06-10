@@ -81,6 +81,9 @@ static uint32_t s_bad_preview_streak = 0;
 #if SOC_PPA_SUPPORTED
 static ppa_client_handle_t s_ppa_srm_handle = NULL;
 #endif
+
+/* ---------- PSRAM/DMA 缓存一致性 ---------- */
+
 // 对齐到 cache line 后同步，避免 PSRAM/DMA 缓存一致性问题。
 static esp_err_t app_camera_msync_aligned(void *addr, size_t size, int flags)
 {
@@ -183,6 +186,8 @@ static bool app_camera_frame_length_ok(uint32_t width, uint32_t height, size_t l
     const size_t expected = (size_t)width * (size_t)height * 2U;
     return len >= expected;
 }
+/* ---------- 异常预览帧检测 ---------- */
+
 typedef struct {
     uint32_t sample_count;
     uint32_t cyan_count;
@@ -354,6 +359,8 @@ static void app_camera_note_good_preview(void)
     s_bad_preview_streak = 0;
 }
 // CPU fallback 缩放路径：最近邻采样到屏幕中央区域。
+/* ---------- 缩放与缓存分配 ---------- */
+
 static esp_err_t app_camera_preview_scale_rgb565_cpu(const uint8_t *in_buf,
     uint32_t in_width,
     uint32_t in_height,
@@ -729,6 +736,8 @@ static void app_camera_calc_preview_fit(uint32_t camera_width,
 }
 #endif
 // stage queue 只保留最新待显示帧，显示跟不上时主动丢帧。
+/* ---------- stage buffer 所有权状态机 ---------- */
+
 static bool app_camera_has_pending_stage(void)
 {
     bool has_pending = false;
@@ -819,6 +828,8 @@ static void app_camera_release_stage_buffer(int buf_index)
     taskEXIT_CRITICAL(&s_display_mux);
 }
 // 显示任务把已验证 stage 帧复制到三缓冲 canvas，避免 LVGL 读图时被覆盖。
+/* ---------- 相机回调与显示任务 ---------- */
+
 static void app_camera_display_task(void *arg)
 {
     (void)arg;
@@ -871,12 +882,10 @@ static void app_camera_display_task(void *arg)
 }
 // V4L2 每帧回调：抽样提交识别模块，并生成一帧可显示的 stage buffer。
 static void app_camera_frame_cb(uint8_t *camera_buf,
-    uint8_t camera_buf_index,
     uint32_t camera_buf_hes,
     uint32_t camera_buf_ves,
     size_t camera_buf_len)
 {
-    (void)camera_buf_index;
     if (camera_buf == NULL || s_camera_canvas == NULL || !app_camera_canvas_buffers_ready())
     {
         return;
@@ -1054,6 +1063,8 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
     app_camera_publish_stage_buffer(stage_index);
 }
 // 启动显示任务，PSRAM 栈失败时自动退回内部 RAM 栈。
+/* ---------- 公共生命周期 ---------- */
+
 static esp_err_t app_camera_start_display_task(void)
 {
     if (s_display_task_handle)

@@ -12,6 +12,9 @@
 // MQTT 消息层：负责云端命令解析、ACK 回复和任务状态 JSON 上报。
 
 static const char *TAG = "app_cloud";
+
+/* ---------- JSON 与订单字段辅助函数 ---------- */
+
 // cJSON 添加字段的轻量包装，让上报构造可以串联判断内存失败。
 static bool app_cloud_json_add_string(cJSON *root, const char *key, const char *value)
 {
@@ -82,6 +85,8 @@ static const char *app_cloud_weather_mode_text(app_cloud_weather_mode_t mode)
         return "normal";
     }
 }
+/* ---------- MQTT 发布 ---------- */
+
 static esp_err_t app_cloud_publish_raw(const char *topic,
     const char *payload,
     int qos,
@@ -238,6 +243,8 @@ void app_cloud_on_task_event(app_task_event_t event,
     s_cloud.have_last_snapshot = true;
     app_cloud_publish_task_snapshot_internal(snap);
 }
+/* ---------- 云端命令执行 ---------- */
+
 static esp_err_t app_cloud_receive_set_target(uint16_t target_id)
 {
     return app_task_set_target_id(target_id, true);
@@ -340,6 +347,8 @@ static esp_err_t app_cloud_handle_command(const char *payload, size_t payload_le
     return ESP_ERR_NOT_SUPPORTED;
 }
 // ESP MQTT 事件里的 topic/data 不是 NUL 结尾，先复制成普通字符串。
+/* ---------- MQTT DATA 事件入口 ---------- */
+
 static int app_cloud_copy_event_slice(char *dst, size_t dst_size, const char *src, int src_len)
 {
     if ((dst == NULL) || (dst_size == 0U))

@@ -110,6 +110,9 @@ void app_ui_set_weather_sim_callback(app_ui_weather_sim_cb_t cb)
 {
     s_weather_sim_cb = cb;
 }
+
+/* ---------- 主屏按钮事件 ---------- */
+
 // 取货按钮事件，具体开门动作由 main 注册的回调完成。
 static void app_ui_pickup_event_cb(lv_event_t *e)
 {
@@ -188,6 +191,8 @@ static void app_ui_update_clock_unlocked(void)
     lv_label_set_text(s_main_clock_note, date_buf);
     lv_obj_set_style_text_color(s_main_clock_time, lv_color_hex(0x0F172A), 0);
 }
+/* ---------- 时钟与任务视觉状态 ---------- */
+
 static void app_ui_clock_timer_cb(lv_timer_t *timer)
 {
     (void)timer;
@@ -370,6 +375,8 @@ static bool app_ui_weather_is_severe(int weather_code)
 {
     return weather_code == 36 || weather_code == 37 || weather_code == 38;
 }
+/* ---------- 天气策略展示 ---------- */
+
 static void app_ui_update_weather_sim_button_unlocked(void)
 {
     if (s_weather_sim_btn != NULL)
@@ -544,6 +551,8 @@ static void app_ui_apply_main_task_state_unlocked(const char *text)
     app_ui_apply_main_task_display_unlocked(text, lv_color_hex(0x0F766E), false, false);
 }
 // 创建并显示主屏；已创建时仅取消隐藏并刷新状态。
+/* ---------- 主屏对象创建与公共更新接口 ---------- */
+
 bool app_ui_show_main_screen(void)
 {
     if (!bsp_display_lock(UI_LOCK_BOOT_MS))

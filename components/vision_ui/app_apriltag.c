@@ -663,6 +663,9 @@ static inline uint32_t at_index(uint32_t x, uint32_t y, uint32_t width)
 {
     return y * width + x;
 }
+
+/* ---------- 二值化与候选连通域 ---------- */
+
 // Otsu 自动阈值，适合光照变化下的黑白标签分割。
 static uint8_t at_otsu_threshold(const uint8_t *gray, uint32_t width, uint32_t height)
 {
@@ -872,6 +875,9 @@ static int at_collect_candidates(uint32_t width, uint32_t height, at_candidate_t
     }
     return count;
 }
+
+/* ---------- 四边形校验与透视采样 ---------- */
+
 static float at_dist2(const at_pt_t *a, const at_pt_t *b)
 {
     float dx = a->x - b->x;
@@ -1034,6 +1040,9 @@ static void at_transform_bits(const uint8_t src[AT_DATA_GRID][AT_DATA_GRID],
         }
     }
 }
+
+/* ---------- 码字排列与 tag36h11 匹配 ---------- */
+
 static uint64_t at_build_code_family(const uint8_t bits[AT_DATA_GRID][AT_DATA_GRID], bool lsb_first)
 {
     uint64_t code = 0;
@@ -1273,6 +1282,9 @@ static bool at_decode_with_quad(const uint8_t *gray,
                                      cand->tr.x - cand->tl.x) * (180.0f / (float)M_PI);
     return true;
 }
+
+/* ---------- 公共检测入口 ---------- */
+
 // 分配二值图、visited 和 BFS 队列缓存。
 esp_err_t app_apriltag_init(void)
 {

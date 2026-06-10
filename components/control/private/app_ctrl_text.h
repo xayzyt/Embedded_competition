@@ -11,6 +11,7 @@
 extern "C" {
 #endif
 // 生成调试详情行，包含视觉偏差、距离、姿态、阶段和重量。
+// buf 由调用者提供；dock、buf 为空或长度为零时不写入。
 void app_ctrl_compose_detail(const app_dock_judge_result_t *dock,
     bool has_weight,
     int32_t weight_g,
@@ -18,6 +19,7 @@ void app_ctrl_compose_detail(const app_dock_judge_result_t *dock,
     char *buf,
     size_t buf_len);
 // 生成主状态行，根据任务、视觉门控和 CH32 在线状态给 UI 使用。
+// apriltag_enabled=false 表示仍处于无人机 AI 确认阶段。
 void app_ctrl_compose_task_status(const app_task_snapshot_t *task,
     const app_dock_judge_result_t *dock,
     bool ch32_ready,

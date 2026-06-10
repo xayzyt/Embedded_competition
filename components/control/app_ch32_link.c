@@ -20,23 +20,25 @@ static const char *TAG = "app_ch32_link";
 #define APP_CH32_LINK_READY_STALE_MS (3000U)
 #endif
 typedef struct {
-    uart_port_t uart_num;
-    EventGroupHandle_t event_group;
-    SemaphoreHandle_t tx_mutex;
-    TaskHandle_t rx_task;
-    app_ch32_line_cb_t cb;
-    void *user_ctx;
-    bool inited;
-    bool ready;
-    app_ch32_proto_cmd_t last_ack_cmd;
-    uint8_t last_ack_seq;
-    app_ch32_proto_cmd_t last_nack_cmd;
-    uint8_t last_nack_seq;
-    uint8_t last_nack_error;
-    uint8_t next_seq;
-    TickType_t last_rx_tick;
+    uart_port_t uart_num;              // IDF UART 端口号。
+    EventGroupHandle_t event_group;    // READY/ACK/NACK 跨任务通知。
+    SemaphoreHandle_t tx_mutex;        // 保证同一时间只有一个命令等待应答。
+    TaskHandle_t rx_task;              // UART 接收与帧解析任务。
+    app_ch32_line_cb_t cb;             // 解析完成后的业务回调。
+    void *user_ctx;                    // 原样传给业务回调。
+    bool inited;                       // 驱动和同步对象是否就绪。
+    bool ready;                        // 最近状态帧推导的 CH32 ready。
+    app_ch32_proto_cmd_t last_ack_cmd; // 最近 ACK 对应命令。
+    uint8_t last_ack_seq;              // 最近 ACK 序号。
+    app_ch32_proto_cmd_t last_nack_cmd;// 最近 NACK 对应命令。
+    uint8_t last_nack_seq;             // 最近 NACK 序号。
+    uint8_t last_nack_error;           // 最近 NACK 错误码。
+    uint8_t next_seq;                  // 下一条发包序号。
+    TickType_t last_rx_tick;           // 最近收到有效状态的时刻。
 } app_ch32_link_ctx_t;
 static app_ch32_link_ctx_t s_ctx = {0};
+
+/* ---------- 发送锁与基础编解码 ---------- */
 
 // 发送互斥锁比命令超时多留一点余量，避免刚到期就抢不到锁。
 static uint32_t app_ch32_link_lock_timeout_ms(uint32_t timeout_ms)
@@ -136,10 +138,16 @@ const char *app_ch32_link_proto_error_name(uint8_t err)
     }
 }
 // ready 可由 flags 直接指示，也可由若干静态安全阶段推断。
+/* ---------- ready 缓存与入站消息 ---------- */
+
 static bool app_ch32_proto_stage_indicates_ready(app_ch32_proto_stage_t stage, uint16_t flags)
 {
-    if ((flags & APP_CH32_FLAG_READY) != 0U) return true;
-    switch (stage) {
+    if ((flags & APP_CH32_FLAG_READY) != 0U)
+    {
+        return true;
+    }
+    switch (stage)
+    {
     case APP_CH32_STAGE_IDLE:
     case APP_CH32_STAGE_READY:
     case APP_CH32_STAGE_COMPLETE:
@@ -152,13 +160,18 @@ static bool app_ch32_proto_stage_indicates_ready(app_ch32_proto_stage_t stage, u
 // ready 状态有时效，超过窗口未收到状态帧则主动置为离线。
 static bool app_ch32_ready_is_fresh(void)
 {
-    if (!s_ctx.ready) return false;
+    if (!s_ctx.ready)
+    {
+        return false;
+    }
     const TickType_t age_ticks = xTaskGetTickCount() - s_ctx.last_rx_tick;
     if (age_ticks > pdMS_TO_TICKS(APP_CH32_LINK_READY_STALE_MS))
     {
         s_ctx.ready = false;
         if (s_ctx.event_group != NULL)
+        {
             xEventGroupClearBits(s_ctx.event_group, CH32_EVT_READY);
+        }
         return false;
     }
     return true;
@@ -166,15 +179,22 @@ static bool app_ch32_ready_is_fresh(void)
 // 任何入站消息都先更新 ready、ACK/NACK 等协议层状态。
 static void app_ch32_apply_common_side_effects(const app_ch32_line_t *msg)
 {
-    if (msg == NULL) return;
+    if (msg == NULL)
+    {
+        return;
+    }
     s_ctx.last_rx_tick = xTaskGetTickCount();
     if (msg->type == APP_CH32_LINE_PROTO_STATUS && msg->payload_len >= 8U)
     {
         s_ctx.ready = app_ch32_proto_stage_indicates_ready(msg->proto_stage, msg->proto_flags);
         if (s_ctx.ready)
+        {
             xEventGroupSetBits(s_ctx.event_group, CH32_EVT_READY);
+        }
         else
+        {
             xEventGroupClearBits(s_ctx.event_group, CH32_EVT_READY);
+        }
     }
     if (msg->type == APP_CH32_LINE_PROTO_ACK)
     {
@@ -192,19 +212,36 @@ static void app_ch32_apply_common_side_effects(const app_ch32_line_t *msg)
 }
 static void app_ch32_dispatch_msg(const app_ch32_line_t *msg)
 {
-    if (msg == NULL) return;
+    if (msg == NULL)
+    {
+        return;
+    }
     app_ch32_apply_common_side_effects(msg);
     if (s_ctx.cb != NULL)
+    {
         s_ctx.cb(msg, s_ctx.user_ctx);
+    }
 }
 // 校验并解析一帧 CH32 二进制协议，输出统一的 app_ch32_line_t。
 static bool app_ch32_parse_proto_frame(const uint8_t *frame, size_t frame_len, app_ch32_line_t *out)
 {
-    if (frame == NULL || out == NULL) return false;
-    if (frame_len < APP_CH32_PROTO_MIN_FRAME) return false;
-    if (frame[0] != APP_CH32_PROTO_SOF1 || frame[1] != APP_CH32_PROTO_SOF2) return false;
+    if (frame == NULL || out == NULL)
+    {
+        return false;
+    }
+    if (frame_len < APP_CH32_PROTO_MIN_FRAME)
+    {
+        return false;
+    }
+    if (frame[0] != APP_CH32_PROTO_SOF1 || frame[1] != APP_CH32_PROTO_SOF2)
+    {
+        return false;
+    }
     const uint8_t payload_len = frame[5];
-    if ((size_t)(APP_CH32_PROTO_OVERHEAD + payload_len) != frame_len) return false;
+    if ((size_t)(APP_CH32_PROTO_OVERHEAD + payload_len) != frame_len)
+    {
+        return false;
+    }
     const uint16_t crc_expect = app_ch32_read_u16_le(&frame[6 + payload_len]);
     const uint16_t crc_actual = app_ch32_crc16_ibm(frame, (size_t)(6U + payload_len));
     if (crc_expect != crc_actual)
@@ -217,7 +254,9 @@ static bool app_ch32_parse_proto_frame(const uint8_t *frame, size_t frame_len, a
     out->proto_seq  = frame[4];
     out->payload_len = payload_len;
     if (payload_len > 0U)
+    {
         memcpy(out->payload, &frame[6], payload_len);
+    }
     switch ((app_ch32_proto_type_t)out->proto_type) {
     case APP_CH32_PROTO_TYPE_ACK:
         out->type = APP_CH32_LINE_PROTO_ACK;
@@ -324,6 +363,8 @@ static void app_ch32_link_rx_task(void *arg)
     }
 }
 // 初始化 UART 前先把 TX 拉高，避免从控把上电抖动误判为帧起始。
+/* ---------- 命令发送与 ACK 匹配 ---------- */
+
 static esp_err_t app_ch32_link_prepare_tx_idle(void)
 {
     gpio_config_t io_conf = {
@@ -365,7 +406,10 @@ static esp_err_t app_ch32_link_send_proto(app_ch32_proto_cmd_t cmd,
     frame[idx++] = (uint8_t)((crc >> 8) & 0xFFU);
     int written = uart_write_bytes(s_ctx.uart_num, (const char *)frame, idx);
     ESP_RETURN_ON_FALSE(written == (int)idx, ESP_FAIL, TAG, "uart_write_bytes proto failed");
-    if (out_seq != NULL) *out_seq = seq;
+    if (out_seq != NULL)
+    {
+        *out_seq = seq;
+    }
     return ESP_OK;
 }
 // 在指定时间内等待与 cmd/seq 匹配的 ACK 或 NACK。
@@ -373,17 +417,28 @@ static esp_err_t app_ch32_link_wait_ack_for_cmd(app_ch32_proto_cmd_t cmd, uint8_
 {
     uint32_t elapsed_ms = 0;
     uint32_t slice_ms = APP_CH32_LINK_ACK_POLL_MS;
-    if (slice_ms == 0U) slice_ms = 50U;
-    while (elapsed_ms < timeout_ms) {
+    if (slice_ms == 0U)
+    {
+        slice_ms = 50U;
+    }
+    while (elapsed_ms < timeout_ms)
+    {
         uint32_t this_wait = slice_ms;
         if ((elapsed_ms + this_wait) > timeout_ms)
+        {
             this_wait = timeout_ms - elapsed_ms;
+        }
         EventBits_t bits = xEventGroupWaitBits(s_ctx.event_group,
             CH32_EVT_ACK | CH32_EVT_NACK, pdTRUE, pdFALSE, pdMS_TO_TICKS(this_wait));
         elapsed_ms += this_wait;
-        if ((bits & (CH32_EVT_ACK | CH32_EVT_NACK)) == 0U) continue;
+        if ((bits & (CH32_EVT_ACK | CH32_EVT_NACK)) == 0U)
+        {
+            continue;
+        }
         if ((bits & CH32_EVT_ACK) != 0U && s_ctx.last_ack_cmd == cmd && s_ctx.last_ack_seq == seq)
+        {
             return ESP_OK;
+        }
         if ((bits & CH32_EVT_NACK) != 0U && s_ctx.last_nack_cmd == cmd && s_ctx.last_nack_seq == seq)
         {
             ESP_LOGW(TAG, "CH32 rejected cmd=0x%02X seq=%u err=%s",
@@ -392,8 +447,14 @@ static esp_err_t app_ch32_link_wait_ack_for_cmd(app_ch32_proto_cmd_t cmd, uint8_
             s_ctx.last_nack_cmd = APP_CH32_PROTO_CMD_NONE;
             return ESP_ERR_INVALID_RESPONSE;
         }
-        if ((bits & CH32_EVT_ACK) != 0U) s_ctx.last_ack_cmd = APP_CH32_PROTO_CMD_NONE;
-        if ((bits & CH32_EVT_NACK) != 0U) s_ctx.last_nack_cmd = APP_CH32_PROTO_CMD_NONE;
+        if ((bits & CH32_EVT_ACK) != 0U)
+        {
+            s_ctx.last_ack_cmd = APP_CH32_PROTO_CMD_NONE;
+        }
+        if ((bits & CH32_EVT_NACK) != 0U)
+        {
+            s_ctx.last_nack_cmd = APP_CH32_PROTO_CMD_NONE;
+        }
     }
     return ESP_ERR_TIMEOUT;
 }
@@ -459,7 +520,10 @@ esp_err_t app_ch32_link_send_proto_cmd_and_wait_ack(app_ch32_proto_cmd_t proto_c
 esp_err_t app_ch32_link_probe_ready(uint32_t timeout_ms)
 {
     ESP_RETURN_ON_FALSE(s_ctx.inited, ESP_ERR_INVALID_STATE, TAG, "not initialized");
-    if (app_ch32_ready_is_fresh()) return ESP_OK;
+    if (app_ch32_ready_is_fresh())
+    {
+        return ESP_OK;
+    }
     if (!app_ch32_link_lock_tx(app_ch32_link_lock_timeout_ms(timeout_ms)))
     {
         return ESP_ERR_TIMEOUT;
