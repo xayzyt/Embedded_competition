@@ -29,7 +29,6 @@
 
 #define CAMERA_NUM_BUFS          4
 #define STAGE_NUM_BUFS           5
-#define UI_CANVAS_NUM_BUFS       3
 #define ALIGN_UP(num, align)     (((num) + ((align) - 1)) & ~((align) - 1))
 #define DISPLAY_TASK_STACK_SIZE  (6 * 1024)
 #define DISPLAY_TASK_PRIORITY    7
@@ -43,8 +42,8 @@
 #define PREVIEW_BAD_CYAN_PERCENT        88U
 #define PREVIEW_BAD_SOLID_PERCENT       98U
 #define PREVIEW_BAD_CAST_PERCENT        78U
-#define PREVIEW_BAD_HOLD_FRAMES         3U
 #define CAMERA_BUF_CAPS          (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT | MALLOC_CAP_CACHE_ALIGNED)
+#define CANVAS_BUF_CAPS          (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT | MALLOC_CAP_CACHE_ALIGNED)
 #define DISPLAY_BUF_CAPS         (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT | MALLOC_CAP_DMA)
 static const char *TAG = "app_camera";
 static bool s_camera_inited = false;
@@ -57,8 +56,7 @@ static uint8_t *s_cam_buf[CAMERA_NUM_BUFS] = {0};
 static size_t s_cam_buf_size = 0;
 // stage buffer 是相机回调和 LVGL 显示任务之间的轻量多缓冲队列。
 static uint8_t *s_stage_buf[STAGE_NUM_BUFS] = {0};
-static uint8_t *s_ui_canvas_buf[UI_CANVAS_NUM_BUFS] = {0};
-static uint8_t s_ui_canvas_active_index = 0;
+static uint8_t *s_ui_canvas_buf = NULL;
 static uint32_t s_disp_buf_size = 0;
 static TaskHandle_t s_display_task_handle = NULL;
 static portMUX_TYPE s_display_mux = portMUX_INITIALIZER_UNLOCKED;
@@ -77,7 +75,6 @@ static uint32_t s_stage_letterbox_w[STAGE_NUM_BUFS] = {0};
 static uint32_t s_stage_letterbox_h[STAGE_NUM_BUFS] = {0};
 static volatile int s_retained_stage_index = -1;
 static uint32_t s_warmup_drop_remaining = 0;
-static uint32_t s_bad_preview_streak = 0;
 #if SOC_PPA_SUPPORTED
 static ppa_client_handle_t s_ppa_srm_handle = NULL;
 #endif
@@ -136,15 +133,9 @@ static void app_camera_canvas_set_buffer(uint8_t *buf)
     lv_canvas_set_buffer(s_camera_canvas, buf, BSP_LCD_H_RES, BSP_LCD_V_RES, LV_IMG_CF_TRUE_COLOR);
 #endif
 }
-static inline bool app_camera_canvas_buffers_ready(void)
+static inline bool app_camera_canvas_buffer_ready(void)
 {
-    for (uint8_t i = 0; i < UI_CANVAS_NUM_BUFS; i++) {
-        if (s_ui_canvas_buf[i] == NULL)
-        {
-            return false;
-        }
-    }
-    return true;
+    return s_ui_canvas_buf != NULL;
 }
 // 计算等比例缩放后的预览尺寸，保持画面不拉伸。
 static void app_camera_preview_calc_aspect_fit(uint32_t src_w,
@@ -349,15 +340,6 @@ static bool app_camera_analyze_rgb565_frame(const uint8_t *buf,
     }
     return stats.bad;
 }
-static bool app_camera_should_hold_bad_preview(void)
-{
-    s_bad_preview_streak++;
-    return (s_display_count > 0U) && (s_bad_preview_streak <= PREVIEW_BAD_HOLD_FRAMES);
-}
-static void app_camera_note_good_preview(void)
-{
-    s_bad_preview_streak = 0;
-}
 // CPU fallback 缩放路径：最近邻采样到屏幕中央区域。
 /* ---------- 缩放与缓存分配 ---------- */
 
@@ -454,14 +436,11 @@ static void app_camera_free_display_buffers(void)
         s_stage_letterbox_w[i] = 0;
         s_stage_letterbox_h[i] = 0;
     }
-    for (int i = 0; i < UI_CANVAS_NUM_BUFS; i++) {
-        if (s_ui_canvas_buf[i])
-        {
-            heap_caps_free(s_ui_canvas_buf[i]);
-            s_ui_canvas_buf[i] = NULL;
-        }
+    if (s_ui_canvas_buf)
+    {
+        heap_caps_free(s_ui_canvas_buf);
+        s_ui_canvas_buf = NULL;
     }
-    s_ui_canvas_active_index = 0;
     s_pending_stage_index = -1;
     s_displayed_stage_index = -1;
     s_retained_stage_index = -1;
@@ -477,21 +456,12 @@ static esp_err_t app_camera_alloc_display_buffers(void)
         return ret;
     }
     s_disp_buf_size = ALIGN_UP(BSP_LCD_H_RES * BSP_LCD_V_RES * 2, s_cache_line_size);
-    for (int i = 0; i < UI_CANVAS_NUM_BUFS; i++) {
-        s_ui_canvas_buf[i] = app_camera_aligned_calloc(s_disp_buf_size, DISPLAY_BUF_CAPS, "ui canvas");
-        if (s_ui_canvas_buf[i] == NULL)
-        {
-            ESP_LOGE(TAG, "alloc ui canvas buffer %d failed", i);
-            app_camera_free_display_buffers();
-            return ESP_ERR_NO_MEM;
-        }
-        ret = app_camera_msync_c2m(s_ui_canvas_buf[i], s_disp_buf_size);
-        if (ret != ESP_OK)
-        {
-            ESP_LOGE(TAG, "sync ui canvas buffer %d failed: %s", i, esp_err_to_name(ret));
-            app_camera_free_display_buffers();
-            return ret;
-        }
+    s_ui_canvas_buf = app_camera_aligned_calloc(s_disp_buf_size, CANVAS_BUF_CAPS, "ui canvas");
+    if (s_ui_canvas_buf == NULL)
+    {
+        ESP_LOGE(TAG, "alloc ui canvas buffer failed");
+        app_camera_free_display_buffers();
+        return ESP_ERR_NO_MEM;
     }
     for (int i = 0; i < STAGE_NUM_BUFS; i++) {
         s_stage_buf[i] = app_camera_aligned_calloc(s_disp_buf_size, DISPLAY_BUF_CAPS, "stage buffer");
@@ -561,7 +531,7 @@ static esp_err_t app_camera_create_canvas(void)
         bsp_display_unlock();
         return ESP_FAIL;
     }
-    app_camera_canvas_set_buffer(s_ui_canvas_buf[s_ui_canvas_active_index]);
+    app_camera_canvas_set_buffer(s_ui_canvas_buf);
     lv_obj_center(s_camera_canvas);
     lv_obj_move_background(s_camera_canvas);
     bsp_display_unlock();
@@ -827,7 +797,7 @@ static void app_camera_release_stage_buffer(int buf_index)
     }
     taskEXIT_CRITICAL(&s_display_mux);
 }
-// 显示任务把已验证 stage 帧复制到三缓冲 canvas，避免 LVGL 读图时被覆盖。
+// 显示任务把已验证 stage 帧复制到固定 canvas，并在同一显示锁内完成刷新。
 /* ---------- 相机回调与显示任务 ---------- */
 
 static void app_camera_display_task(void *arg)
@@ -837,7 +807,7 @@ static void app_camera_display_task(void *arg)
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         while (1) {
             int buf_index = app_camera_take_ready_stage_buffer();
-            if (buf_index < 0 || s_camera_canvas == NULL || !app_camera_canvas_buffers_ready())
+            if (buf_index < 0 || s_camera_canvas == NULL || !app_camera_canvas_buffer_ready())
             {
                 break;
             }
@@ -849,23 +819,10 @@ static void app_camera_display_task(void *arg)
             bool displayed = false;
             if (bsp_display_lock(DISPLAY_LOCK_TIMEOUT_MS))
             {
-                app_camera_frame_stats_t canvas_stats = {0};
-                if (app_camera_analyze_rgb565_frame(s_stage_buf[buf_index],
-                        s_disp_buf_size,
-                        BSP_LCD_H_RES,
-                        BSP_LCD_V_RES,
-                        &canvas_stats))
-                {
-                }
-                uint8_t next_index = (uint8_t)((s_ui_canvas_active_index + 1U) % UI_CANVAS_NUM_BUFS);
-                memcpy(s_ui_canvas_buf[next_index], s_stage_buf[buf_index], s_disp_buf_size);
-                if (app_camera_msync_c2m(s_ui_canvas_buf[next_index], s_disp_buf_size) == ESP_OK)
-                {
-                    app_camera_canvas_set_buffer(s_ui_canvas_buf[next_index]);
-                    s_ui_canvas_active_index = next_index;
-                    lv_obj_invalidate(s_camera_canvas);
-                    displayed = true;
-                }
+                memcpy(s_ui_canvas_buf, s_stage_buf[buf_index], s_disp_buf_size);
+                lv_obj_invalidate(s_camera_canvas);
+                lv_refr_now(NULL);
+                displayed = true;
                 bsp_display_unlock();
             }
             if (displayed)
@@ -886,7 +843,7 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
     uint32_t camera_buf_ves,
     size_t camera_buf_len)
 {
-    if (camera_buf == NULL || s_camera_canvas == NULL || !app_camera_canvas_buffers_ready())
+    if (camera_buf == NULL || s_camera_canvas == NULL || !app_camera_canvas_buffer_ready())
     {
         return;
     }
@@ -1012,48 +969,21 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
         }
         stage_written_by_cpu = true;
     }
-    if (stage_written_by_ppa)
+    if (stage_written_by_ppa &&
+        app_camera_msync_m2c(out_buf, s_disp_buf_size) != ESP_OK)
     {
-        if (app_camera_msync_m2c(out_buf, s_disp_buf_size) != ESP_OK)
-        {
-            app_camera_abandon_stage_buffer(stage_index);
-            return;
-        }
-        if (app_camera_analyze_rgb565_frame(out_buf,
-                s_disp_buf_size,
-                BSP_LCD_H_RES,
-                BSP_LCD_V_RES,
-                NULL))
-        {
-            if (app_camera_should_hold_bad_preview())
-            {
-                app_camera_abandon_stage_buffer(stage_index);
-                return;
-            }
-        }
-        else
-        {
-            app_camera_note_good_preview();
-        }
+        app_camera_abandon_stage_buffer(stage_index);
+        return;
     }
-    if (stage_written_by_cpu)
+    const bool bad_preview = app_camera_analyze_rgb565_frame(out_buf,
+        s_disp_buf_size,
+        BSP_LCD_H_RES,
+        BSP_LCD_V_RES,
+        NULL);
+    if (bad_preview && s_display_count > 0U)
     {
-        if (app_camera_analyze_rgb565_frame(out_buf,
-                s_disp_buf_size,
-                BSP_LCD_H_RES,
-                BSP_LCD_V_RES,
-                NULL))
-        {
-            if (app_camera_should_hold_bad_preview())
-            {
-                app_camera_abandon_stage_buffer(stage_index);
-                return;
-            }
-        }
-        else
-        {
-            app_camera_note_good_preview();
-        }
+        app_camera_abandon_stage_buffer(stage_index);
+        return;
     }
     if (stage_written_by_cpu && app_camera_msync_c2m(out_buf, s_disp_buf_size) != ESP_OK)
     {
@@ -1188,7 +1118,6 @@ esp_err_t app_camera_preview_start(void)
     }
     s_display_count = 0;
     s_warmup_drop_remaining = PREVIEW_WARMUP_DROP_FRAMES;
-    s_bad_preview_streak = 0;
     app_camera_route_reset();
     ret = app_video_stream_task_start(s_video_fd, 0);
     if (ret != ESP_OK)
@@ -1238,5 +1167,4 @@ void app_camera_resume(void)
 {
     s_camera_paused = false;
     s_warmup_drop_remaining = PREVIEW_WARMUP_DROP_FRAMES;
-    s_bad_preview_streak = 0;
 }

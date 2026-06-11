@@ -31,7 +31,8 @@ static const char *TAG = "drone_ai";
 #define DRONE_AI_RGB_BYTES            (DRONE_AI_INPUT_PIXELS * DRONE_AI_INPUT_CH)
 #define DRONE_AI_SLOT_COUNT           2U
 #define DRONE_AI_TASK_STACK_SIZE      (24 * 1024)
-#define DRONE_AI_TASK_PRIORITY        6
+// 单次模型推理可能超过 TWDT 周期；空闲优先级允许 IDLE1 按 tick 获得运行时间。
+#define DRONE_AI_TASK_PRIORITY        tskIDLE_PRIORITY
 #define DRONE_AI_TASK_CORE_ID         1
 #define DRONE_AI_THRESHOLD            0.85f
 #define DRONE_AI_STRONG_THRESHOLD     0.98f

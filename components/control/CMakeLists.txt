@@ -2,7 +2,8 @@ idf_component_register(
     SRCS
         "app_ctrl.c"
         "private/app_ctrl_proto.c"
-        "private/app_ctrl_text.c"
+        "private/app_ctrl_runtime.c"
+        "private/app_ctrl_ui.c"
         "app_dock_judge.c"
         "app_task.c"
         "app_cloud.c"
