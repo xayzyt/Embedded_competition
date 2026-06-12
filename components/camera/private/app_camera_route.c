@@ -6,7 +6,7 @@
 
 // 视觉检测频率高于无人机分类频率，避免两个重任务每帧同时运行。
 #define VISION_SAMPLE_INTERVAL   2
-#define DRONE_AI_SAMPLE_INTERVAL 8
+#define DRONE_AI_SAMPLE_INTERVAL 16
 
 // 这些计数器只由相机帧回调访问，不需要额外加锁。
 typedef struct {

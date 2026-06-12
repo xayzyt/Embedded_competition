@@ -13,7 +13,7 @@ typedef struct {
     uint32_t submitted;  // 已提交帧数。
     uint32_t inferred;   // 已完成推理帧数。
     uint32_t dropped;    // 忙碌时丢弃帧数。
-    uint8_t hit_count;   // 当前连续/衰减后的命中帧数。
+    uint8_t hit_count;   // 当前任务累计的有效命中帧数。
     uint8_t confirm_hits; // 需要达到的确认帧数。
     bool confirmed;      // 是否已确认无人机存在。
 } app_drone_ai_stats_t;
@@ -28,6 +28,7 @@ esp_err_t app_drone_ai_submit_frame(const uint8_t *rgb565,
 esp_err_t app_drone_ai_wait_ready(uint32_t timeout_ms);
 // 查询/重置 AI 门控。
 bool app_drone_ai_is_drone_confirmed(void);
+bool app_drone_ai_is_busy(void);
 void app_drone_ai_reset_gate(void);
 // 格式化状态与读取统计。
 void app_drone_ai_format_status(char *buf, size_t buf_len);

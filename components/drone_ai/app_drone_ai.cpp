@@ -29,21 +29,17 @@ static const char *TAG = "drone_ai";
 #define DRONE_AI_INPUT_CH             3U
 #define DRONE_AI_INPUT_PIXELS         (DRONE_AI_INPUT_W * DRONE_AI_INPUT_H)
 #define DRONE_AI_RGB_BYTES            (DRONE_AI_INPUT_PIXELS * DRONE_AI_INPUT_CH)
-#define DRONE_AI_SLOT_COUNT           2U
+#define DRONE_AI_SLOT_COUNT           1U
 #define DRONE_AI_TASK_STACK_SIZE      (24 * 1024)
-// Keep inference above idle so camera/display traffic cannot starve the model task.
+// Keep inference off CPU1, where the full-frame camera display task runs.
 #define DRONE_AI_TASK_PRIORITY        (tskIDLE_PRIORITY + 1)
-#define DRONE_AI_TASK_CORE_ID         1
+#define DRONE_AI_TASK_CORE_ID         0
 #define DRONE_AI_THRESHOLD            0.85f
-#define DRONE_AI_STRONG_THRESHOLD     0.98f
-#define DRONE_AI_STRONG_HITS          1U
-#define DRONE_AI_CONFIRM_HITS         5U
-#define DRONE_AI_CONFIRM_MIN_SPAN_MS  1200U
-#define DRONE_AI_HIT_GAP_RESET_MS     1600U
-#define DRONE_AI_MOTION_STABLE_DIFF   45U
+#define DRONE_AI_CONFIRM_HITS         3U
+#define DRONE_AI_HIT_MIN_INTERVAL_MS  800U
+#define DRONE_AI_CONFIRM_DISPLAY_MS   1000U
 #define DRONE_AI_MOTION_REJECT_DIFF   80U
 #define DRONE_AI_MOTION_COOLDOWN_MS   500U
-#define DRONE_AI_MISS_DECAY           1U
 #define DRONE_AI_MALLOC_PSRAM_LIMIT   0U
 
 typedef enum {
@@ -81,9 +77,9 @@ static bool s_inited = false;
 static bool s_model_load_requested = false;
 static bool s_model_ready = false;
 static esp_err_t s_model_status = ESP_ERR_INVALID_STATE;
+static bool s_busy = false;
 static bool s_confirmed = false;
 static uint8_t s_hit_count = 0;
-static uint32_t s_first_hit_ms = 0;
 static uint32_t s_last_hit_ms = 0;
 static uint32_t s_last_motion_reject_ms = 0;
 static uint32_t s_submit_seq = 0;
@@ -102,7 +98,6 @@ static fbs::FbsModel *s_fbs_model = nullptr;
 static inline void app_drone_ai_clear_hit_window_locked(void)
 {
     s_hit_count = 0;
-    s_first_hit_ms = 0;
     s_last_hit_ms = 0;
 }
 
@@ -558,52 +553,27 @@ static void app_drone_ai_update_result(uint32_t frame_seq,
     {
         const bool candidate_hit = (latest.label == APP_DRONE_AI_CLASS_DRONE) &&
                                    (drone_score >= DRONE_AI_THRESHOLD);
-        // Fast camera motion can spike the classifier, so shaky frames reset the hit gate.
+        // Fast camera motion can spike the classifier, so shaky frames do not count.
         const bool high_motion = motion_score >= DRONE_AI_MOTION_REJECT_DIFF;
         if (high_motion)
         {
             s_last_motion_reject_ms = tick_ms;
-            app_drone_ai_clear_hit_window_locked();
         }
         const bool motion_cooldown_done = (s_last_motion_reject_ms == 0U) ||
                                           ((tick_ms - s_last_motion_reject_ms) >= DRONE_AI_MOTION_COOLDOWN_MS);
-        const bool stable_frame = (motion_score <= DRONE_AI_MOTION_STABLE_DIFF) && motion_cooldown_done;
+        const bool stable_frame = !high_motion && motion_cooldown_done;
         if (candidate_hit && stable_frame)
         {
-            const uint8_t add_hits = (drone_score >= DRONE_AI_STRONG_THRESHOLD) ? DRONE_AI_STRONG_HITS : 1U;
-            if (s_last_hit_ms != 0U && (tick_ms - s_last_hit_ms) > DRONE_AI_HIT_GAP_RESET_MS)
+            // One inference frame can contribute at most one hit. Keep each
+            // visible step on screen long enough for a live demonstration.
+            if (s_last_hit_ms == 0U ||
+                (tick_ms - s_last_hit_ms) >= DRONE_AI_HIT_MIN_INTERVAL_MS)
             {
-                app_drone_ai_clear_hit_window_locked();
-            }
-            if (s_hit_count == 0U)
-            {
-                s_first_hit_ms = tick_ms;
-            }
-            s_last_hit_ms = tick_ms;
-            if (s_hit_count <= (uint8_t)(255U - add_hits))
-            {
-                s_hit_count += add_hits;
-            }
-            else
-            {
-                s_hit_count = 255U;
-            }
-            if (s_hit_count >= DRONE_AI_CONFIRM_HITS &&
-                s_first_hit_ms != 0U &&
-                (tick_ms - s_first_hit_ms) >= DRONE_AI_CONFIRM_MIN_SPAN_MS)
-            {
-                s_confirmed = true;
-            }
-        }
-        else if (!high_motion)
-        {
-            if (s_hit_count > DRONE_AI_MISS_DECAY)
-            {
-                s_hit_count -= DRONE_AI_MISS_DECAY;
-            }
-            else
-            {
-                app_drone_ai_clear_hit_window_locked();
+                s_last_hit_ms = tick_ms;
+                if (s_hit_count < DRONE_AI_CONFIRM_HITS)
+                {
+                    s_hit_count++;
+                }
             }
         }
     }
@@ -625,9 +595,10 @@ static void app_drone_ai_task(void *arg)
         if (load_ret == ESP_OK)
         {
             ESP_LOGI(TAG,
-                     "model ready, task priority=%u core=%u",
+                     "model ready, task priority=%u core=%u slots=%u",
                      (unsigned)DRONE_AI_TASK_PRIORITY,
-                     (unsigned)DRONE_AI_TASK_CORE_ID);
+                     (unsigned)DRONE_AI_TASK_CORE_ID,
+                     (unsigned)DRONE_AI_SLOT_COUNT);
             break;
         }
         vTaskDelay(pdMS_TO_TICKS(1000));
@@ -646,6 +617,9 @@ static void app_drone_ai_task(void *arg)
             const int64_t start_us = esp_timer_get_time();
             s_model->run();
             const uint32_t infer_ms = (uint32_t)((esp_timer_get_time() - start_us) / 1000ULL);
+            taskENTER_CRITICAL(&s_ai_mux);
+            s_busy = false;
+            taskEXIT_CRITICAL(&s_ai_mux);
             float logits[2] = {0.0f, 0.0f};
 
             ret = app_drone_ai_read_logits(logits);
@@ -654,6 +628,9 @@ static void app_drone_ai_task(void *arg)
                 float nodrone_score = 0.0f;
                 float drone_score = 0.0f;
                 app_drone_ai_softmax2(logits, &nodrone_score, &drone_score);
+                taskENTER_CRITICAL(&s_ai_mux);
+                const uint8_t previous_hit_count = s_hit_count;
+                taskEXIT_CRITICAL(&s_ai_mux);
                 app_drone_ai_update_result(slot->seq,
                                            infer_ms,
                                            nodrone_score,
@@ -666,9 +643,13 @@ static void app_drone_ai_task(void *arg)
                 const uint32_t infer_count = s_infer_count;
                 const uint8_t hit_count = s_hit_count;
                 const bool confirmed = s_confirmed;
+                const bool confirmation_pending =
+                    !s_confirmed && s_hit_count >= DRONE_AI_CONFIRM_HITS;
                 taskEXIT_CRITICAL(&s_ai_mux);
 
-                if (infer_count == 1U || (infer_count % 20U) == 0U)
+                if (infer_count == 1U ||
+                    hit_count != previous_hit_count ||
+                    (infer_count % 20U) == 0U)
                 {
                     ESP_LOGI(TAG,
                              "infer=%lu seq=%lu drone=%.3f hit=%u/%u motion=%lu time=%lums confirmed=%u",
@@ -681,9 +662,26 @@ static void app_drone_ai_task(void *arg)
                              (unsigned long)infer_ms,
                              confirmed ? 1U : 0U);
                 }
+
+                if (confirmation_pending)
+                {
+                    // Leave 3/3 visible before switching the camera route to
+                    // AprilTag. A reset during this delay cancels confirmation.
+                    vTaskDelay(pdMS_TO_TICKS(DRONE_AI_CONFIRM_DISPLAY_MS));
+                    taskENTER_CRITICAL(&s_ai_mux);
+                    if (s_hit_count >= DRONE_AI_CONFIRM_HITS)
+                    {
+                        s_confirmed = true;
+                        s_latest.confirmed = true;
+                    }
+                    taskEXIT_CRITICAL(&s_ai_mux);
+                }
             }
         }
 
+        taskENTER_CRITICAL(&s_ai_mux);
+        s_busy = false;
+        taskEXIT_CRITICAL(&s_ai_mux);
         (void)xQueueSend(s_free_queue, &slot, portMAX_DELAY);
         vTaskDelay(1);
     }
@@ -733,6 +731,7 @@ esp_err_t app_drone_ai_init(void)
     s_model_load_requested = false;
     s_model_ready = false;
     s_model_status = ESP_ERR_INVALID_STATE;
+    s_busy = false;
     s_confirmed = false;
     app_drone_ai_clear_hit_window_locked();
     s_last_motion_reject_ms = 0;
@@ -785,9 +784,10 @@ esp_err_t app_drone_ai_submit_frame(const uint8_t *rgb565,
     }
 
     taskENTER_CRITICAL(&s_ai_mux);
-    const bool already_confirmed = s_confirmed;
+    const bool gate_complete_or_pending =
+        s_confirmed || s_hit_count >= DRONE_AI_CONFIRM_HITS;
     taskEXIT_CRITICAL(&s_ai_mux);
-    if (already_confirmed)
+    if (gate_complete_or_pending)
     {
         return ESP_OK;
     }
@@ -801,6 +801,10 @@ esp_err_t app_drone_ai_submit_frame(const uint8_t *rgb565,
         return ESP_OK;
     }
 
+    taskENTER_CRITICAL(&s_ai_mux);
+    s_busy = true;
+    taskEXIT_CRITICAL(&s_ai_mux);
+
     app_drone_ai_resize_rgb565_to_rgb888(rgb565, width, height, slot->rgb);
     slot->src_width = width;
     slot->src_height = height;
@@ -810,8 +814,6 @@ esp_err_t app_drone_ai_submit_frame(const uint8_t *rgb565,
     {
         taskENTER_CRITICAL(&s_ai_mux);
         s_last_motion_reject_ms = slot->tick_ms;
-        app_drone_ai_clear_hit_window_locked();
-        s_latest.hit_count = 0;
         s_latest.motion_score = slot->motion_score;
         taskEXIT_CRITICAL(&s_ai_mux);
     }
@@ -830,10 +832,11 @@ esp_err_t app_drone_ai_submit_frame(const uint8_t *rgb565,
 
     if (xQueueSend(s_infer_queue, &slot, 0) != pdTRUE)
     {
-        (void)xQueueSend(s_free_queue, &slot, 0);
         taskENTER_CRITICAL(&s_ai_mux);
+        s_busy = false;
         s_drop_count++;
         taskEXIT_CRITICAL(&s_ai_mux);
+        (void)xQueueSend(s_free_queue, &slot, 0);
     }
     return ESP_OK;
 }
@@ -890,6 +893,15 @@ bool app_drone_ai_is_drone_confirmed(void)
     confirmed = s_confirmed;
     taskEXIT_CRITICAL(&s_ai_mux);
     return confirmed;
+}
+
+bool app_drone_ai_is_busy(void)
+{
+    bool busy = false;
+    taskENTER_CRITICAL(&s_ai_mux);
+    busy = s_busy;
+    taskEXIT_CRITICAL(&s_ai_mux);
+    return busy;
 }
 
 void app_drone_ai_reset_gate(void)

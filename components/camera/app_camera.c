@@ -859,6 +859,12 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
         s_warmup_drop_remaining--;
         return;
     }
+    // AI and full-frame preview both saturate PSRAM. Hold the last good frame
+    // while inference owns the bus instead of publishing a possibly corrupted frame.
+    if (app_drone_ai_is_busy())
+    {
+        return;
+    }
     bool camera_synced_for_cpu = false;
     app_camera_frame_route_t route = app_camera_route_select();
     // 只有识别/抓图需要 CPU 读帧时才做 M2C cache 同步。
@@ -889,6 +895,10 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
                     camera_buf_len);
             }
         }
+    }
+    if (app_drone_ai_is_busy())
+    {
+        return;
     }
     // 显示端已有待处理帧时直接丢弃当前预览帧，保证实时性优先。
     if (app_camera_has_pending_stage())
