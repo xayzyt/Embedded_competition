@@ -93,6 +93,7 @@ static void app_ctrl_apply_proto_msg_locked(const app_ch32_line_t *msg)
     const app_ch32_proto_stage_t prev_stage = s_rt.last_proto_stage;
     const uint16_t prev_flags = s_rt.last_proto_flags;
     const bool cargo_wait_seen = s_rt.cargo_wait_window_seen;
+    const bool was_dock_busy = s_rt.dock_busy;
 
     s_rt.ch32_ready = app_ch32_link_is_ready();
     if (msg->payload_len >= 8U)
@@ -166,7 +167,10 @@ static void app_ctrl_apply_proto_msg_locked(const app_ch32_line_t *msg)
         s_rt.cargo_wait_window_seen = false;
         s_rt.busy_deadline_ms = 0;
         s_rt.last_proto_error = APP_CH32_ERR_NONE;
-        app_ctrl_start_retrigger_cooldown_locked();
+        if (was_dock_busy)
+        {
+            app_ctrl_start_retrigger_cooldown_locked();
+        }
     }
 }
 
@@ -318,6 +322,11 @@ static void app_ctrl_try_auto_dock(app_ctrl_cycle_t *cycle,
         return;
     }
 
+    ESP_LOGI(TAG,
+        "auto dock trigger: tag=%u ready_rising=%u auth_retry=%u",
+        (unsigned)cycle->dock.tag_id,
+        ready_rising ? 1U : 0U,
+        auth_retry ? 1U : 0U);
     esp_err_t ret = app_ch32_link_send_proto_cmd_and_wait_ack(
         CTRL_DOCK_CMD,
         CTRL_ACK_WAIT_MS);

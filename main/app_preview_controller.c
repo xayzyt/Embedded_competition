@@ -95,6 +95,7 @@ static esp_err_t app_start_camera_pipeline(void)
         return ESP_ERR_TIMEOUT;
     }
 
+    ESP_LOGI(TAG, "camera preview first frame ready");
     app_ui_hide_loading();
     return ESP_OK;
 }
@@ -116,6 +117,7 @@ static void app_camera_start_task(void *arg)
     app_ui_main_screen_set_task_state(APP_UI_MAIN_TASK_ACTIVE);
     if (app_task_wants_camera_preview())
     {
+        ESP_LOGI(TAG, "enter camera preview");
         app_ui_hide_main_screen();
     }
     vTaskDelete(NULL);

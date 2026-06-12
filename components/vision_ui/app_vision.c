@@ -15,8 +15,9 @@
 
 #define VISION_TASK_STACK_SIZE         (16 * 1024)
 #define VISION_TASK_PRIORITY           4
-#define VISION_TASK_CORE_ID            1
+#define VISION_TASK_CORE_ID            0
 #define VISION_POLL_PERIOD_MS          25
+#define VISION_SLOW_DETECT_MS          1000U
 #define VISION_GRAY_WIDTH              320
 #define VISION_GRAY_HEIGHT             240
 #define VISION_GRAY_BUF_SIZE           (VISION_GRAY_WIDTH * VISION_GRAY_HEIGHT)
@@ -241,6 +242,7 @@ static void app_vision_task(void *arg)
 {
     (void)arg;
     uint32_t last_seq = 0;
+    uint32_t last_slow_log_ms = 0;
     uint16_t stable_count = 0;
     uint16_t lost_count = 0;
     uint16_t last_tag_id = 0;
@@ -256,6 +258,16 @@ static void app_vision_task(void *arg)
                 slot->info.gray_height,
                 &tag);
             uint32_t detect_ms = (uint32_t)((esp_timer_get_time() - start_us) / 1000ULL);
+            const uint32_t now_ms = app_vision_now_ms();
+            if (detect_ms >= VISION_SLOW_DETECT_MS &&
+                now_ms - last_slow_log_ms >= VISION_SLOW_DETECT_MS)
+            {
+                ESP_LOGW(TAG,
+                    "slow AprilTag frame: %lums seq=%lu",
+                    (unsigned long)detect_ms,
+                    (unsigned long)slot->info.seq);
+                last_slow_log_ms = now_ms;
+            }
             if (found)
             {
                 app_vision_update_result(slot,

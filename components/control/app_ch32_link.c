@@ -511,7 +511,25 @@ esp_err_t app_ch32_link_send_proto_cmd_and_wait_ack(app_ch32_proto_cmd_t proto_c
     esp_err_t ret = app_ch32_link_send_proto(proto_cmd, NULL, 0, &seq);
     if (ret == ESP_OK)
     {
+        ESP_LOGI(TAG,
+            "TX cmd=0x%02X seq=%u",
+            (unsigned)proto_cmd,
+            (unsigned)seq);
         ret = app_ch32_link_wait_ack_for_cmd(proto_cmd, seq, timeout_ms);
+        if (ret == ESP_OK)
+        {
+            ESP_LOGI(TAG,
+                "ACK cmd=0x%02X seq=%u",
+                (unsigned)proto_cmd,
+                (unsigned)seq);
+        }
+        else if (ret == ESP_ERR_TIMEOUT)
+        {
+            ESP_LOGW(TAG,
+                "ACK timeout cmd=0x%02X seq=%u",
+                (unsigned)proto_cmd,
+                (unsigned)seq);
+        }
     }
     app_ch32_link_unlock_tx();
     return ret;

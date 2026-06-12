@@ -31,8 +31,8 @@ static const char *TAG = "drone_ai";
 #define DRONE_AI_RGB_BYTES            (DRONE_AI_INPUT_PIXELS * DRONE_AI_INPUT_CH)
 #define DRONE_AI_SLOT_COUNT           2U
 #define DRONE_AI_TASK_STACK_SIZE      (24 * 1024)
-// 单次模型推理可能超过 TWDT 周期；空闲优先级允许 IDLE1 按 tick 获得运行时间。
-#define DRONE_AI_TASK_PRIORITY        tskIDLE_PRIORITY
+// Keep inference above idle so camera/display traffic cannot starve the model task.
+#define DRONE_AI_TASK_PRIORITY        (tskIDLE_PRIORITY + 1)
 #define DRONE_AI_TASK_CORE_ID         1
 #define DRONE_AI_THRESHOLD            0.85f
 #define DRONE_AI_STRONG_THRESHOLD     0.98f
@@ -624,6 +624,10 @@ static void app_drone_ai_task(void *arg)
         app_drone_ai_set_model_status(load_ret);
         if (load_ret == ESP_OK)
         {
+            ESP_LOGI(TAG,
+                     "model ready, task priority=%u core=%u",
+                     (unsigned)DRONE_AI_TASK_PRIORITY,
+                     (unsigned)DRONE_AI_TASK_CORE_ID);
             break;
         }
         vTaskDelay(pdMS_TO_TICKS(1000));
@@ -659,7 +663,24 @@ static void app_drone_ai_task(void *arg)
 
                 taskENTER_CRITICAL(&s_ai_mux);
                 s_infer_count++;
+                const uint32_t infer_count = s_infer_count;
+                const uint8_t hit_count = s_hit_count;
+                const bool confirmed = s_confirmed;
                 taskEXIT_CRITICAL(&s_ai_mux);
+
+                if (infer_count == 1U || (infer_count % 20U) == 0U)
+                {
+                    ESP_LOGI(TAG,
+                             "infer=%lu seq=%lu drone=%.3f hit=%u/%u motion=%lu time=%lums confirmed=%u",
+                             (unsigned long)infer_count,
+                             (unsigned long)slot->seq,
+                             (double)drone_score,
+                             (unsigned)hit_count,
+                             (unsigned)DRONE_AI_CONFIRM_HITS,
+                             (unsigned long)slot->motion_score,
+                             (unsigned long)infer_ms,
+                             confirmed ? 1U : 0U);
+                }
             }
         }
 
@@ -799,6 +820,13 @@ esp_err_t app_drone_ai_submit_frame(const uint8_t *rgb565,
     s_submit_seq++;
     slot->seq = s_submit_seq;
     taskEXIT_CRITICAL(&s_ai_mux);
+    if (slot->seq == 1U)
+    {
+        ESP_LOGI(TAG,
+                 "first frame submitted: %lux%lu",
+                 (unsigned long)width,
+                 (unsigned long)height);
+    }
 
     if (xQueueSend(s_infer_queue, &slot, 0) != pdTRUE)
     {

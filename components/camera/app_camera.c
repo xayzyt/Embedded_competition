@@ -797,7 +797,7 @@ static void app_camera_release_stage_buffer(int buf_index)
     }
     taskEXIT_CRITICAL(&s_display_mux);
 }
-// 显示任务把已验证 stage 帧复制到固定 canvas，并在同一显示锁内完成刷新。
+// Copy the latest verified frame under the LVGL lock and let the LVGL task refresh it.
 /* ---------- 相机回调与显示任务 ---------- */
 
 static void app_camera_display_task(void *arg)
@@ -821,7 +821,6 @@ static void app_camera_display_task(void *arg)
             {
                 memcpy(s_ui_canvas_buf, s_stage_buf[buf_index], s_disp_buf_size);
                 lv_obj_invalidate(s_camera_canvas);
-                lv_refr_now(NULL);
                 displayed = true;
                 bsp_display_unlock();
             }

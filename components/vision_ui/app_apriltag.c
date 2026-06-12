@@ -5,6 +5,8 @@
 #include <stdint.h>
 #include <string.h>
 #include "esp_heap_caps.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 // 轻量 AprilTag tag36h11 检测器：二值化、连通域找候选、透视采样并与码表匹配。
 
@@ -22,10 +24,21 @@
 #define AT_EDGE_MARGIN          1U
 #define AT_MAX_BOX_PCT          78U
 #define AT_MAX_BOX_AREA_PCT     72U
+#define AT_COOPERATE_PIXELS     4096U
 static uint8_t *s_binary = NULL;
 static uint8_t *s_visited = NULL;
 static uint32_t *s_queue = NULL;
 static bool s_inited = false;
+
+static inline void at_cooperate(uint32_t *processed)
+{
+    (*processed)++;
+    if (*processed >= AT_COOPERATE_PIXELS)
+    {
+        *processed = 0;
+        vTaskDelay(1);
+    }
+}
 // tag36h11 全码表，用于汉明距离匹配。
 static const uint64_t s_tag36h11_codes[587] = {
     0x21a146babULL,
@@ -713,9 +726,11 @@ static inline uint32_t at_hamming64(uint64_t a, uint64_t b)
 static void at_threshold_binary(const uint8_t *gray, uint32_t width, uint32_t height, uint8_t threshold)
 {
     const uint32_t total = width * height;
+    uint32_t processed = 0;
     for (uint32_t i = 0; i < total; i++) {
         s_binary[i] = (gray[i] < threshold) ? 1U : 0U;
         s_visited[i] = 0U;
+        at_cooperate(&processed);
     }
 }
 // 用面积、长宽比和填充率过滤明显不是标签的连通域。
@@ -783,9 +798,11 @@ static void at_insert_candidate(at_candidate_t *cands, int *count, const at_cand
 static int at_collect_candidates(uint32_t width, uint32_t height, at_candidate_t *cands)
 {
     int count = 0;
+    uint32_t processed = 0;
     for (uint32_t y = 0; y < height; y++) {
         for (uint32_t x = 0; x < width; x++) {
             uint32_t idx = at_index(x, y, width);
+            at_cooperate(&processed);
             if (!s_binary[idx] || s_visited[idx]) continue;
             uint32_t head = 0, tail = 0, area = 0;
             uint32_t min_x = x, max_x = x, min_y = y, max_y = y;
@@ -796,6 +813,7 @@ static int at_collect_candidates(uint32_t width, uint32_t height, at_candidate_t
             s_queue[tail++] = idx;
             while (head < tail) {
                 uint32_t cur = s_queue[head++];
+                at_cooperate(&processed);
                 uint32_t cx = cur % width;
                 uint32_t cy = cur / width;
                 area++;
