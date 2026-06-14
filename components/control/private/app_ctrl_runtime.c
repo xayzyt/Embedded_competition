@@ -8,6 +8,7 @@
 #include "app_cloud.h"
 #include "app_ctrl_proto.h"
 
+// 保存 CH32 机械状态，并在控制循环中处理超时、自动接驳和任务推进。
 static const char *TAG = "app_ctrl";
 
 #define CTRL_READY_PROBE_INTERVAL_MS 1000U
@@ -17,6 +18,7 @@ static const char *TAG = "app_ctrl";
 #define CTRL_NOTICE_SHOW_MS          1600U
 #define CTRL_RETRIGGER_COOLDOWN_MS   1800U
 
+// CH32 状态由 UART 回调写入，由控制任务读取，访问时使用 s_ctrl_mux 保护。
 typedef struct {
     bool inited;
     bool ch32_ready;
@@ -28,6 +30,7 @@ typedef struct {
     app_ch32_proto_stage_t last_proto_stage;
     uint8_t last_proto_error;
     uint16_t applied_target_id;
+    // 以下时间均为毫秒时间点，0 表示当前未启用。
     uint32_t last_ready_probe_ms;
     uint32_t busy_deadline_ms;
     uint32_t notice_deadline_ms;
@@ -45,6 +48,7 @@ static uint32_t app_ctrl_now_ms(void)
 
 static bool app_ctrl_deadline_active(uint32_t deadline_ms, uint32_t now_ms)
 {
+    // 使用有符号差值，计时器回绕时仍可正确比较短时间间隔。
     return deadline_ms != 0U && (int32_t)(deadline_ms - now_ms) > 0;
 }
 
@@ -78,6 +82,7 @@ static void app_ctrl_start_retrigger_cooldown_locked(void)
     s_rt.retrigger_deadline_ms = app_ctrl_now_ms() + CTRL_RETRIGGER_COOLDOWN_MS;
 }
 
+// 进入等待放货状态；保持 busy，但取消固定动作超时。
 static void app_ctrl_hold_waiting_cargo_locked(void)
 {
     s_rt.cargo_wait_window_seen = true;
@@ -90,6 +95,7 @@ static void app_ctrl_hold_waiting_cargo_locked(void)
 
 static void app_ctrl_apply_proto_msg_locked(const app_ch32_line_t *msg)
 {
+    // 保存上一状态，用于判断超时是否发生在正常等货阶段。
     const app_ch32_proto_stage_t prev_stage = s_rt.last_proto_stage;
     const uint16_t prev_flags = s_rt.last_proto_flags;
     const bool cargo_wait_seen = s_rt.cargo_wait_window_seen;
@@ -102,6 +108,7 @@ static void app_ctrl_apply_proto_msg_locked(const app_ch32_line_t *msg)
         s_rt.has_weight = true;
         s_rt.last_proto_flags = msg->proto_flags;
     }
+    // ACK/NACK 已由通信层处理，这里只解析机械状态帧。
     if (msg->type != APP_CH32_LINE_PROTO_STATUS)
     {
         return;
@@ -120,6 +127,7 @@ static void app_ctrl_apply_proto_msg_locked(const app_ch32_line_t *msg)
             CTRL_NOTICE_SHOW_MS);
     }
 
+    // 托盘已伸出时的超时或重量异常按“继续等货”处理。
     if (msg->proto_detail != APP_CH32_ERR_NONE ||
         msg->proto_stage == APP_CH32_STAGE_FAULT)
     {
@@ -147,6 +155,7 @@ static void app_ctrl_apply_proto_msg_locked(const app_ch32_line_t *msg)
         return;
     }
 
+    // 阶段或 BUSY 标志任一有效，都认为机构仍在运行。
     if ((msg->proto_flags & APP_CH32_FLAG_BUSY) != 0U ||
         app_ctrl_proto_stage_is_busy(msg->proto_stage))
     {
@@ -174,6 +183,7 @@ static void app_ctrl_apply_proto_msg_locked(const app_ch32_line_t *msg)
     }
 }
 
+// 复制当前状态，后续处理不再占用临界区。
 static void app_ctrl_read_state(app_ctrl_runtime_t *state)
 {
     taskENTER_CRITICAL(&s_ctrl_mux);
@@ -182,6 +192,7 @@ static void app_ctrl_read_state(app_ctrl_runtime_t *state)
     taskEXIT_CRITICAL(&s_ctrl_mux);
 }
 
+// 任务目标变化后，将新的标签号同步给自动对接判定器。
 static void app_ctrl_apply_task_target_if_needed(app_ctrl_cycle_t *cycle,
     app_ctrl_runtime_t *state)
 {
@@ -210,6 +221,7 @@ static void app_ctrl_probe_ready_if_needed(const app_ctrl_cycle_t *cycle,
         return;
     }
 
+    // 每秒最多主动探测一次 CH32。
     taskENTER_CRITICAL(&s_ctrl_mux);
     s_rt.last_ready_probe_ms = cycle->now_ms;
     taskEXIT_CRITICAL(&s_ctrl_mux);
@@ -239,6 +251,7 @@ static void app_ctrl_handle_busy_timeout(app_ctrl_cycle_t *cycle,
     {
         return;
     }
+    // 等货阶段超时表示继续等待货物，其他阶段超时才判为故障。
     if (app_ctrl_proto_stage_is_cargo_wait_window(state->last_proto_stage) ||
         state->cargo_wait_window_seen)
     {
@@ -278,6 +291,7 @@ static void app_ctrl_hold_soft_cargo_wait_if_needed(app_ctrl_runtime_t *state)
     }
 }
 
+// 对接条件满足后，把任务推进到鉴权通过状态。
 static void app_ctrl_mark_auth_if_ready(app_ctrl_cycle_t *cycle)
 {
     if (!cycle->task.active ||
@@ -297,6 +311,7 @@ static void app_ctrl_try_auto_dock(app_ctrl_cycle_t *cycle,
     bool retrigger_blocked,
     bool *weather_blocked)
 {
+    // READY 上升沿触发接驳；已鉴权但发送失败时允许冷却后重试。
     const bool ready_rising = !cycle->prev_ready_level && cycle->ready_level;
     const bool auth_retry =
         cycle->task.state == APP_TASK_STATE_AUTH_PASSED && cycle->ready_level;
@@ -308,6 +323,7 @@ static void app_ctrl_try_auto_dock(app_ctrl_cycle_t *cycle,
         return;
     }
 
+    // 发送机械命令前再次检查天气保护。
     if (app_cloud_is_weather_docking_blocked())
     {
         app_ctrl_set_notice("dock: blocked by weather");
@@ -332,6 +348,7 @@ static void app_ctrl_try_auto_dock(app_ctrl_cycle_t *cycle,
         CTRL_ACK_WAIT_MS);
     if (ret == ESP_OK)
     {
+        // ACK 只表示命令已接收，完成状态以后续 CH32 状态帧为准。
         taskENTER_CRITICAL(&s_ctrl_mux);
         s_rt.dock_busy = true;
         s_rt.cargo_wait_window_seen = false;
@@ -382,6 +399,7 @@ static void app_ctrl_update_task_for_busy_transition(app_ctrl_cycle_t *cycle,
         return;
     }
 
+    // 根据机构从空闲到忙碌、再回到空闲的过程推进任务状态。
     if (!cycle->prev_dock_busy &&
         state->dock_busy &&
         cycle->task.active &&
@@ -401,6 +419,7 @@ static void app_ctrl_update_task_for_busy_transition(app_ctrl_cycle_t *cycle,
     }
 }
 
+// 整理 UI 需要显示的机械状态和临时提示。
 static void app_ctrl_project_runtime_view(app_ctrl_cycle_t *cycle,
     const app_ctrl_runtime_t *state,
     bool weather_blocked)
@@ -445,6 +464,7 @@ bool app_ctrl_runtime_is_initialized(void)
     return inited;
 }
 
+// CH32 接收回调只更新状态，不执行发送命令等耗时操作。
 void app_ctrl_runtime_on_ch32_line(const app_ch32_line_t *msg)
 {
     if (msg == NULL)
@@ -468,6 +488,7 @@ void app_ctrl_runtime_step(app_ctrl_cycle_t *cycle)
     bool weather_blocked = false;
     app_ctrl_read_state(&state);
 
+    // 先处理已有状态和超时，再判断是否需要发送新的接驳命令。
     app_ctrl_apply_task_target_if_needed(cycle, &state);
     app_ctrl_probe_ready_if_needed(cycle, &state);
     app_ctrl_handle_busy_timeout(cycle, &state);
@@ -479,7 +500,7 @@ void app_ctrl_runtime_step(app_ctrl_cycle_t *cycle)
     app_ctrl_try_auto_dock(cycle, &state, retrigger_blocked, &weather_blocked);
     app_ctrl_update_task_for_busy_transition(cycle, &state);
 
-    // Include notices and UART updates that arrived while this cycle was running.
+    // 发送命令期间可能收到新状态，结束前重新读取一次。
     app_ctrl_read_state(&state);
     app_ctrl_project_runtime_view(cycle, &state, weather_blocked);
 }

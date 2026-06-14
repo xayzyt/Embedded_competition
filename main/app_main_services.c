@@ -10,7 +10,7 @@
 #include "app_task.h"
 #include "app_ui.h"
 
-// Owns main-screen actions plus background cloud and status services.
+// 处理主屏按钮，并启动云端和连接状态刷新任务。
 static const char *TAG = "app_services";
 
 #define APP_CLOUD_START_TASK_STACK       (8 * 1024)
@@ -31,6 +31,7 @@ static void app_show_main_state(app_ui_main_task_state_t state, bool show_pickup
     app_ui_main_screen_set_task_state(state);
 }
 
+// 异步初始化云端；失败时系统继续使用本地功能。
 static void app_cloud_start_task(void *arg)
 {
     (void)arg;
@@ -53,6 +54,7 @@ static void app_start_cloud_async(void)
         return;
     }
 
+    // 防止重复创建云端初始化任务。
     s_cloud_start_requested = true;
     BaseType_t ok = xTaskCreate(app_cloud_start_task,
         "cloud_start",
@@ -69,6 +71,7 @@ static void app_start_cloud_async(void)
     }
 }
 
+// 处理取货按钮：检查天气和任务状态后请求 CH32 打开内门。
 static void app_pickup_cb(void)
 {
     if (app_cloud_is_weather_docking_blocked())
@@ -84,6 +87,7 @@ static void app_pickup_cb(void)
         return;
     }
 
+    // 开门命令必须收到 CH32 确认，失败时保留取货按钮供用户重试。
     esp_err_t ret = app_ch32_link_send_proto_cmd_and_wait_ack(
         APP_CH32_PROTO_CMD_OPEN_INNER_DOOR,
         2000);
@@ -102,6 +106,7 @@ static void app_weather_sim_cb(void)
     app_cloud_set_weather_simulated(!app_cloud_is_weather_simulated());
 }
 
+// 设置天气保护运行标志，防止连续点击重复创建任务。
 static bool app_weather_emergency_try_begin(void)
 {
     bool started = false;
@@ -122,6 +127,7 @@ static void app_weather_emergency_finish(void)
     taskEXIT_CRITICAL(&s_weather_emergency_mux);
 }
 
+// 在独立任务中执行天气保护，避免阻塞 LVGL 按钮回调。
 static void app_weather_emergency_task(void *arg)
 {
     (void)arg;
@@ -130,6 +136,7 @@ static void app_weather_emergency_task(void *arg)
     vTaskDelete(NULL);
 }
 
+// 立即停止预览并显示告警，然后启动后台保护任务。
 static void app_weather_emergency_cb(void)
 {
     app_camera_pause();
@@ -154,6 +161,7 @@ static void app_weather_emergency_cb(void)
     }
 }
 
+// 每秒刷新主屏上的 Wi-Fi、MQTT 和 CH32 连接状态。
 static void app_main_screen_status_task(void *arg)
 {
     (void)arg;

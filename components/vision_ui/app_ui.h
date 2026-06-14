@@ -5,7 +5,8 @@
 #include "app_dock_types.h"
 #include "app_vision.h"
 
-// UI 对外接口：主屏、预览 HUD、启动页和按钮回调都通过这里被 main/control 调用。
+// UI 公共接口：负责启动页、主屏和相机预览 HUD。
+// 公共更新函数内部会获取 LVGL 锁，业务任务可以直接调用。
 
 #define APP_UI_FLOW_STEP_COUNT 4
 
@@ -33,7 +34,7 @@ typedef struct {
     char step_detail[APP_UI_FLOW_STEP_COUNT][48];           // 每个阶段的简短说明。
 } app_ui_flow_snapshot_t;
 
-// 创建全局 UI 资源和 HUD 层。
+// 创建预览 HUD 和公共 UI 对象。
 bool app_ui_create(void);
 
 // 启动页显示、进度和隐藏。
@@ -80,11 +81,11 @@ void app_ui_main_screen_apply_weather_state(const char *weather_text,
                                             bool simulated,
                                             const char *task_text);
 
-// 主屏按钮回调。
+// 主屏取货按钮回调。
 typedef void (*app_ui_pickup_cb_t)(void);
 void app_ui_set_pickup_callback(app_ui_pickup_cb_t cb);
 
-// 天气模拟和紧急保护按钮回调，由云端/控制模块实现具体策略。
+// 天气模拟和紧急保护按钮回调。
 typedef void (*app_ui_weather_sim_cb_t)(void);
 void app_ui_set_weather_sim_callback(app_ui_weather_sim_cb_t cb);
 

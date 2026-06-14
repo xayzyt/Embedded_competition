@@ -3,7 +3,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "esp_err.h"
-// 视觉管线接口：相机提交 RGB565 帧，后台输出 AprilTag 检测结果和统计。
+// AprilTag 视觉接口：相机提交 RGB565 帧，后台任务输出最新检测结果。
 
 #ifdef __cplusplus
 extern "C" {
@@ -68,14 +68,16 @@ typedef struct {
     uint32_t seq;
     uint32_t tick_ms;
 } app_vision_gray_frame_info_t;
-// 初始化、启动和提交 RGB565 帧。
+// 初始化灰度缓存和 AprilTag 检测器。
 esp_err_t app_vision_init(void);
+// 启动后台检测任务。
 esp_err_t app_vision_start(void);
+// 将 RGB565 帧裁剪并转换为灰度图；检测任务忙时丢弃本帧。
 esp_err_t app_vision_submit_frame(const uint8_t *rgb565,
                                   uint32_t width,
                                   uint32_t height,
                                   size_t len);
-// 查询最近一次检测结果。
+// 复制最近检测结果；返回值表示结果中是否有有效标签。
 bool app_vision_get_latest_result(app_vision_result_t *out);
 #ifdef __cplusplus
 }

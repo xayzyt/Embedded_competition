@@ -7,6 +7,8 @@
 #include "app_drone_ai.h"
 #include "app_ui.h"
 
+// 根据控制结果生成状态栏、调试信息和四阶段流程条。
+// 中文常量使用 Unicode 转义，避免源码编码变化造成乱码。
 #define UI_TEXT_WAIT          "\u7B49\u5F85"
 #define UI_TEXT_WAIT_CLOUD    "\u7B49\u5F85\u4E91\u7AEF"
 #define UI_TEXT_WAIT_TAG      "\u7B49\u5F85Tag"
@@ -19,6 +21,9 @@
 #define UI_TEXT_PICKUP        "\u53D6\u8D27"
 #define UI_TEXT_DONE          "\u5B8C\u6210"
 
+/* ---------- 状态文案 ---------- */
+
+// 生成视觉、距离、稳定度、机械阶段和重量调试信息。
 static void app_ctrl_compose_detail(const app_ctrl_cycle_t *cycle,
     char *buf,
     size_t buf_len)
@@ -65,6 +70,7 @@ static void app_ctrl_compose_detail(const app_ctrl_cycle_t *cycle,
         runtime->has_weight ? (long)runtime->weight_g : 0L);
 }
 
+// 根据第一个未满足的对接条件生成操作提示。
 static void app_ctrl_compose_guidance(const app_dock_judge_result_t *dock,
     char *buf,
     size_t buf_len)
@@ -110,6 +116,7 @@ static void app_ctrl_compose_guidance(const app_dock_judge_result_t *dock,
     }
 }
 
+// 根据高层任务状态生成基础状态文案。
 static void app_ctrl_compose_task_status(const app_ctrl_cycle_t *cycle,
     char *buf,
     size_t buf_len)
@@ -183,6 +190,8 @@ static void app_ctrl_flow_set_detail(app_ui_flow_snapshot_t *flow,
     strlcpy(flow->step_detail[step], text, sizeof(flow->step_detail[0]));
 }
 
+/* ---------- 四阶段流程条 ---------- */
+
 static void app_ctrl_flow_complete(app_ui_flow_snapshot_t *flow,
     app_ui_flow_step_t step,
     const char *detail)
@@ -222,6 +231,7 @@ static void app_ctrl_flow_init(app_ui_flow_snapshot_t *flow)
         UI_TEXT_NOT_DONE,
     };
 
+    // 每次从默认状态重新生成流程条。
     memset(flow, 0, sizeof(*flow));
     flow->active_step = APP_UI_FLOW_STEP_DRONE;
     strlcpy(flow->headline, UI_TEXT_WAIT_CLOUD, sizeof(flow->headline));
@@ -232,6 +242,7 @@ static void app_ctrl_flow_init(app_ui_flow_snapshot_t *flow)
     }
 }
 
+// 将 CH32 机械阶段转换为流程条使用的短文案。
 static const char *app_ctrl_proto_stage_action_text(app_ch32_proto_stage_t stage)
 {
     switch (stage) {
@@ -257,6 +268,7 @@ static const char *app_ctrl_proto_stage_action_text(app_ch32_proto_stage_t stage
 static void app_ctrl_fill_tag_flow(const app_ctrl_cycle_t *cycle,
     app_ui_flow_snapshot_t *flow)
 {
+    // 进入标签阶段说明无人机 AI 已确认。
     app_ctrl_flow_complete(flow, APP_UI_FLOW_STEP_DRONE, "AI OK");
 
     const app_dock_judge_result_t *dock = &cycle->dock;
@@ -316,6 +328,7 @@ static void app_ctrl_fill_flow_snapshot(const app_ctrl_cycle_t *cycle,
         return;
     }
 
+    // 故障优先显示，避免被普通机械阶段覆盖。
     if (task->state == APP_TASK_STATE_FAULT ||
         runtime->proto_error != APP_CH32_ERR_NONE)
     {
@@ -339,6 +352,7 @@ static void app_ctrl_fill_flow_snapshot(const app_ctrl_cycle_t *cycle,
         return;
     }
 
+    // 鉴权通过后立即显示执行阶段，不等待首个 CH32 busy 状态。
     if (runtime->dock_busy ||
         task->state == APP_TASK_STATE_DOCKING ||
         task->state == APP_TASK_STATE_AUTH_PASSED)
@@ -404,6 +418,7 @@ void app_ctrl_ui_publish(const app_ctrl_cycle_t *cycle)
         app_drone_ai_format_status(ai_status, sizeof(ai_status));
         snprintf(detail, sizeof(detail), "dock dbg: apriltag gated / %s", ai_status);
     }
+    // 文案优先级：任务状态 < 机械状态 < 错误/冷却 < 临时提示。
     if (runtime->dock_busy)
     {
         strlcpy(status,
@@ -429,6 +444,7 @@ void app_ctrl_ui_publish(const app_ctrl_cycle_t *cycle)
         strlcpy(status, runtime->notice, sizeof(status));
     }
 
+    // 一次提交所有内容，减少重复获取 LVGL 锁。
     app_ui_flow_snapshot_t flow = {0};
     app_ctrl_fill_flow_snapshot(cycle, &flow);
     app_ui_update_control_state(status,

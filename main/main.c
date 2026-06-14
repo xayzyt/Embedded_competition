@@ -13,12 +13,15 @@
 #include "app_vision.h"
 #include "bsp_display_port.h"
 
+// 程序入口：按依赖顺序初始化显示、通信、视觉、控制和后台服务。
 static const char *TAG = "main";
 
+// 默认目标标签和测距标定参数。
 #define APP_TARGET_TAG_ID   (1U)
 #define APP_TAG_SIZE_MM     (60)
 #define APP_FOCAL_LENGTH_PX (314.0f)
 
+// 初始化 NVS；分区格式不兼容或空间不足时擦除后重试。
 static void app_init_nvs(void)
 {
     esp_err_t ret = nvs_flash_init();
@@ -30,6 +33,7 @@ static void app_init_nvs(void)
     ESP_ERROR_CHECK(ret);
 }
 
+// 初始化显示和启动页；UI 创建完成后再打开背光。
 static bool app_start_display_ui(void)
 {
     if (!app_display_init())
@@ -51,6 +55,7 @@ static bool app_start_display_ui(void)
     return true;
 }
 
+// 在默认参数上写入本机使用的标签和镜头标定值。
 static app_dock_judge_config_t app_make_dock_config(void)
 {
     app_dock_judge_config_t cfg;
@@ -62,6 +67,7 @@ static app_dock_judge_config_t app_make_dock_config(void)
     return cfg;
 }
 
+// 按依赖顺序初始化通信、视觉、任务、AI 和控制模块。
 static void app_init_runtime_modules(const app_dock_judge_config_t *dock_cfg)
 {
     app_ui_set_loading_progress(5);
@@ -79,6 +85,7 @@ static void app_init_runtime_modules(const app_dock_judge_config_t *dock_cfg)
     ESP_ERROR_CHECK(app_ctrl_start());
     app_ui_set_loading_progress(65);
 
+    // 抓图是辅助功能，初始化失败时只关闭抓图，不中止系统启动。
     esp_err_t capture_ret = app_ai_capture_init();
     if (capture_ret != ESP_OK)
     {
@@ -86,6 +93,7 @@ static void app_init_runtime_modules(const app_dock_judge_config_t *dock_cfg)
     }
 }
 
+// 在主屏显示系统就绪状态和当前距离限制模式。
 static void app_show_ready_status(const app_dock_judge_config_t *dock_cfg)
 {
     app_ui_set_status(dock_cfg->use_distance_gate ?
@@ -110,7 +118,7 @@ void app_main(void)
     app_ui_hide_loading();
     app_show_ready_status(&dock_cfg);
 
-    // State-driven preview switching must be ready before cloud commands can start a task.
+    // 先监听任务状态，再启动云端，避免云端任务先到而预览尚未准备切换。
     (void)app_preview_controller_start();
     app_main_services_start();
 }

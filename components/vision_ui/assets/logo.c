@@ -1,4 +1,4 @@
-
+// LVGL 工具生成的 logo 图片资源，请勿手工修改像素数组。
 #if defined(LV_LVGL_H_INCLUDE_SIMPLE)
 #include "lvgl.h"
 #elif defined(LV_LVGL_H_INCLUDE_SYSTEM)

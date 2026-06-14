@@ -12,7 +12,7 @@
 #include "app_ui.h"
 #include "app_vision.h"
 
-// Owns state-driven camera startup and main-screen/preview transitions.
+// 根据任务状态启动、暂停相机，并在主屏和预览画面之间切换。
 static const char *TAG = "app_preview";
 
 #define APP_CAMERA_START_TASK_STACK     (12 * 1024)
@@ -27,6 +27,7 @@ static QueueHandle_t s_task_event_queue = NULL;
 static bool s_camera_started = false;
 static bool s_event_callback_registered = false;
 
+// 相机启动失败时返回主屏并显示失败状态。
 static void app_show_camera_failure(void)
 {
     app_camera_pause();
@@ -36,6 +37,7 @@ static void app_show_camera_failure(void)
     app_ui_show_main_screen();
 }
 
+// 暂停预览并返回主屏；相机资源保留供下一次任务复用。
 static void app_leave_camera_preview(bool show_pickup)
 {
     app_camera_pause();
@@ -43,6 +45,7 @@ static void app_leave_camera_preview(bool show_pickup)
     app_ui_main_screen_show_pickup(show_pickup);
 }
 
+// 判断当前任务阶段是否需要显示相机预览。
 static bool app_task_wants_camera_preview(void)
 {
     app_task_snapshot_t snap = {0};
@@ -56,6 +59,7 @@ static bool app_task_wants_camera_preview(void)
             snap.state == APP_TASK_STATE_DOCKING);
 }
 
+// 启动 AI、相机、视觉和预览；AI 超时不会阻止相机继续启动。
 static esp_err_t app_start_camera_pipeline(void)
 {
     app_ui_set_loading_progress(80);
@@ -89,6 +93,7 @@ static esp_err_t app_start_camera_pipeline(void)
     }
 
     app_ui_set_loading_progress(100);
+    // 必须等到首帧送入 LVGL 后才能隐藏启动页。
     if (!app_camera_wait_first_frame(APP_PREVIEW_FIRST_FRAME_WAIT_MS))
     {
         ESP_LOGW(TAG, "first camera frame did not reach LVGL before loading timeout");
@@ -115,6 +120,7 @@ static void app_camera_start_task(void *arg)
 
     app_ui_set_status("task: active");
     app_ui_main_screen_set_task_state(APP_UI_MAIN_TASK_ACTIVE);
+    // 相机启动较慢，完成后重新确认任务是否仍需要预览。
     if (app_task_wants_camera_preview())
     {
         ESP_LOGI(TAG, "enter camera preview");
@@ -130,6 +136,7 @@ static void app_start_camera_if_needed(void)
         return;
     }
 
+    // 提前置位，防止连续任务事件重复创建相机启动任务。
     s_camera_started = true;
     BaseType_t ok = xTaskCreate(app_camera_start_task,
         "cam_start",
@@ -145,6 +152,7 @@ static void app_start_camera_if_needed(void)
     }
 }
 
+// 恢复预览并等待有效画面，避免切屏后短暂显示空白。
 static void app_switch_to_camera_preview(void)
 {
     const bool camera_was_started = s_camera_started;
@@ -177,6 +185,7 @@ static void app_handle_task_state_changed(const app_task_snapshot_t *snap)
         return;
     }
 
+    // 任务开始进入预览，任务结束或异常时返回主屏。
     switch (snap->state) {
     case APP_TASK_STATE_WAIT_APPROACH:
         app_switch_to_camera_preview();
@@ -207,6 +216,7 @@ static void app_task_event_task(void *arg)
     }
 }
 
+// 创建任务状态处理队列和工作任务；队列只保留最新状态。
 static esp_err_t app_start_task_event_worker(void)
 {
     if (s_task_event_queue == NULL)
@@ -248,12 +258,13 @@ static void app_on_task_event(app_task_event_t event,
         return;
     }
 
-    // The single-slot mailbox keeps callbacks short and always converges to the latest state.
+    // 覆盖旧快照，使工作任务始终处理最新状态。
     (void)xQueueOverwrite(s_task_event_queue, snap);
 }
 
 esp_err_t app_preview_controller_start(void)
 {
+    // 先创建事件处理任务，再注册任务状态回调。
     esp_err_t ret = app_start_task_event_worker();
     if (ret != ESP_OK)
     {

@@ -23,7 +23,7 @@ typedef enum {
 typedef struct {
     bool inited;                  // 模块是否初始化。
     bool active;                  // 是否存在进行中的任务。
-    bool target_dirty;            // 目标 ID 是否需要持久化/同步。
+    bool target_dirty;            // 新目标是否尚未同步到对接判定器。
     uint16_t target_id;           // 当前任务目标标签 ID。
     uint16_t matched_tag_id;      // 已认证通过的标签 ID。
     app_task_state_t state;       // 当前任务状态。
@@ -52,7 +52,7 @@ void app_task_mark_docking_started(void);
 void app_task_mark_completed(const char *note);
 void app_task_mark_fault(const char *note);
 void app_task_cancel(const char *note);
-// 读取快照；get 会加锁，peek 保持轻量读取语义。
+// 读取任务快照；get 会清除 target_dirty，peek 只读不修改。
 bool app_task_get_snapshot(app_task_snapshot_t *out);
 bool app_task_peek_snapshot(app_task_snapshot_t *out);
 // 文案格式化和事件注册。
