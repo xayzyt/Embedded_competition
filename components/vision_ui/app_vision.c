@@ -311,21 +311,9 @@ esp_err_t app_vision_init(void)
         return ret;
     }
     taskENTER_CRITICAL(&s_vision_mux);
-    memset(&s_latest_frame, 0, sizeof(s_latest_frame));
-    memset(&s_slot_a, 0, sizeof(s_slot_a));
-    memset(&s_slot_b, 0, sizeof(s_slot_b));
-    memset(&s_slot_c, 0, sizeof(s_slot_c));
     s_pending_slot = &s_slot_a;
     s_detect_slot = &s_slot_b;
     s_write_slot = &s_slot_c;
-    memset(&s_latest_result, 0, sizeof(s_latest_result));
-    s_submit_seq = 0;
-    s_sample_map_width = 0;
-    s_sample_map_height = 0;
-    s_sample_crop_x = 0;
-    s_sample_crop_y = 0;
-    s_sample_crop_w = 0;
-    s_sample_crop_h = 0;
     taskEXIT_CRITICAL(&s_vision_mux);
     s_vision_inited = true;
     return ESP_OK;

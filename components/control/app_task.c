@@ -6,7 +6,18 @@
 #include "esp_log.h"
 #include "nvs.h"
 
-// 高层任务状态机：管理目标 ID、配送任务阶段、NVS 持久化和事件回调。
+// 高层任务状态机
+//
+// 状态转移路径（正常流）：
+//   CONFIGURED → WAIT_APPROACH → AUTH_PASSED → DOCKING → COMPLETED
+//   任意状态 → FAULT（CH32 故障/超时）
+//   任意状态 → CANCELLED（天气保护/主动取消）
+//
+// 线程安全：所有状态修改在 s_mux 临界区内完成；事件回调在临界区外触发，
+//   回调收到的是状态快照，不持有锁，回调中可以安全调用任何公共接口。
+//
+// NVS 持久化：target_id 在 set_target_id(persist=true) 时写入，
+//   重启后 init() 从 NVS 恢复，保证掉电后仍使用上次配置的标签。
 
 static const char *TAG = "app_task";
 static const char *NVS_NS = "sky_task";
@@ -273,7 +284,8 @@ void app_task_cancel(const char *note)
     taskEXIT_CRITICAL(&s_mux);
     app_task_emit_event(APP_TASK_EVENT_STATE_CHANGED);
 }
-// get 表示消费者已处理 target_dirty，读取后会清除此标记。
+// get_snapshot 同时消费 target_dirty 标记（读后清零），
+// 供控制循环调用——控制循环负责把新 target_id 同步给 dock_judge。
 bool app_task_get_snapshot(app_task_snapshot_t *out)
 {
     if (out == NULL)
@@ -286,7 +298,7 @@ bool app_task_get_snapshot(app_task_snapshot_t *out)
     taskEXIT_CRITICAL(&s_mux);
     return true;
 }
-// peek 只读快照，不改变 dirty 标记，适合 UI/云端状态查询。
+// peek_snapshot 只读，不清 target_dirty，适合 UI/云端轮询状态展示。
 bool app_task_peek_snapshot(app_task_snapshot_t *out)
 {
     if (out == NULL)

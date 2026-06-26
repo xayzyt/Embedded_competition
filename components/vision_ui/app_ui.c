@@ -67,7 +67,6 @@ static const char *TAG = "app_ui";
 // HUD、流程面板和启动页对象。
 static lv_obj_t *s_top_bar = NULL;
 static lv_obj_t *s_status = NULL;
-static lv_obj_t *s_coord = NULL;
 static lv_obj_t *s_vision = NULL;
 static lv_obj_t *s_dock = NULL;
 static lv_obj_t *s_hint = NULL;
@@ -851,22 +850,6 @@ static const char *app_ui_vision_display_text(const char *text,
     {
         return "视觉就绪";
     }
-    if (app_ui_text_has(text, "id:"))
-    {
-        return "Tag 已对准";
-    }
-    if (app_ui_text_has(text, "lost") ||
-        app_ui_text_has(text, "wait") ||
-        app_ui_text_has(text, "frame") ||
-        app_ui_text_has(text, "waiting"))
-    {
-        return "视觉等待";
-    }
-    if (app_ui_text_has(text, "configured") ||
-        app_ui_text_has(text, "init"))
-    {
-        return "视觉等待";
-    }
     return "视觉就绪";
 }
 static int32_t app_ui_distance_cm_from_dock(const app_dock_judge_result_t *dock)
@@ -1055,7 +1038,8 @@ static void app_ui_update_telemetry_unlocked(const app_dock_judge_result_t *dock
 }
 static void app_ui_set_vision_text_unlocked(const char *text)
 {
-    app_ui_set_label_text_unlocked(s_vision, app_ui_vision_display_text(text, NULL));
+    app_ui_set_label_text_unlocked(s_vision,
+        (text != NULL && text[0] != '\0') ? text : "视觉就绪");
 }
 static bool app_ui_control_needs_update(const char *status_text,
     const char *vision_text,
@@ -1793,7 +1777,6 @@ bool app_ui_create(void)
     app_ui_move_foreground(s_hud_layer);
     app_ui_move_foreground(s_status);
     app_ui_move_foreground(s_vision);
-    app_ui_move_foreground(s_coord);
     app_ui_move_foreground(s_hint);
     app_ui_move_foreground(s_flow_panel);
     app_ui_move_foreground(s_auth);

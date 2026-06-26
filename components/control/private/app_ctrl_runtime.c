@@ -8,7 +8,17 @@
 #include "app_cloud.h"
 #include "app_ctrl_proto.h"
 
-// 保存 CH32 机械状态，并在控制循环中处理超时、自动接驳和任务推进。
+// 控制运行时：维护 CH32 机械状态并在每个控制周期推进任务。
+//
+// "软等货错误"(soft waiting cargo error) 说明：
+//   托盘伸出后若出现 TIMEOUT 或 WEIGHT 错误，不是真正故障，
+//   而是"货物尚未放上，继续等待"的正常情况。
+//   此时保持 dock_busy=true 但取消固定超时，切换到无限等待状态。
+//
+// 线程模型：
+//   - CH32 接收回调（FreeRTOS 任务上下文）写入 s_rt，用 s_ctrl_mux 保护。
+//   - app_ctrl_runtime_step() 在控制任务中调用，先拷贝状态快照再处理，
+//     最小化临界区持有时间。
 static const char *TAG = "app_ctrl";
 
 #define CTRL_READY_PROBE_INTERVAL_MS 1000U
@@ -41,14 +51,9 @@ typedef struct {
 static portMUX_TYPE s_ctrl_mux = portMUX_INITIALIZER_UNLOCKED;
 static app_ctrl_runtime_t s_rt = {0};
 
-static uint32_t app_ctrl_now_ms(void)
-{
-    return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
-}
-
 static bool app_ctrl_deadline_active(uint32_t deadline_ms, uint32_t now_ms)
 {
-    // 使用有符号差值，计时器回绕时仍可正确比较短时间间隔。
+    // 用有符号差值比较，正确处理毫秒计时器约 49 天的回绕。
     return deadline_ms != 0U && (int32_t)(deadline_ms - now_ms) > 0;
 }
 
@@ -95,7 +100,7 @@ static void app_ctrl_hold_waiting_cargo_locked(void)
 
 static void app_ctrl_apply_proto_msg_locked(const app_ch32_line_t *msg)
 {
-    // 保存上一状态，用于判断超时是否发生在正常等货阶段。
+    // 保存上一状态，用于判断当前错误是否发生在托盘伸出/等货阶段。
     const app_ch32_proto_stage_t prev_stage = s_rt.last_proto_stage;
     const uint16_t prev_flags = s_rt.last_proto_flags;
     const bool cargo_wait_seen = s_rt.cargo_wait_window_seen;
@@ -127,7 +132,8 @@ static void app_ctrl_apply_proto_msg_locked(const app_ch32_line_t *msg)
             CTRL_NOTICE_SHOW_MS);
     }
 
-    // 托盘已伸出时的超时或重量异常按“继续等货”处理。
+    // 托盘已伸出时，TIMEOUT 或 WEIGHT 错误视为”继续等货”而非故障，
+    // 调用方将切换到 WAITING_CARGO 无限等待模式，不复位 busy。
     if (msg->proto_detail != APP_CH32_ERR_NONE ||
         msg->proto_stage == APP_CH32_STAGE_FAULT)
     {
@@ -277,15 +283,36 @@ static void app_ctrl_handle_busy_timeout(app_ctrl_cycle_t *cycle,
     }
 }
 
+// 检查当前状态是否符合"软等货"条件（不依赖 prev 状态）。
+// 控制循环每轮调用，用于恢复因时序问题丢失的等货状态。
+static bool app_ctrl_current_state_is_soft_cargo_wait(const app_ctrl_runtime_t *state)
+{
+    if (state->dock_busy)
+    {
+        return false;
+    }
+    if (!app_ctrl_proto_error_is_cargo_wait_soft(state->last_proto_error))
+    {
+        return false;
+    }
+    if (state->last_proto_stage == APP_CH32_STAGE_FAULT ||
+        state->last_proto_stage == APP_CH32_STAGE_SAFE_LOCKED ||
+        state->last_proto_stage == APP_CH32_STAGE_COMPLETE ||
+        (state->last_proto_flags & APP_CH32_FLAG_LOCKED) != 0U)
+    {
+        return false;
+    }
+    if (state->cargo_wait_window_seen)
+    {
+        return app_ctrl_proto_stage_is_cargo_wait_window(state->last_proto_stage) ||
+               app_ctrl_proto_flags_indicate_tray_out(state->last_proto_flags);
+    }
+    return app_ctrl_proto_stage_is_cargo_wait_window(state->last_proto_stage);
+}
+
 static void app_ctrl_hold_soft_cargo_wait_if_needed(app_ctrl_runtime_t *state)
 {
-    if (!state->dock_busy &&
-        app_ctrl_is_soft_waiting_cargo_error(state->last_proto_stage,
-            state->last_proto_flags,
-            state->last_proto_stage,
-            state->last_proto_flags,
-            state->last_proto_error,
-            state->cargo_wait_window_seen))
+    if (app_ctrl_current_state_is_soft_cargo_wait(state))
     {
         app_ctrl_hold_waiting_cargo(state);
     }
@@ -488,7 +515,8 @@ void app_ctrl_runtime_step(app_ctrl_cycle_t *cycle)
     bool weather_blocked = false;
     app_ctrl_read_state(&state);
 
-    // 先处理已有状态和超时，再判断是否需要发送新的接驳命令。
+    // 先处理已有状态和超时，再判断是否触发新的接驳命令，
+    // 确保本轮读到的状态已经过期/超时处理后再做决策。
     app_ctrl_apply_task_target_if_needed(cycle, &state);
     app_ctrl_probe_ready_if_needed(cycle, &state);
     app_ctrl_handle_busy_timeout(cycle, &state);

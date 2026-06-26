@@ -10,7 +10,16 @@
 #include "esp_check.h"
 #include "esp_log.h"
 
-// ESP32 与 CH32 从控的 UART 协议层：负责二进制帧编解码、ACK/NACK 匹配和 ready 状态缓存。
+// ESP32 ↔ CH32 UART 协议层
+//
+// 帧格式（二进制）：
+//   [SOF1 0x55][SOF2 0xAA][type][cmd][seq][payload_len][payload...][CRC16_L][CRC16_H]
+//   CRC 覆盖从 SOF1 到 payload 末字节，使用 CRC16/IBM 多项式。
+//
+// 线程模型：
+//   - ch32_rx 任务：唯一写入 event_group / ready 状态的上下文。
+//   - 调用方任务：通过 tx_mutex 串行化发送，发送后阻塞等待 event_group 的 ACK/NACK/READY。
+//   - ready 状态有时效（APP_CH32_LINK_READY_STALE_MS），超时后由 is_ready() 懒清除。
 
 static const char *TAG = "app_ch32_link";
 #define CH32_EVT_READY           BIT0
@@ -40,7 +49,7 @@ static app_ch32_link_ctx_t s_ctx = {0};
 
 /* ---------- 发送锁与基础编解码 ---------- */
 
-// 发送互斥锁比命令超时多留一点余量，避免刚到期就抢不到锁。
+// 发送互斥锁超时比命令超时多留一点余量，避免刚到期就抢不到锁。
 static uint32_t app_ch32_link_lock_timeout_ms(uint32_t timeout_ms)
 {
     const uint32_t guard_ms = 100U;
@@ -137,8 +146,9 @@ const char *app_ch32_link_proto_error_name(uint8_t err)
     default:                       return "UNKNOWN";
     }
 }
-// ready 可由 flags 直接指示，也可由若干静态安全阶段推断。
 /* ---------- ready 缓存与入站消息 ---------- */
+
+// ready 可由 flags 直接指示，也可由若干静止安全阶段推断。
 
 static bool app_ch32_proto_stage_indicates_ready(app_ch32_proto_stage_t stage, uint16_t flags)
 {
@@ -302,7 +312,14 @@ static bool app_ch32_parse_proto_frame(const uint8_t *frame, size_t frame_len, a
     }
     return true;
 }
-// UART 接收任务按 SOF1/SOF2/payload_len 组帧，完成后分发给控制器。
+// UART 接收任务：逐字节组帧，完成后分发给控制器。
+//
+// 组帧状态机（不显式存状态变量，用 proto_len 表示已收到的字节数）：
+//   proto_len == 0 : 等待 SOF1 (0x55)
+//   proto_len == 1 : 等待 SOF2 (0xAA)；如果这个字节本身是 SOF1 则留在 len=1
+//   proto_len == 2..5 : 收 type / cmd / seq / payload_len
+//   proto_len == 6 : 读出 payload_len，计算帧总长 proto_expect
+//   proto_len == proto_expect : 帧完整，校验 CRC 后分发，然后重置
 static void app_ch32_link_rx_task(void *arg)
 {
     uint8_t ch = 0;
@@ -362,8 +379,9 @@ static void app_ch32_link_rx_task(void *arg)
         }
     }
 }
-// 初始化 UART 前先把 TX 拉高，避免从控把上电抖动误判为帧起始。
 /* ---------- 命令发送与 ACK 匹配 ---------- */
+
+// 初始化 UART 前先把 TX 拉高，避免从控把上电抖动误判为帧起始。
 
 static esp_err_t app_ch32_link_prepare_tx_idle(void)
 {

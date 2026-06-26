@@ -2,8 +2,17 @@
 #include <stdio.h>
 #include <string.h>
 
-// 对接判定器：对 AprilTag 结果做目标 ID、居中、靠近、稳定和距离门控，
-// 并用 EMA 与滞回减少抖动导致的误触发。
+// AprilTag 对接判定器
+//
+// 判定流程：
+//   1. 对输入视觉结果做 EMA 平滑（整数/浮点各一套，系数 1/(2^ema_shift)）。
+//   2. 按目标 ID、居中、靠近、稳定、距离门控五个条件判断当前帧是否满足 ready。
+//   3. 使用滞回计数器（ready_pass_count / ready_bad_count）在以下四个状态之间切换：
+//        SEARCHING → TRACKING → ALIGNED → READY_TO_DOCK
+//      状态只在非重复帧（frame_seq 变化）时才更新计数器和状态。
+//   4. 短时丢帧（invalid_hold_count < lost_hold_frames）时保持上一状态，
+//      避免 UI 和控制循环因单帧噪声抖动。
+//   5. 对外输出 hover_score（0~100）供 UI 显示悬停质量。
 
 typedef struct {
     bool have_filter;
@@ -135,6 +144,7 @@ static int32_t app_dock_estimate_distance_mm(float edge_px)
     return (int32_t)((s_cfg.focal_length_px * (float)s_cfg.tag_size_mm / edge_px) + 0.5f);
 }
 // 把中心偏差、稳定度、靠近程度和距离门控合成 0~100 的悬停评分。
+// 各项权重：中心35% + 稳定25% + 靠近20% + 距离20%；目标 ID 不对时惩罚/4。
 static uint8_t app_dock_calc_hover_score(const app_dock_judge_result_t *out)
 {
     int32_t center_x_score = 0;
@@ -395,7 +405,8 @@ bool app_dock_judge_process(const app_vision_result_t *vision,
         return true;
     }
     s_rt.wrong_id_count = 0;
-    // ready 条件比 aligned 更严格，ready 状态退出也带坏帧滞回。
+    // ready 条件（全满足）：居中 + 靠近 + 稳定 + 距离门控（若启用）
+    // aligned 条件（宽松）：居中 + （靠近 OR 稳定），允许在过渡距离时保持追踪
     const bool ready_cond = out->centered_ok &&
     out->near_ok &&
     out->stable_ok &&
@@ -424,6 +435,7 @@ bool app_dock_judge_process(const app_vision_result_t *vision,
         }
         switch (s_rt.last_state) {
         case APP_DOCK_STATE_READY_TO_DOCK:
+            // 从 ready 退出需要连续 ready_exit_bad_frames 帧坏帧才降级，防止单帧扰动。
             if (ready_cond || (s_rt.ready_bad_count < s_cfg.ready_exit_bad_frames))
             {
                 s_rt.last_state = APP_DOCK_STATE_READY_TO_DOCK;

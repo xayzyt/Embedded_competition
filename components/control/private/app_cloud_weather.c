@@ -458,7 +458,6 @@ void app_cloud_trigger_weather_emergency(void)
     app_cloud_show_simulated_weather_ui();
     app_cloud_publish_current_state();
     app_cloud_apply_weather_docking_policy(true);
-    app_cloud_publish_current_state();
     app_cloud_notify_weather_task();
 }
 bool app_cloud_is_weather_simulated(void)

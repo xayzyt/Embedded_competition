@@ -2,6 +2,8 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "esp_err.h"
 #include "app_ch32_link.h"
 #include "app_dock_judge.h"
@@ -12,6 +14,12 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+// 获取当前毫秒时间戳（基于 FreeRTOS tick），控制模块共用。
+static inline uint32_t app_ctrl_now_ms(void)
+{
+    return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+}
 
 // 供 UI 显示的 CH32 运行状态。
 typedef struct {

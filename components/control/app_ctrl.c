@@ -12,7 +12,15 @@
 #include "app_task.h"
 #include "app_vision.h"
 
-// 自动对接主循环：读取视觉和任务状态，完成判定后更新机械控制与 UI。
+// 自动对接控制主循环（运行在 Core 1 独立任务）
+//
+// 每轮（CTRL_POLL_MS 间隔）流程：
+//   1. 读取最新视觉快照和任务快照。
+//   2. AI 确认无人机 + 任务处于 WAIT_APPROACH 时才打开 AprilTag 门控；
+//      门控关闭或刚打开时丢弃旧帧，防止历史结果误触发接驳。
+//   3. 把视觉结果送入 dock_judge，获得带滞回的对接状态。
+//   4. 检测 READY 上升沿，调用 runtime_step 发送接驳命令并推进任务状态机。
+//   5. 把当前状态发布到 UI。
 static const char *TAG = "app_ctrl";
 
 #define CTRL_TASK_STACK_SIZE (7 * 1024)
@@ -30,11 +38,6 @@ typedef struct {
 
 static TaskHandle_t s_ctrl_task = NULL;
 static bool s_task_callback_registered = false;
-
-static uint32_t app_ctrl_now_ms(void)
-{
-    return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
-}
 
 static void app_ctrl_on_task_event(app_task_event_t event,
     const app_task_snapshot_t *snap,
