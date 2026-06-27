@@ -15,10 +15,10 @@
  * match the ESP32 app_ch32_link stage/error/flag model.
  */
 
-#define OUTER_DOOR_TEST_STEPS          75000U
+#define OUTER_DOOR_TEST_STEPS          40000U
 #define OUTER_DOOR_SPEED_US            100U
-#define PUSHROD_EXTEND_TIME_MS         2600U
-#define PUSHROD_RETRACT_TIME_MS        2600U
+#define PUSHROD_EXTEND_TIME_MS         10000U
+#define PUSHROD_RETRACT_TIME_MS        10000U
 #define WEIGHT_TRIGGER_G               20
 #define WEIGHT_CHECK_INTERVAL_MS       200U
 #define WEIGHT_CONFIRM_COUNT           3U
