@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 from app.config import get_settings
 from app.db.database import (
+    add_order_event,
     assign_order_dispatch,
     create_order,
     get_order,
@@ -19,6 +20,7 @@ from app.services.order_status_clean import set_order_status
 router = APIRouter(prefix="/api/orders", tags=["orders"])
 UNASSIGNED_TARGET_ID = -1
 VALID_TARGET_IDS = {0, 1}
+MANUAL_RETRACT_STATUSES = {"acting"}
 WEATHER_BLOCKED_DETAIL = "恶劣天气，暂停下单和配送"
 
 
@@ -33,6 +35,12 @@ class AssignOrderRequest(BaseModel):
 
 
 class StartOrderResponse(BaseModel):
+    order_id: str
+    status: str
+    mqtt_sent: bool
+
+
+class ManualRetractOrderResponse(BaseModel):
     order_id: str
     status: str
     mqtt_sent: bool
@@ -144,6 +152,43 @@ def start_order_endpoint(order_id: str) -> StartOrderResponse:
     mark_order_started(order_id, note="mqtt start_task sent")
     updated = get_order(order_id)
     return StartOrderResponse(order_id=order_id, status=updated["status"], mqtt_sent=True)
+
+
+@router.post("/{order_id}/manual-retract", response_model=ManualRetractOrderResponse)
+def manual_retract_order_endpoint(order_id: str) -> ManualRetractOrderResponse:
+    order = get_order(order_id)
+    if order is None:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    if order["status"] not in MANUAL_RETRACT_STATUSES:
+        raise HTTPException(status_code=400, detail=f"Order cannot manual retract from status={order['status']}")
+
+    if not str(order["device_name"]).strip():
+        raise HTTPException(status_code=400, detail="Order has no assigned device")
+
+    try:
+        mqtt_bridge.publish_command(
+            order["device_name"],
+            {
+                "cmd": "manual_retract",
+                "order_id": order["order_id"],
+                "target_id": order["target_id"],
+                "request_id": order["request_id"],
+            },
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    add_order_event(
+        order_id,
+        "manual_retract_requested",
+        {
+            "device_name": order["device_name"],
+            "request_id": order["request_id"],
+        },
+    )
+
+    return ManualRetractOrderResponse(order_id=order_id, status=order["status"], mqtt_sent=True)
 
 
 @router.post("/{order_id}/cancel")

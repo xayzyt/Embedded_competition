@@ -8,6 +8,7 @@
 #include "esp_err.h"
 #include "esp_log.h"
 #include "app_cloud_cmd.h"
+#include "app_ch32_link.h"
 
 // MQTT 消息层：负责云端命令解析、ACK 回复和任务状态 JSON 上报。
 
@@ -292,6 +293,13 @@ static esp_err_t app_cloud_receive_cancel(void)
     app_task_cancel("cancelled by cloud");
     return ESP_OK;
 }
+
+static esp_err_t app_cloud_receive_manual_retract(void)
+{
+    return app_ch32_link_send_proto_cmd_and_wait_ack(APP_CH32_PROTO_CMD_SAFE_CLOSE,
+        APP_CLOUD_MANUAL_RETRACT_WAIT_MS);
+}
+
 // MQTT cmd 负载入口，按 cmd 字段分发到对应业务处理。
 static esp_err_t app_cloud_handle_command(const char *payload, size_t payload_len)
 {
@@ -330,6 +338,15 @@ static esp_err_t app_cloud_handle_command(const char *payload, size_t payload_le
         (void)app_cloud_publish_ack(&cmd,
             (ret == ESP_OK) ? 0 : -1,
             (ret == ESP_OK) ? "accepted" : "set_failed",
+            cmd.target_id);
+        return ret;
+    }
+    if (strcmp(cmd.cmd, "manual_retract") == 0)
+    {
+        ret = app_cloud_receive_manual_retract();
+        (void)app_cloud_publish_ack(&cmd,
+            (ret == ESP_OK) ? 0 : -1,
+            (ret == ESP_OK) ? "accepted" : "manual_retract_failed",
             cmd.target_id);
         return ret;
     }

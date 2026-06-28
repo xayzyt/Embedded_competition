@@ -49,6 +49,15 @@ function startOrder(orderId) {
   });
 }
 
+function manualRetractOrder(orderId) {
+  return request({
+    action: 'manualRetractOrder',
+    data: {
+      order_id: orderId
+    }
+  });
+}
+
 function cancelOrder(orderId) {
   return request({
     action: 'cancelOrder',
@@ -65,5 +74,6 @@ module.exports = {
   getOrder,
   assignOrder,
   startOrder,
+  manualRetractOrder,
   cancelOrder
 };

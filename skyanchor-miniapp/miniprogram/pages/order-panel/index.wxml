@@ -79,6 +79,17 @@
         取消
       </button>
     </view>
+
+    <view class="button-row manual-action-row" wx:if="{{order.can_manual_retract}}">
+      <button
+        class="safe-btn"
+        loading="{{actionPending && !loading}}"
+        disabled="{{loading || actionPending || !order.can_manual_retract}}"
+        bindtap="manualRetractTray"
+      >
+        手动回收托盘
+      </button>
+    </view>
   </view>
 
   <view class="card" wx:if="{{events.length}}">

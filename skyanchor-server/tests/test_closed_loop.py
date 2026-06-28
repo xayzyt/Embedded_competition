@@ -327,6 +327,34 @@ class ClosedLoopTestCase(unittest.TestCase):
             self.assertEqual(order['status'], 'delivering')
             self.assertEqual(order['last_device_state'], 'wait_approach')
 
+    def test_manual_retract_publishes_command_without_cancelling_order(self) -> None:
+        bridge = FakeMQTTBridge(ready=True)
+
+        with self._client_with_bridge(bridge) as client:
+            created = client.post('/api/orders', json={'receiver_id': 'receiver_003'})
+            self.assertEqual(created.status_code, 200)
+            order_id = created.json()['order_id']
+
+            assigned = client.post(f'/api/orders/{order_id}/assign', json={'target_id': 0})
+            self.assertEqual(assigned.status_code, 200)
+
+            started = client.post(f'/api/orders/{order_id}/start')
+            self.assertEqual(started.status_code, 200)
+
+            mqtt_client_module.mqtt_bridge._handle_state(
+                '0',
+                {'order_id': order_id, 'target_id': 0, 'state': 'docking', 'note': 'docking'},
+            )
+            self.assertEqual(database.get_order(order_id)['status'], 'acting')
+
+            retracted = client.post(f'/api/orders/{order_id}/manual-retract')
+            self.assertEqual(retracted.status_code, 200)
+            self.assertEqual(retracted.json()['status'], 'acting')
+            self.assertEqual(len(bridge.commands), 2)
+            self.assertEqual(bridge.commands[1][1]['cmd'], 'manual_retract')
+            self.assertEqual(bridge.commands[1][1]['request_id'], order_id)
+            self.assertEqual(database.get_order(order_id)['status'], 'acting')
+
     def test_delivering_notification_created_once(self) -> None:
         bridge = FakeMQTTBridge(ready=True)
 

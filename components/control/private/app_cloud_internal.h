@@ -45,6 +45,7 @@ extern "C" {
 #define APP_CLOUD_ABORT_WAIT_MS        800
 #define APP_CLOUD_WEATHER_TOGGLE_DEBOUNCE_MS (800)
 #define APP_CLOUD_WEATHER_RESTORE_REFETCH_MIN_MS (30 * 1000)
+#define APP_CLOUD_MANUAL_RETRACT_WAIT_MS 3000U
 
 // 天气展示/保护模式。
 typedef enum {

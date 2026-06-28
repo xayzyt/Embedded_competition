@@ -14,6 +14,7 @@ const TERMINAL_ORDER_STATUSES = ['delivered', 'failed', 'cancelled'];
 // 这里改成真实板子的逻辑设备名，避免继续沿用演示占位值。
 const DEFAULT_DEVICE_NAME = 'skyanchor-p4';
 const DEVICE_CANDIDATES = [DEFAULT_DEVICE_NAME];
+const MANUAL_RETRACT_ORDER_STATUSES = ['acting'];
 // 这里复用当前仓库里已经在板子侧生效的 MQTT 参数，先完成最小真实闭环。
 const MQTT_CONFIG = {
   brokerUrl: 'mqtts://cd29033a.ala.cn-hangzhou.emqxsl.cn:8883',
@@ -853,6 +854,61 @@ async function handleStartOrder(payload) {
   };
 }
 
+async function handleManualRetractOrder(payload) {
+  const orderId = ensureString(payload.order_id, 'order_id');
+  const order = await getOrderById(orderId);
+
+  if (!order) {
+    throw new AppError('订单不存在', 'NOT_FOUND');
+  }
+
+  if (!MANUAL_RETRACT_ORDER_STATUSES.includes(order.status)) {
+    throw new AppError(`当前状态 ${order.status} 不能手动回收托盘`);
+  }
+
+  const assignedDeviceName = String(order.device_name || '').trim();
+  if (!assignedDeviceName) {
+    throw new AppError('订单还没有分配设备');
+  }
+  const deviceName = normalizeDeviceName(assignedDeviceName);
+
+  try {
+    const ack = await publishMqttCommand(deviceName, {
+      cmd: 'manual_retract',
+      order_id: order.order_id,
+      order_name: getOrderName(order),
+      target_id: Number(order.target_id),
+      request_id: String(order.request_id || order.order_id)
+    }, {
+      waitAck: true,
+      ackTimeoutMs: 6000
+    });
+    assertDeviceAckAccepted(ack);
+  } catch (error) {
+    if (error instanceof AppError) {
+      throw error;
+    }
+    console.error('[skyanchorService] MQTT manual_retract 发送失败', {
+      order_id: order.order_id,
+      device_name: deviceName,
+      message: error && error.message
+    });
+    throw new AppError('MQTT 调度通道不可用，手动回收命令未发送成功', 'MQTT_UNAVAILABLE');
+  }
+
+  await addOrderEvent(orderId, 'manual_retract_requested', {
+    note: 'manual retract tray requested',
+    device_name: deviceName,
+    request_id: String(order.request_id || order.order_id)
+  });
+
+  return {
+    order_id: orderId,
+    status: order.status,
+    mqtt_sent: true
+  };
+}
+
 async function handleCancelOrder(payload) {
   const orderId = ensureString(payload.order_id, 'order_id');
   const order = await getOrderById(orderId);
@@ -914,6 +970,8 @@ async function routeAction(action, payload) {
       return handleAssignOrder(payload);
     case 'startOrder':
       return handleStartOrder(payload);
+    case 'manualRetractOrder':
+      return handleManualRetractOrder(payload);
     case 'cancelOrder':
       return handleCancelOrder(payload);
     default:

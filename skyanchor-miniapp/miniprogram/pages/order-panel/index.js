@@ -28,6 +28,7 @@ const EVENT_TYPE_LABELS = {
   created: '订单创建',
   dispatch_assigned: '分配 Tag',
   start_requested: '开始配送',
+  manual_retract_requested: '手动回收',
   status_changed: '状态更新',
   device_state: '板端上报'
 };
@@ -98,6 +99,7 @@ function decorateOrder(order) {
     last_device_state_text: deviceStateText,
     flow_steps: buildFlowSteps(order.status),
     is_active: ACTIVE_STATUSES.includes(order.status),
+    can_manual_retract: order.status === 'acting',
     can_cancel: !TERMINAL_STATUSES.includes(order.status),
     primary_action: primaryAction.type,
     primary_action_text: primaryAction.text,
@@ -115,6 +117,10 @@ function buildEventTitle(event) {
 
   if (eventType === 'status_changed') {
     return `状态更新为 ${statusLabel(data.status)}`;
+  }
+
+  if (eventType === 'manual_retract_requested') {
+    return '已请求手动回收托盘';
   }
 
   if (eventType === 'device_state') {
@@ -139,6 +145,10 @@ function buildEventDetail(event) {
   }
 
   if (eventType === 'start_requested') {
+    return `设备 ${data.device_name || '-'} · request ${data.request_id || '-'}`;
+  }
+
+  if (eventType === 'manual_retract_requested') {
     return `设备 ${data.device_name || '-'} · request ${data.request_id || '-'}`;
   }
 
@@ -386,6 +396,39 @@ Page({
     return true;
   },
 
+  async ensureDeviceCommandReady(actionLabel) {
+    const serviceStatus = await syncServiceStatus(this, true);
+
+    if (!serviceStatus.serviceOnline) {
+      wx.showModal({
+        title: serviceStatus.serviceBlockTitle || '云端服务未连接',
+        content: serviceStatus.serviceBlockAdvice || serviceStatus.serviceMessage,
+        showCancel: false
+      });
+      return false;
+    }
+
+    if (!serviceStatus.serviceMqttReady) {
+      wx.showModal({
+        title: serviceStatus.serviceBlockTitle || '云端调度未就绪',
+        content: `${serviceStatus.serviceBlockAdvice || '请检查 MQTT 与板端状态。'}\n\n当前暂时无法${actionLabel}。`,
+        showCancel: false
+      });
+      return false;
+    }
+
+    if (!serviceStatus.serviceDeviceStateReady) {
+      wx.showModal({
+        title: serviceStatus.serviceBlockTitle || '未收到板端状态',
+        content: `${serviceStatus.serviceBlockAdvice || '请确认 ESP32 已联网并连接 MQTT。'}\n\n当前暂时无法${actionLabel}。`,
+        showCancel: false
+      });
+      return false;
+    }
+
+    return true;
+  },
+
   async assignApriltag() {
     const order = this.data.order;
     if (!order || order.primary_action !== 'assign' || this.data.actionPending || this._selectingTag) {
@@ -462,6 +505,35 @@ Page({
     }
 
     await this.runAction(() => api.cancelOrder(this.data.orderId), '已取消订单');
+  },
+
+  async manualRetractTray() {
+    const order = this.data.order;
+    if (!order || !order.can_manual_retract || this.data.actionPending) {
+      return;
+    }
+
+    const ready = await this.ensureDeviceCommandReady('手动回收托盘');
+    if (!ready) {
+      return;
+    }
+
+    const confirmed = await new Promise((resolve) => {
+      wx.showModal({
+        title: '手动回收托盘',
+        content: '请确认货物已放好，再回收托盘并关闭舱门。',
+        confirmText: '回收',
+        cancelText: '取消',
+        success: (res) => resolve(!!res.confirm),
+        fail: () => resolve(false)
+      });
+    });
+
+    if (!confirmed) {
+      return;
+    }
+
+    await this.runAction(() => api.manualRetractOrder(this.data.orderId), '已请求回收');
   },
 
   async runAction(action, toastTitle) {

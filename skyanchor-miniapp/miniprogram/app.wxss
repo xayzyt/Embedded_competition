@@ -204,7 +204,8 @@ button::after {
 
 .primary-btn,
 .ghost-btn,
-.warn-btn {
+.warn-btn,
+.safe-btn {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -235,9 +236,16 @@ button::after {
   color: #ffffff;
 }
 
+.safe-btn {
+  background: #0f766e;
+  color: #ffffff;
+  box-shadow: 0 12rpx 26rpx rgba(15, 118, 110, 0.18);
+}
+
 .primary-btn[disabled],
 .ghost-btn[disabled],
-.warn-btn[disabled] {
+.warn-btn[disabled],
+.safe-btn[disabled] {
   opacity: 0.56;
 }
 
@@ -277,6 +285,14 @@ button::after {
   min-width: 0;
   padding: 0 12rpx;
   font-size: 26rpx;
+}
+
+.manual-action-row {
+  margin-top: 16rpx;
+}
+
+.manual-action-row .safe-btn {
+  flex: 1;
 }
 
 .single-action-row .ghost-btn {
