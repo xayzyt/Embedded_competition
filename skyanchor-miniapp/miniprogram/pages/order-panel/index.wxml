@@ -1,5 +1,5 @@
-<view class="page">
-  <view class="hero page-hero">
+<view class="page app-page order-detail-page">
+  <view class="hero page-hero hero-card">
     <view class="title">订单详情</view>
     <view class="hero-meta">{{isReceiverView ? '用户端视图' : '调度台视图'}}</view>
   </view>
@@ -48,6 +48,31 @@
       </block>
     </view>
 
+    <view class="detail-insights">
+      <view class="insight-group">
+        <view class="insight-group-title">链路状态</view>
+        <view class="insight-chip-row">
+          <block wx:for="{{detailStatusTiles}}" wx:key="key">
+            <view class="insight-chip insight-{{item.state}}">
+              <text class="insight-label">{{item.label}}</text>
+              <text class="insight-value">{{item.value}}</text>
+            </view>
+          </block>
+        </view>
+      </view>
+      <view class="insight-group">
+        <view class="insight-group-title">安全策略</view>
+        <view class="insight-chip-row">
+          <block wx:for="{{safetyBadges}}" wx:key="key">
+            <view class="insight-chip insight-{{item.state}}">
+              <text class="insight-label">{{item.label}}</text>
+              <text class="insight-value">{{item.value}}</text>
+            </view>
+          </block>
+        </view>
+      </view>
+    </view>
+
     <view class="brief-lines" wx:if="{{order.note_text || order.last_device_state_text}}">
       <view class="brief-line" wx:if="{{order.note_text}}">
         <text class="brief-key">{{order.note_label}}</text>
@@ -56,6 +81,38 @@
       <view class="brief-line" wx:if="{{order.last_device_state_text}}">
         <text class="brief-key">板端</text>
         <text class="brief-value">{{order.last_device_state_text}}</text>
+      </view>
+    </view>
+
+    <view class="delivery-report report-{{order.report.class_name}}" wx:if="{{order.show_report}}">
+      <view class="report-head">
+        <view>
+          <view class="report-kicker">智能配送闭环</view>
+          <view class="report-title">{{order.report.title}}</view>
+        </view>
+        <view class="report-result">{{order.report.result_text}}</view>
+      </view>
+      <view class="report-summary">{{order.report.summary_text}}</view>
+      <view class="report-grid">
+        <view class="report-item">
+          <view class="report-label">目标 Tag</view>
+          <view class="report-value">{{order.report.tag_text}}</view>
+        </view>
+        <view class="report-item">
+          <view class="report-label">总耗时</view>
+          <view class="report-value">{{order.report.duration_text}}</view>
+        </view>
+        <view class="report-item">
+          <view class="report-label">板端状态</view>
+          <view class="report-value">{{order.report.device_text}}</view>
+        </view>
+        <view class="report-item">
+          <view class="report-label">说明</view>
+          <view class="report-value">{{order.report.note_text}}</view>
+        </view>
+      </view>
+      <view class="button-row report-action-row" wx:if="{{isReceiverView && order.show_contact_dispatcher}}">
+        <button class="ghost-btn phone-btn" bindtap="contactDispatcher">联系配送员</button>
       </view>
     </view>
 
@@ -94,7 +151,7 @@
 
   <view class="card" wx:if="{{events.length}}">
     <view class="section-head">
-      <view class="section-title">事件时间线</view>
+      <view class="section-title">智能配送时间线</view>
       <view class="count-pill">{{events.length}} 条</view>
     </view>
     <block wx:for="{{events}}" wx:key="id">

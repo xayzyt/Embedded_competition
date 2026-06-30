@@ -34,8 +34,10 @@ typedef struct {
     bool ch32_ready;
     bool dock_busy;
     bool cargo_wait_window_seen;
+    bool dock_completion_owned_by_start;
     bool has_weight;
     int32_t last_weight_g;
+    app_ch32_proto_cmd_t last_proto_cmd;
     uint16_t last_proto_flags;
     app_ch32_proto_stage_t last_proto_stage;
     uint8_t last_proto_error;
@@ -98,6 +100,20 @@ static void app_ctrl_hold_waiting_cargo_locked(void)
     app_ctrl_set_notice_locked("dock: waiting cargo", CTRL_NOTICE_SHOW_MS);
 }
 
+static void app_ctrl_note_status_owner_locked(const app_ch32_line_t *msg)
+{
+    const app_ch32_proto_cmd_t cmd = (app_ch32_proto_cmd_t)msg->proto_cmd;
+    s_rt.last_proto_cmd = cmd;
+    if (cmd == APP_CH32_PROTO_CMD_START_DOCK)
+    {
+        s_rt.dock_completion_owned_by_start = true;
+    }
+    else if (cmd != APP_CH32_PROTO_CMD_NONE)
+    {
+        s_rt.dock_completion_owned_by_start = false;
+    }
+}
+
 static void app_ctrl_apply_proto_msg_locked(const app_ch32_line_t *msg)
 {
     // 保存上一状态，用于判断当前错误是否发生在托盘伸出/等货阶段。
@@ -118,6 +134,7 @@ static void app_ctrl_apply_proto_msg_locked(const app_ch32_line_t *msg)
     {
         return;
     }
+    app_ctrl_note_status_owner_locked(msg);
 
     if (app_ctrl_proto_stage_is_cargo_wait_window(msg->proto_stage) ||
         ((msg->payload_len >= 8U) &&
@@ -150,6 +167,7 @@ static void app_ctrl_apply_proto_msg_locked(const app_ch32_line_t *msg)
 
         s_rt.last_proto_error = msg->proto_detail;
         s_rt.dock_busy = false;
+        s_rt.dock_completion_owned_by_start = false;
         s_rt.cargo_wait_window_seen = false;
         s_rt.busy_deadline_ms = 0;
         app_ctrl_start_retrigger_cooldown_locked();
@@ -267,6 +285,7 @@ static void app_ctrl_handle_busy_timeout(app_ctrl_cycle_t *cycle,
 
     taskENTER_CRITICAL(&s_ctrl_mux);
     s_rt.dock_busy = false;
+    s_rt.dock_completion_owned_by_start = false;
     s_rt.busy_deadline_ms = 0;
     s_rt.last_proto_error = APP_CH32_ERR_TIMEOUT;
     app_ctrl_start_retrigger_cooldown_locked();
@@ -274,6 +293,7 @@ static void app_ctrl_handle_busy_timeout(app_ctrl_cycle_t *cycle,
     taskEXIT_CRITICAL(&s_ctrl_mux);
 
     state->dock_busy = false;
+    state->dock_completion_owned_by_start = false;
     state->busy_deadline_ms = 0;
     state->last_proto_error = APP_CH32_ERR_TIMEOUT;
     if (cycle->task.active || cycle->task.state == APP_TASK_STATE_DOCKING)
@@ -315,6 +335,29 @@ static void app_ctrl_hold_soft_cargo_wait_if_needed(app_ctrl_runtime_t *state)
     if (app_ctrl_current_state_is_soft_cargo_wait(state))
     {
         app_ctrl_hold_waiting_cargo(state);
+    }
+}
+
+// 成功终态可直接补齐任务完成，防止第二轮接驳时 busy 边沿被快照漏掉。
+static bool app_ctrl_state_is_success_terminal(const app_ctrl_runtime_t *state)
+{
+    if (state == NULL)
+    {
+        return false;
+    }
+    if (!state->dock_completion_owned_by_start)
+    {
+        return false;
+    }
+    switch (state->last_proto_stage) {
+    case APP_CH32_STAGE_SAFE_LOCKED:
+    case APP_CH32_STAGE_COMPLETE:
+        return state->last_proto_cmd == APP_CH32_PROTO_CMD_START_DOCK;
+    case APP_CH32_STAGE_IDLE:
+    case APP_CH32_STAGE_READY:
+        return (state->last_proto_flags & APP_CH32_FLAG_LOCKED) != 0U;
+    default:
+        return false;
     }
 }
 
@@ -378,6 +421,8 @@ static void app_ctrl_try_auto_dock(app_ctrl_cycle_t *cycle,
         // ACK 只表示命令已接收，完成状态以后续 CH32 状态帧为准。
         taskENTER_CRITICAL(&s_ctrl_mux);
         s_rt.dock_busy = true;
+        s_rt.dock_completion_owned_by_start = true;
+        s_rt.last_proto_cmd = CTRL_DOCK_CMD;
         s_rt.cargo_wait_window_seen = false;
         s_rt.last_proto_error = APP_CH32_ERR_NONE;
         s_rt.last_proto_stage = APP_CH32_STAGE_UNKNOWN;
@@ -389,6 +434,8 @@ static void app_ctrl_try_auto_dock(app_ctrl_cycle_t *cycle,
         taskEXIT_CRITICAL(&s_ctrl_mux);
 
         state->dock_busy = true;
+        state->dock_completion_owned_by_start = true;
+        state->last_proto_cmd = CTRL_DOCK_CMD;
         state->cargo_wait_window_seen = false;
         state->last_proto_error = APP_CH32_ERR_NONE;
         app_task_mark_docking_started();
@@ -400,6 +447,7 @@ static void app_ctrl_try_auto_dock(app_ctrl_cycle_t *cycle,
     const bool rejected = ret == ESP_ERR_INVALID_RESPONSE;
     taskENTER_CRITICAL(&s_ctrl_mux);
     s_rt.last_proto_error = APP_CH32_ERR_INTERNAL;
+    s_rt.dock_completion_owned_by_start = false;
     app_ctrl_start_retrigger_cooldown_locked();
     app_ctrl_set_notice_locked(rejected ?
         "dock: CH32 rejected cmd" :
@@ -408,6 +456,7 @@ static void app_ctrl_try_auto_dock(app_ctrl_cycle_t *cycle,
     taskEXIT_CRITICAL(&s_ctrl_mux);
 
     state->last_proto_error = APP_CH32_ERR_INTERNAL;
+    state->dock_completion_owned_by_start = false;
     app_task_mark_fault(rejected ? "CH32 rejected cmd" : "CH32 ack timeout");
     app_ctrl_refresh_task(cycle);
 }
@@ -415,6 +464,9 @@ static void app_ctrl_try_auto_dock(app_ctrl_cycle_t *cycle,
 static void app_ctrl_update_task_for_busy_transition(app_ctrl_cycle_t *cycle,
     const app_ctrl_runtime_t *state)
 {
+    const bool docking_task =
+        cycle->task.active && cycle->task.state == APP_TASK_STATE_DOCKING;
+
     if (!state->dock_busy && state->last_proto_error != APP_CH32_ERR_NONE)
     {
         if (cycle->task.active || cycle->task.state == APP_TASK_STATE_DOCKING)
@@ -437,10 +489,19 @@ static void app_ctrl_update_task_for_busy_transition(app_ctrl_cycle_t *cycle,
         return;
     }
 
-    if (cycle->prev_dock_busy &&
-        !state->dock_busy &&
+    if (!state->dock_busy &&
+        app_ctrl_state_is_success_terminal(state) &&
+        (cycle->prev_dock_busy || docking_task) &&
         (cycle->task.active || cycle->task.state == APP_TASK_STATE_DOCKING))
     {
+        if (!cycle->prev_dock_busy)
+        {
+            ESP_LOGW(TAG,
+                "recover dock completion from terminal cmd=0x%02x stage=%s flags=0x%04x",
+                (unsigned)state->last_proto_cmd,
+                app_ch32_link_proto_stage_name(state->last_proto_stage),
+                (unsigned)state->last_proto_flags);
+        }
         app_task_mark_completed("dock cycle done");
         app_ctrl_refresh_task(cycle);
     }
@@ -478,6 +539,8 @@ esp_err_t app_ctrl_runtime_init(void)
     memset(&s_rt, 0, sizeof(s_rt));
     s_rt.last_proto_stage = APP_CH32_STAGE_UNKNOWN;
     s_rt.last_proto_error = APP_CH32_ERR_NONE;
+    s_rt.last_proto_cmd = APP_CH32_PROTO_CMD_NONE;
+    s_rt.dock_completion_owned_by_start = false;
     s_rt.inited = true;
     taskEXIT_CRITICAL(&s_ctrl_mux);
     return ESP_OK;

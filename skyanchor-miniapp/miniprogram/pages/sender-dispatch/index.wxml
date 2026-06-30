@@ -1,8 +1,18 @@
-<view class="page">
-  <view class="hero page-hero dispatch-hero">
+<view class="page app-page dispatch-page">
+  <view class="hero page-hero dispatch-hero hero-card">
     <view class="hero-copy">
       <view class="title">调度台</view>
       <view class="hero-meta">配送调度 · {{lastRefreshText}}</view>
+    </view>
+    <view class="hero-stats">
+      <view class="hero-stat">
+        <view class="hero-stat-value">{{pendingOrders.length}}</view>
+        <view class="hero-stat-label">待调度</view>
+      </view>
+      <view class="hero-stat hero-stat-warm">
+        <view class="hero-stat-value">{{activeOrders.length}}</view>
+        <view class="hero-stat-label">执行中</view>
+      </view>
     </view>
     <view class="hero-actions">
       <button class="ghost-btn small-btn diagnostic-btn" bindtap="runPreflightCheck">自检</button>
@@ -16,7 +26,7 @@
     <view class="service-detail-btn" bindtap="showServiceDiagnostics">诊断</view>
   </view>
 
-  <view class="card">
+  <view class="card list-card">
     <view class="section-head">
       <view class="section-title">待调度</view>
       <view class="count-pill">{{pendingOrders.length}} 单</view>
@@ -36,6 +46,7 @@
           <view class="order-main">
             <view class="item-title">{{item.order_name_text}}</view>
             <view class="item-subtitle">用户 {{item.receiver_id}} · Tag {{item.apriltag_text}}</view>
+            <view class="item-meta">{{item.stage_hint}}</view>
           </view>
           <view class="status-badge status-{{item.status}}">{{item.status_text}}</view>
         </view>
@@ -48,7 +59,7 @@
     </view>
   </view>
 
-  <view class="card">
+  <view class="card list-card">
     <view class="section-head">
       <view class="section-title">执行中</view>
       <view class="count-pill">{{activeOrders.length}} 单</view>
@@ -62,6 +73,7 @@
           <view class="order-main">
             <view class="item-title">{{item.order_name_text}}</view>
             <view class="item-subtitle">用户 {{item.receiver_id}} · Tag {{item.apriltag_text}}</view>
+            <view class="item-meta">{{item.stage_hint}}</view>
           </view>
           <view class="status-badge status-{{item.status}}">{{item.status_text}}</view>
         </view>

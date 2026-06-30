@@ -205,11 +205,22 @@ esp_err_t app_task_set_target_id(uint16_t target_id, bool persist)
 // 启动一单任务，进入等待无人机靠近/认证阶段。
 esp_err_t app_task_start_with_target(uint16_t target_id, const char *source)
 {
+    app_task_state_t active_state = APP_TASK_STATE_IDLE;
+    taskENTER_CRITICAL(&s_mux);
     if (!s_rt.inited)
     {
+        taskEXIT_CRITICAL(&s_mux);
         return ESP_ERR_INVALID_STATE;
     }
-    taskENTER_CRITICAL(&s_mux);
+    if (s_rt.active)
+    {
+        active_state = s_rt.state;
+        taskEXIT_CRITICAL(&s_mux);
+        ESP_LOGW(TAG, "reject start target=%u: task already active state=%s",
+            (unsigned)target_id,
+            app_task_state_to_text(active_state));
+        return ESP_ERR_INVALID_STATE;
+    }
     s_rt.target_id = target_id;
     s_rt.target_dirty = true;
     s_rt.active = true;
@@ -277,12 +288,20 @@ void app_task_mark_fault(const char *note)
 }
 void app_task_cancel(const char *note)
 {
+    bool changed = false;
     taskENTER_CRITICAL(&s_mux);
-    s_rt.active = false;
-    s_rt.matched_tag_id = 0;
-    app_task_change_state_locked(APP_TASK_STATE_CANCELLED, note != NULL ? note : "task cancelled");
+    if (s_rt.active)
+    {
+        s_rt.active = false;
+        s_rt.matched_tag_id = 0;
+        app_task_change_state_locked(APP_TASK_STATE_CANCELLED, note != NULL ? note : "task cancelled");
+        changed = true;
+    }
     taskEXIT_CRITICAL(&s_mux);
-    app_task_emit_event(APP_TASK_EVENT_STATE_CHANGED);
+    if (changed)
+    {
+        app_task_emit_event(APP_TASK_EVENT_STATE_CHANGED);
+    }
 }
 // get_snapshot 同时消费 target_dirty 标记（读后清零），
 // 供控制循环调用——控制循环负责把新 target_id 同步给 dock_judge。

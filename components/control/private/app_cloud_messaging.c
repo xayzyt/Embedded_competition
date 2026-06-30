@@ -182,6 +182,7 @@ void app_cloud_publish_task_snapshot_internal(const app_task_snapshot_t *snap)
     time(&now);
     int cargo_received = (snap->state == APP_TASK_STATE_COMPLETED) ? 1 : 0;
     int fault = (snap->state == APP_TASK_STATE_FAULT) ? 1 : 0;
+    int accept_orders = (!s_cloud.weather_docking_blocked && !snap->active) ? 1 : 0;
     cJSON *root = cJSON_CreateObject();
     if (root == NULL)
     {
@@ -202,7 +203,7 @@ void app_cloud_publish_task_snapshot_internal(const app_task_snapshot_t *snap)
         app_cloud_json_add_number(root, "fault", fault) &&
         app_cloud_json_add_number(root, "weather_blocked", s_cloud.weather_docking_blocked ? 1U : 0U) &&
         app_cloud_json_add_number(root, "weather_simulated", s_cloud.weather_simulated ? 1U : 0U) &&
-        app_cloud_json_add_number(root, "accept_orders", s_cloud.weather_docking_blocked ? 0U : 1U) &&
+        app_cloud_json_add_number(root, "accept_orders", accept_orders) &&
         app_cloud_json_add_string(root, "weather_mode", app_cloud_weather_mode_text(s_cloud.weather_mode)) &&
         app_cloud_json_add_string(root, "source", snap->source) &&
         app_cloud_json_add_string(root, "note", snap->note);
@@ -266,6 +267,17 @@ static esp_err_t app_cloud_receive_start_task(const app_cloud_cmd_t *cmd)
         app_cloud_publish_current_state();
         return ESP_ERR_INVALID_STATE;
     }
+    app_task_snapshot_t snap = {0};
+    if (app_task_peek_snapshot(&snap) && snap.active)
+    {
+        ESP_LOGW(TAG,
+            "cloud rx: reject start_task while active state=%s target=%u request_id=%s",
+            app_task_state_to_text(snap.state),
+            (unsigned)snap.target_id,
+            (cmd->request_id[0] != '\0') ? cmd->request_id : "-");
+        app_cloud_publish_current_state();
+        return ESP_ERR_INVALID_STATE;
+    }
     char previous_request_id[sizeof(s_cloud.current_request_id)];
     char previous_order_id[sizeof(s_cloud.current_order_id)];
     char previous_order_name[sizeof(s_cloud.current_order_name)];
@@ -290,14 +302,92 @@ static esp_err_t app_cloud_receive_start_task(const app_cloud_cmd_t *cmd)
 }
 static esp_err_t app_cloud_receive_cancel(void)
 {
+    app_task_snapshot_t snap = {0};
+    if (!app_task_peek_snapshot(&snap) || !snap.active)
+    {
+        ESP_LOGI(TAG, "cloud cancel ignored: no active task");
+        app_cloud_publish_current_state();
+        return ESP_OK;
+    }
+
+    const bool need_safe_close = snap.state == APP_TASK_STATE_DOCKING;
     app_task_cancel("cancelled by cloud");
-    return ESP_OK;
+    if (!need_safe_close)
+    {
+        return ESP_OK;
+    }
+
+    esp_err_t ret = app_ch32_link_send_proto_cmd_and_wait_ack(APP_CH32_PROTO_CMD_SAFE_CLOSE,
+        APP_CLOUD_MANUAL_RETRACT_WAIT_MS);
+    if (ret == ESP_OK)
+    {
+        return ESP_OK;
+    }
+
+    ESP_LOGW(TAG, "SAFE_CLOSE for cancel failed: %s", esp_err_to_name(ret));
+    ret = app_ch32_link_send_proto_cmd_and_wait_ack(APP_CH32_PROTO_CMD_ABORT,
+        APP_CLOUD_ABORT_WAIT_MS);
+    if (ret != ESP_OK)
+    {
+        ESP_LOGW(TAG, "ABORT for cancel failed: %s", esp_err_to_name(ret));
+        app_task_mark_fault("cancel safety command failed");
+    }
+    return ret;
 }
 
 static esp_err_t app_cloud_receive_manual_retract(void)
 {
+    app_task_snapshot_t snap = {0};
+    if (app_task_peek_snapshot(&snap) && snap.active)
+    {
+        app_task_mark_fault("manual retract requested");
+    }
     return app_ch32_link_send_proto_cmd_and_wait_ack(APP_CH32_PROTO_CMD_SAFE_CLOSE,
         APP_CLOUD_MANUAL_RETRACT_WAIT_MS);
+}
+
+static int app_cloud_start_task_ack_code(esp_err_t ret)
+{
+    if (ret == ESP_OK)
+    {
+        return 0;
+    }
+    if (ret == ESP_ERR_INVALID_STATE && s_cloud.weather_docking_blocked)
+    {
+        return -3;
+    }
+    if (ret == ESP_ERR_INVALID_STATE)
+    {
+        return -4;
+    }
+    return -1;
+}
+
+static const char *app_cloud_start_task_ack_msg(esp_err_t ret)
+{
+    if (ret == ESP_OK)
+    {
+        return "accepted";
+    }
+    if (ret == ESP_ERR_INVALID_STATE && s_cloud.weather_docking_blocked)
+    {
+        return "weather_blocked";
+    }
+    if (ret == ESP_ERR_INVALID_STATE)
+    {
+        return "device_busy";
+    }
+    return "start_failed";
+}
+
+static const char *app_cloud_manual_retract_ack_msg(esp_err_t ret)
+{
+    return (ret == ESP_OK) ? "accepted" : "manual_retract_failed";
+}
+
+static const char *app_cloud_cancel_ack_msg(esp_err_t ret)
+{
+    return (ret == ESP_OK) ? "accepted" : "cancel_failed";
 }
 
 // MQTT cmd 负载入口，按 cmd 字段分发到对应业务处理。
@@ -326,9 +416,8 @@ static esp_err_t app_cloud_handle_command(const char *payload, size_t payload_le
     {
         ret = app_cloud_receive_start_task(&cmd);
         (void)app_cloud_publish_ack(&cmd,
-            (ret == ESP_OK) ? 0 : ((ret == ESP_ERR_INVALID_STATE && s_cloud.weather_docking_blocked) ? -3 : -1),
-            (ret == ESP_OK) ? "accepted" :
-                ((ret == ESP_ERR_INVALID_STATE && s_cloud.weather_docking_blocked) ? "weather_blocked" : "start_failed"),
+            app_cloud_start_task_ack_code(ret),
+            app_cloud_start_task_ack_msg(ret),
             cmd.target_id);
         return ret;
     }
@@ -346,7 +435,7 @@ static esp_err_t app_cloud_handle_command(const char *payload, size_t payload_le
         ret = app_cloud_receive_manual_retract();
         (void)app_cloud_publish_ack(&cmd,
             (ret == ESP_OK) ? 0 : -1,
-            (ret == ESP_OK) ? "accepted" : "manual_retract_failed",
+            app_cloud_manual_retract_ack_msg(ret),
             cmd.target_id);
         return ret;
     }
@@ -355,7 +444,7 @@ static esp_err_t app_cloud_handle_command(const char *payload, size_t payload_le
         ret = app_cloud_receive_cancel();
         (void)app_cloud_publish_ack(&cmd,
             (ret == ESP_OK) ? 0 : -1,
-            (ret == ESP_OK) ? "accepted" : "cancel_failed",
+            app_cloud_cancel_ack_msg(ret),
             0U);
         return ret;
     }

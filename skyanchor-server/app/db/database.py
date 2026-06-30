@@ -8,6 +8,7 @@ from app.config import get_settings
 
 DB_LOCK = threading.Lock()
 ACTIVE_ORDER_STATUSES = ("created", "pending_start", "delivering", "tag_matched", "acting")
+CLEARABLE_ORDER_STATUSES = ("created", "delivered", "failed", "cancelled")
 
 
 def utc_now_text() -> str:
@@ -159,6 +160,22 @@ def list_orders(role: str | None = None, user_id: str | None = None) -> list[dic
         with get_connection() as conn:
             rows = conn.execute(sql, params).fetchall()
     return [dict(row) for row in rows]
+
+
+def delete_order_record(order_id: str) -> dict[str, Any] | None:
+    with DB_LOCK:
+        with get_connection() as conn:
+            current = conn.execute("SELECT * FROM orders WHERE order_id = ?", (order_id,)).fetchone()
+            if current is None:
+                return None
+
+            order = dict(current)
+            conn.execute("DELETE FROM notifications WHERE order_id = ?", (order_id,))
+            conn.execute("DELETE FROM order_events WHERE order_id = ?", (order_id,))
+            conn.execute("DELETE FROM orders WHERE order_id = ?", (order_id,))
+            conn.commit()
+
+    return order
 
 
 def get_order_events(order_id: str) -> list[dict[str, Any]]:

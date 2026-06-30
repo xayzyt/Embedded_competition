@@ -7,12 +7,33 @@ const { formatOrderName } = require('../../utils/order-display.js');
 const ACTIVE_STATUSES = ['pending_start', 'delivering', 'tag_matched', 'acting'];
 const POLL_INTERVAL_MS = 5000;
 
+function buildOrderHint(order) {
+  const status = order && order.status;
+  if (status === 'created') {
+    return '云端已收单，等待调度员分配 AprilTag';
+  }
+  if (status === 'pending_start') {
+    return '任务已下发，等待板端确认';
+  }
+  if (status === 'delivering') {
+    return 'AI 正在等待无人机进入识别区';
+  }
+  if (status === 'tag_matched') {
+    return 'AprilTag 已确认，准备接驳';
+  }
+  if (status === 'acting') {
+    return 'CH32 正在执行接驳动作';
+  }
+  return '云端状态已同步';
+}
+
 function decorateOrder(order) {
   return {
     ...order,
     order_name_text: formatOrderName(order),
     status_text: statusLabel(order.status),
-    apriltag_text: formatApriltagValue(order && order.target_id)
+    apriltag_text: formatApriltagValue(order && order.target_id),
+    stage_hint: buildOrderHint(order)
   };
 }
 

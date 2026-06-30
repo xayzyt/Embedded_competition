@@ -6,9 +6,11 @@ from pydantic import BaseModel, Field
 
 from app.config import get_settings
 from app.db.database import (
+    CLEARABLE_ORDER_STATUSES,
     add_order_event,
     assign_order_dispatch,
     create_order,
+    delete_order_record,
     get_order,
     get_order_events,
     list_orders,
@@ -21,6 +23,8 @@ router = APIRouter(prefix="/api/orders", tags=["orders"])
 UNASSIGNED_TARGET_ID = -1
 VALID_TARGET_IDS = {0, 1}
 MANUAL_RETRACT_STATUSES = {"acting"}
+CANCELABLE_STATUSES = {"pending_start", "delivering", "tag_matched", "acting"}
+DEVICE_NOT_READY_DETAIL = "设备正忙，暂时不能下单和配送"
 WEATHER_BLOCKED_DETAIL = "恶劣天气，暂停下单和配送"
 
 
@@ -61,6 +65,8 @@ def ensure_weather_allows_orders(device_name: str | None = None) -> None:
         raise HTTPException(status_code=409, detail="未收到板端状态，暂时不能下单和配送")
     if mqtt_bridge.is_weather_blocked(target_device):
         raise HTTPException(status_code=409, detail=WEATHER_BLOCKED_DETAIL)
+    if not mqtt_bridge.is_accepting_orders(target_device):
+        raise HTTPException(status_code=409, detail=DEVICE_NOT_READY_DETAIL)
 
 
 @router.post("")
@@ -96,6 +102,25 @@ def get_order_endpoint(order_id: str) -> dict:
     return {
         "order": order,
         "events": get_order_events(order_id),
+    }
+
+
+@router.delete("/{order_id}")
+def delete_order_endpoint(order_id: str) -> dict:
+    order = get_order(order_id)
+    if order is None:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    if order["status"] not in CLEARABLE_ORDER_STATUSES:
+        raise HTTPException(status_code=400, detail=f"Order cannot be cleared from status={order['status']}")
+
+    deleted = delete_order_record(order_id)
+    if deleted is None:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    return {
+        "order_id": order_id,
+        "deleted": True,
     }
 
 
@@ -200,6 +225,8 @@ def cancel_order_endpoint(order_id: str) -> dict:
     if order["status"] == "created":
         updated = set_order_status(order_id, "cancelled", note="cancel requested by dispatch")
         return updated or {"order_id": order_id, "status": "cancelled"}
+    if order["status"] not in CANCELABLE_STATUSES:
+        raise HTTPException(status_code=400, detail=f"Order cannot be cancelled from status={order['status']}")
 
     try:
         mqtt_bridge.publish_command(

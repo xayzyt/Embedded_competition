@@ -1,10 +1,16 @@
-<view class="page">
-  <view class="hero hero-line page-hero">
+<view class="page app-page user-page">
+  <view class="hero hero-line page-hero hero-card">
     <view class="hero-copy">
       <view class="title">用户端</view>
       <view class="hero-meta">{{receiverId ? receiverId : '未设置 ID'}}</view>
     </view>
-    <button class="ghost-btn small-btn refresh-btn" loading="{{loading}}" bindtap="fetchOrders">刷新</button>
+    <view class="hero-actions">
+      <view class="hero-stat">
+        <view class="hero-stat-value">{{orders.length}}</view>
+        <view class="hero-stat-label">订单</view>
+      </view>
+      <button class="ghost-btn small-btn refresh-btn" loading="{{loading}}" bindtap="fetchOrders">刷新</button>
+    </view>
   </view>
 
   <view class="service-banner status-{{serviceState}}">
@@ -29,7 +35,7 @@
     </view>
   </view>
 
-  <view class="card">
+  <view class="card list-card">
     <view class="section-head">
       <view class="section-title">我的订单</view>
       <view class="count-pill">{{orders.length}} 单</view>
@@ -57,7 +63,18 @@
             <view class="item-subtitle">Tag {{item.apriltag_text}}</view>
             <view class="item-meta item-alert" wx:if="{{item.is_failed && item.note_text}}">失败原因：{{item.note_text}}</view>
           </view>
-          <view class="status-badge status-{{item.status}}">{{item.status_text}}</view>
+          <view class="order-side">
+            <view class="status-badge status-{{item.status}}">{{item.status_text}}</view>
+            <button
+              wx:if="{{item.can_clear}}"
+              class="clear-order-btn"
+              loading="{{clearingOrderId == item.order_id}}"
+              disabled="{{clearingOrderId}}"
+              data-order-id="{{item.order_id}}"
+              data-order-name="{{item.order_name_text}}"
+              catchtap="clearOrder"
+            >清除</button>
+          </view>
         </view>
       </block>
     </block>

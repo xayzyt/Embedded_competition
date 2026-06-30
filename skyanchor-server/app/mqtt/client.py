@@ -7,6 +7,7 @@ import paho.mqtt.client as mqtt
 
 from app.config import get_settings
 from app.db.database import (
+    ACTIVE_ORDER_STATUSES,
     add_order_event,
     find_active_order,
     get_order,
@@ -100,9 +101,21 @@ class MQTTBridge:
         weather_mode = str(state.get("weather_mode", "")).strip()
         return (
             int(state.get("weather_blocked", 0) or 0) == 1
-            or int(state.get("accept_orders", 1) or 0) == 0
             or weather_mode in {"cloud_guard", "emergency"}
         )
+
+    def is_accepting_orders(self, device_name: str) -> bool:
+        state = self.latest_device_state(device_name)
+        if not state:
+            return True
+
+        accept_orders = state.get("accept_orders", 1)
+        if isinstance(accept_orders, bool):
+            return accept_orders
+        try:
+            return int(accept_orders or 0) != 0
+        except (TypeError, ValueError):
+            return True
 
     def _on_connect(
         self,
@@ -196,7 +209,7 @@ class MQTTBridge:
                     note=msg or "start_failed",
                 )
 
-        if cmd == "cancel" and code == 0:
+        if cmd == "cancel" and code == 0 and order["status"] in ACTIVE_ORDER_STATUSES:
             set_order_status(order["order_id"], "cancelled", note=msg or "cancelled")
 
     def _handle_state(self, device_name: str, payload: dict[str, Any]) -> None:

@@ -115,7 +115,8 @@ static void app_ctrl_task(void *arg)
         (void)app_dock_judge_process(&cycle.vision, &cycle.dock);
 
         // READY 从 false 变为 true 时才触发一次自动接驳。
-        cycle.ready_level = cycle.dock.state == APP_DOCK_STATE_READY_TO_DOCK;
+        cycle.ready_level = cycle.dock.vision_valid &&
+            cycle.dock.state == APP_DOCK_STATE_READY_TO_DOCK;
         app_ctrl_runtime_step(&cycle);
         app_ctrl_ui_publish(&cycle);
 

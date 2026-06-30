@@ -30,6 +30,15 @@ function getOrder(orderId) {
   });
 }
 
+function deleteOrder(orderId) {
+  return request({
+    action: 'deleteOrder',
+    data: {
+      order_id: orderId
+    }
+  });
+}
+
 function assignOrder(orderId, data) {
   return request({
     action: 'assignOrder',
@@ -72,6 +81,7 @@ module.exports = {
   createOrder,
   listOrders,
   getOrder,
+  deleteOrder,
   assignOrder,
   startOrder,
   manualRetractOrder,

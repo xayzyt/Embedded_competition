@@ -18,6 +18,14 @@ class FakeMQTTBridge:
         self.ready = ready
         self.started = False
         self.commands: list[tuple[str, dict]] = []
+        self.device_states: dict[str, dict] = {
+            '0': {
+                'accept_orders': 1,
+                'weather_blocked': 0,
+                'weather_mode': 'normal',
+                'state': 'configured',
+            }
+        }
 
     @property
     def is_started(self) -> bool:
@@ -38,6 +46,31 @@ class FakeMQTTBridge:
             raise RuntimeError('MQTT broker is not connected')
         self.commands.append((device_name, payload))
 
+    def latest_device_state(self, device_name: str) -> dict | None:
+        state = self.device_states.get(str(device_name or '').strip())
+        return dict(state) if state is not None else None
+
+    def is_weather_blocked(self, device_name: str) -> bool:
+        state = self.latest_device_state(device_name)
+        if not state:
+            return False
+
+        weather_mode = str(state.get('weather_mode', '')).strip()
+        return int(state.get('weather_blocked', 0) or 0) == 1 or weather_mode in {
+            'cloud_guard',
+            'emergency',
+        }
+
+    def is_accepting_orders(self, device_name: str) -> bool:
+        state = self.latest_device_state(device_name)
+        if not state:
+            return True
+
+        accept_orders = state.get('accept_orders', 1)
+        if isinstance(accept_orders, bool):
+            return accept_orders
+        return int(accept_orders or 0) != 0
+
 
 class ClosedLoopTestCase(unittest.TestCase):
     def setUp(self) -> None:
@@ -53,6 +86,7 @@ class ClosedLoopTestCase(unittest.TestCase):
         os.environ['MQTT_DEFAULT_DEVICE'] = '0'
         os.environ['MQTT_DISPATCH_DEVICES'] = '0,1'
         config.get_settings.cache_clear()
+        app_main.settings = config.get_settings()
         database.init_db()
 
     def tearDown(self) -> None:
@@ -77,6 +111,7 @@ class ClosedLoopTestCase(unittest.TestCase):
             os.environ['MQTT_DISPATCH_DEVICES'] = self.original_dispatch_devices
 
         config.get_settings.cache_clear()
+        app_main.settings = config.get_settings()
         try:
             self.temp_dir.cleanup()
         except Exception:
@@ -145,6 +180,33 @@ class ClosedLoopTestCase(unittest.TestCase):
             self.assertEqual(created.json()['device_name'], '')
             self.assertEqual(created.json()['target_id'], -1)
 
+    def test_create_order_rejected_when_weather_blocked(self) -> None:
+        bridge = FakeMQTTBridge(ready=True)
+        bridge.device_states['0'] = {
+            'accept_orders': 0,
+            'weather_blocked': 1,
+            'weather_mode': 'emergency',
+        }
+
+        with self._client_with_bridge(bridge) as client:
+            created = client.post('/api/orders', json={'receiver_id': 'receiver_003'})
+            self.assertEqual(created.status_code, 409)
+            self.assertEqual(created.json()['detail'], orders_api.WEATHER_BLOCKED_DETAIL)
+
+    def test_create_order_rejected_when_device_busy(self) -> None:
+        bridge = FakeMQTTBridge(ready=True)
+        bridge.device_states['0'] = {
+            'accept_orders': 0,
+            'weather_blocked': 0,
+            'weather_mode': 'normal',
+            'state': 'docking',
+        }
+
+        with self._client_with_bridge(bridge) as client:
+            created = client.post('/api/orders', json={'receiver_id': 'receiver_003'})
+            self.assertEqual(created.status_code, 409)
+            self.assertEqual(created.json()['detail'], orders_api.DEVICE_NOT_READY_DETAIL)
+
     def test_start_order_rejected_when_order_not_dispatched(self) -> None:
         bridge = FakeMQTTBridge(ready=True)
 
@@ -212,6 +274,73 @@ class ClosedLoopTestCase(unittest.TestCase):
             self.assertEqual(cancelled.status_code, 200)
             self.assertEqual(cancelled.json()['status'], 'cancelled')
             self.assertEqual(len(bridge.commands), 0)
+
+    def test_clear_created_order_deletes_record_without_mqtt(self) -> None:
+        bridge = FakeMQTTBridge(ready=True)
+
+        with self._client_with_bridge(bridge) as client:
+            created = client.post('/api/orders', json={'receiver_id': 'receiver_003'})
+            self.assertEqual(created.status_code, 200)
+            order_id = created.json()['order_id']
+
+            cleared = client.delete(f'/api/orders/{order_id}')
+            self.assertEqual(cleared.status_code, 200)
+            self.assertEqual(cleared.json(), {'order_id': order_id, 'deleted': True})
+            self.assertIsNone(database.get_order(order_id))
+            self.assertEqual(database.get_order_events(order_id), [])
+            self.assertEqual(len(bridge.commands), 0)
+
+            detail = client.get(f'/api/orders/{order_id}')
+            self.assertEqual(detail.status_code, 404)
+
+            orders = client.get('/api/orders', params={'role': 'receiver', 'user_id': 'receiver_003'})
+            self.assertEqual(orders.status_code, 200)
+            self.assertEqual(orders.json(), [])
+
+    def test_clear_delivered_order_deletes_events_and_notifications(self) -> None:
+        bridge = FakeMQTTBridge(ready=True)
+
+        with self._client_with_bridge(bridge) as client:
+            created = client.post('/api/orders', json={'receiver_id': 'receiver_003'})
+            self.assertEqual(created.status_code, 200)
+            order_id = created.json()['order_id']
+
+            database.update_order_status(order_id, 'delivered', note='done')
+            database.create_notification('receiver_003', order_id, 'order_delivered', 'done', 'done')
+            self.assertIsNotNone(database.get_order(order_id))
+            self.assertGreater(len(database.get_order_events(order_id)), 0)
+            notifications_before = client.get('/api/notifications', params={'user_id': 'receiver_003'})
+            self.assertEqual(notifications_before.status_code, 200)
+            self.assertEqual(len(notifications_before.json()), 1)
+
+            cleared = client.delete(f'/api/orders/{order_id}')
+            self.assertEqual(cleared.status_code, 200)
+            self.assertEqual(cleared.json()['deleted'], True)
+            self.assertIsNone(database.get_order(order_id))
+            self.assertEqual(database.get_order_events(order_id), [])
+
+            notifications = client.get('/api/notifications', params={'user_id': 'receiver_003'})
+            self.assertEqual(notifications.status_code, 200)
+            self.assertEqual(notifications.json(), [])
+
+    def test_clear_active_order_is_rejected(self) -> None:
+        bridge = FakeMQTTBridge(ready=True)
+
+        with self._client_with_bridge(bridge) as client:
+            created = client.post('/api/orders', json={'receiver_id': 'receiver_003'})
+            self.assertEqual(created.status_code, 200)
+            order_id = created.json()['order_id']
+
+            assigned = client.post(f'/api/orders/{order_id}/assign', json={'target_id': 0})
+            self.assertEqual(assigned.status_code, 200)
+
+            started = client.post(f'/api/orders/{order_id}/start')
+            self.assertEqual(started.status_code, 200)
+
+            cleared = client.delete(f'/api/orders/{order_id}')
+            self.assertEqual(cleared.status_code, 400)
+            self.assertEqual(database.get_order(order_id)['status'], 'pending_start')
+            self.assertEqual(len(bridge.commands), 1)
 
     def test_success_chain_updates_status_and_creates_single_notification(self) -> None:
         bridge = FakeMQTTBridge(ready=True)
@@ -354,6 +483,48 @@ class ClosedLoopTestCase(unittest.TestCase):
             self.assertEqual(bridge.commands[1][1]['cmd'], 'manual_retract')
             self.assertEqual(bridge.commands[1][1]['request_id'], order_id)
             self.assertEqual(database.get_order(order_id)['status'], 'acting')
+
+            mqtt_client_module.mqtt_bridge._handle_state(
+                '0',
+                {
+                    'order_id': order_id,
+                    'target_id': 0,
+                    'state': 'fault',
+                    'fault': 1,
+                    'note': 'manual retract requested',
+                },
+            )
+            self.assertEqual(database.get_order(order_id)['status'], 'failed')
+
+    def test_delivered_order_cannot_be_cancelled_by_endpoint_or_late_ack(self) -> None:
+        bridge = FakeMQTTBridge(ready=True)
+
+        with self._client_with_bridge(bridge) as client:
+            created = client.post('/api/orders', json={'receiver_id': 'receiver_003'})
+            self.assertEqual(created.status_code, 200)
+            order_id = created.json()['order_id']
+
+            assigned = client.post(f'/api/orders/{order_id}/assign', json={'target_id': 0})
+            self.assertEqual(assigned.status_code, 200)
+
+            started = client.post(f'/api/orders/{order_id}/start')
+            self.assertEqual(started.status_code, 200)
+
+            mqtt_client_module.mqtt_bridge._handle_state(
+                '0',
+                {'order_id': order_id, 'target_id': 0, 'state': 'completed', 'note': 'completed'},
+            )
+            self.assertEqual(database.get_order(order_id)['status'], 'delivered')
+
+            cancelled = client.post(f'/api/orders/{order_id}/cancel')
+            self.assertEqual(cancelled.status_code, 400)
+            self.assertEqual(database.get_order(order_id)['status'], 'delivered')
+
+            mqtt_client_module.mqtt_bridge._handle_ack(
+                '0',
+                {'request_id': order_id, 'cmd': 'cancel', 'code': 0, 'msg': 'accepted'},
+            )
+            self.assertEqual(database.get_order(order_id)['status'], 'delivered')
 
     def test_delivering_notification_created_once(self) -> None:
         bridge = FakeMQTTBridge(ready=True)

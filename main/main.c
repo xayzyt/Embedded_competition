@@ -22,6 +22,7 @@ static const char *TAG = "main";
 #define APP_TARGET_TAG_ID   (1U)
 #define APP_TAG_SIZE_MM     (60)
 #define APP_FOCAL_LENGTH_PX (314.0f)
+#define APP_TAG_CONFIRM_FRAMES (3U)
 
 typedef struct {
     bool core_ready;
@@ -73,6 +74,7 @@ static app_dock_judge_config_t app_make_dock_config(void)
     cfg.target_tag_id = APP_TARGET_TAG_ID;
     cfg.tag_size_mm = APP_TAG_SIZE_MM;
     cfg.focal_length_px = APP_FOCAL_LENGTH_PX;
+    cfg.min_stable_count = APP_TAG_CONFIRM_FRAMES;
     return cfg;
 }
 

@@ -11,6 +11,7 @@ const ORDERS_COLLECTION = 'orders';
 const ORDER_EVENTS_COLLECTION = 'order_events';
 const VALID_TARGET_IDS = new Set([0, 1]);
 const TERMINAL_ORDER_STATUSES = ['delivered', 'failed', 'cancelled'];
+const CLEARABLE_ORDER_STATUSES = ['created', 'delivered', 'failed', 'cancelled'];
 // 这里改成真实板子的逻辑设备名，避免继续沿用演示占位值。
 const DEFAULT_DEVICE_NAME = 'skyanchor-p4';
 const DEVICE_CANDIDATES = [DEFAULT_DEVICE_NAME];
@@ -26,6 +27,10 @@ const MQTT_CONFIG = {
   ackWaitTimeoutMs: 3500,
   qos: 1
 };
+// 申请微信订阅消息模板后填写。字段示例见 buildDeliveryNoticeData()。
+const DELIVERY_NOTICE_TEMPLATE_ID = '';
+const DELIVERY_NOTICE_MINIPROGRAM_STATE = 'trial';
+const DELIVERY_NOTICE_LANG = 'zh_CN';
 const STATUS_INDEX = {
   created: 0,
   pending_start: 1,
@@ -88,6 +93,55 @@ function getOrderName(order) {
   return buildOrderName(order && order.order_id);
 }
 
+function getWxContextOpenId() {
+  try {
+    const wxContext = cloud.getWXContext ? cloud.getWXContext() : {};
+    return String(wxContext && wxContext.OPENID || '').trim();
+  } catch (error) {
+    console.warn('[skyanchorService] 读取 openid 失败', {
+      message: error && error.message
+    });
+    return '';
+  }
+}
+
+function clipTemplateValue(value, maxLength = 20) {
+  const text = String(value || '').trim();
+  return text.length > maxLength ? text.slice(0, maxLength) : text;
+}
+
+function formatNoticeTime(timestamp) {
+  const date = new Date(Number(timestamp || 0) || now());
+  const pad = (value) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function buildDeliveryNoticePage(order) {
+  const orderId = encodeURIComponent(String(order && order.order_id || ''));
+  return `pages/order-panel/index?order_id=${orderId}&role=receiver`;
+}
+
+function buildDeliveryNoticeData(order) {
+  // 订阅消息模板字段需要和微信公众平台里选择的关键词一致。
+  return {
+    thing1: {
+      value: clipTemplateValue(getOrderName(order))
+    },
+    phrase2: {
+      value: '已送达'
+    },
+    thing3: {
+      value: clipTemplateValue(`Tag ${normalizeTargetId(order && order.target_id)}`)
+    },
+    time4: {
+      value: formatNoticeTime(order && (order.delivered_at || order.updated_at))
+    },
+    thing5: {
+      value: '请前往取件'
+    }
+  };
+}
+
 function normalizeTargetId(value) {
   if (value === undefined || value === null || value === '') {
     return null;
@@ -112,6 +166,10 @@ function ensureString(value, fieldName) {
 
 function isTerminalStatus(status) {
   return TERMINAL_ORDER_STATUSES.includes(status);
+}
+
+function isClearableOrderStatus(status) {
+  return CLEARABLE_ORDER_STATUSES.includes(status);
 }
 
 function normalizeDeviceName(deviceName) {
@@ -535,6 +593,12 @@ function stripOrderDoc(order) {
   const {
     _id,
     _openid,
+    receiver_openid,
+    delivery_notice_enabled,
+    delivery_notice_template_id,
+    delivery_notice_requested_at,
+    delivery_notice_sent_at,
+    delivery_notice_error,
     ...rest
   } = order;
   return clonePlainData(rest);
@@ -544,6 +608,58 @@ async function updateOrderByDocId(docId, patch) {
   await db.collection(ORDERS_COLLECTION).doc(docId).update({
     data: clonePlainData(patch)
   });
+}
+
+async function deleteOrderEvents(orderId) {
+  const result = await db.collection(ORDER_EVENTS_COLLECTION).where({ order_id: orderId }).remove();
+  return Number(result && result.stats && result.stats.removed || 0);
+}
+
+async function sendDeliveryCompleteNotice(order) {
+  if (!order || order.status !== 'delivered') {
+    return;
+  }
+
+  if (!DELIVERY_NOTICE_TEMPLATE_ID || !order.delivery_notice_enabled || order.delivery_notice_sent_at) {
+    return;
+  }
+
+  const receiverOpenId = String(order.receiver_openid || '').trim();
+  if (!receiverOpenId) {
+    return;
+  }
+
+  if (!cloud.openapi || !cloud.openapi.subscribeMessage || !cloud.openapi.subscribeMessage.send) {
+    await updateOrderByDocId(order._id, {
+      delivery_notice_error: 'subscribeMessage API unavailable',
+      updated_at: order.updated_at || now()
+    });
+    return;
+  }
+
+  try {
+    await cloud.openapi.subscribeMessage.send({
+      touser: receiverOpenId,
+      templateId: DELIVERY_NOTICE_TEMPLATE_ID,
+      page: buildDeliveryNoticePage(order),
+      data: buildDeliveryNoticeData(order),
+      miniprogramState: DELIVERY_NOTICE_MINIPROGRAM_STATE,
+      lang: DELIVERY_NOTICE_LANG
+    });
+
+    await updateOrderByDocId(order._id, {
+      delivery_notice_sent_at: now(),
+      delivery_notice_error: ''
+    });
+  } catch (error) {
+    console.warn('[skyanchorService] 配送完成订阅消息发送失败', {
+      order_id: order.order_id,
+      message: error && error.message
+    });
+    await updateOrderByDocId(order._id, {
+      delivery_notice_error: error && error.message ? error.message : 'send failed'
+    });
+  }
 }
 
 async function updateOrderStatus(order, status, note, extraPatch = {}) {
@@ -569,6 +685,8 @@ async function updateOrderStatus(order, status, note, extraPatch = {}) {
     matched_tag_id: patch.matched_tag_id !== undefined ? patch.matched_tag_id : order.matched_tag_id,
     last_device_state: patch.last_device_state !== undefined ? patch.last_device_state : order.last_device_state
   });
+  const updatedOrder = await getOrderById(order.order_id);
+  await sendDeliveryCompleteNotice(updatedOrder);
   return getOrderById(order.order_id);
 }
 
@@ -679,12 +797,21 @@ async function handleCreateOrder(payload) {
   const orderId = buildOrderId();
   const orderName = buildOrderName(orderId);
   const currentTime = now();
+  const receiverOpenId = getWxContextOpenId();
+  const requestedNoticeTemplateId = String(payload.delivery_notice_template_id || '').trim();
+  const deliveryNoticeEnabled = !!(
+    payload.delivery_notice_subscribed &&
+    receiverOpenId &&
+    DELIVERY_NOTICE_TEMPLATE_ID &&
+    requestedNoticeTemplateId === DELIVERY_NOTICE_TEMPLATE_ID
+  );
 
   const orderData = {
     order_id: orderId,
     order_name: orderName,
     sender_id: senderId,
     receiver_id: receiverId,
+    receiver_openid: receiverOpenId,
     device_name: '',
     target_id: targetId === null ? -1 : targetId,
     request_id: orderId,
@@ -696,7 +823,12 @@ async function handleCreateOrder(payload) {
     started_at: null,
     delivered_at: null,
     failed_at: null,
-    updated_at: currentTime
+    updated_at: currentTime,
+    delivery_notice_enabled: deliveryNoticeEnabled,
+    delivery_notice_template_id: deliveryNoticeEnabled ? DELIVERY_NOTICE_TEMPLATE_ID : '',
+    delivery_notice_requested_at: deliveryNoticeEnabled ? currentTime : null,
+    delivery_notice_sent_at: null,
+    delivery_notice_error: ''
   };
 
   await db.collection(ORDERS_COLLECTION).add({
@@ -748,6 +880,27 @@ async function handleGetOrder(payload) {
   return {
     order: stripOrderDoc(order),
     events: await listOrderEvents(orderId)
+  };
+}
+
+async function handleDeleteOrder(payload) {
+  const orderId = ensureString(payload.order_id, 'order_id');
+  const order = await getOrderById(orderId);
+
+  if (!order) {
+    throw new AppError('订单不存在', 'NOT_FOUND');
+  }
+
+  if (!isClearableOrderStatus(order.status)) {
+    throw new AppError(`当前状态 ${order.status} 不能清除订单，请先取消或等待结束`);
+  }
+
+  await deleteOrderEvents(orderId);
+  await db.collection(ORDERS_COLLECTION).doc(order._id).remove();
+
+  return {
+    order_id: orderId,
+    deleted: true
   };
 }
 
@@ -966,6 +1119,8 @@ async function routeAction(action, payload) {
       return handleListOrders(payload);
     case 'getOrder':
       return handleGetOrder(payload);
+    case 'deleteOrder':
+      return handleDeleteOrder(payload);
     case 'assignOrder':
       return handleAssignOrder(payload);
     case 'startOrder':

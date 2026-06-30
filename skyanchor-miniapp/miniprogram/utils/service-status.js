@@ -6,8 +6,13 @@ function pad(value) {
 }
 
 function formatClockTime(timestamp) {
-  const value = Number(timestamp || 0);
-  if (!value) {
+  if (timestamp === undefined || timestamp === null || timestamp === '') {
+    return '未检查';
+  }
+
+  const numeric = Number(timestamp);
+  const value = Number.isFinite(numeric) && numeric > 0 ? numeric : Date.parse(timestamp);
+  if (!Number.isFinite(value) || value <= 0) {
     return '未检查';
   }
 

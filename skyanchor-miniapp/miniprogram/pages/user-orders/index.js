@@ -4,10 +4,16 @@ const { statusLabel } = require('../../utils/order-status-labels.js');
 const { defaultServiceStatus, showServiceDiagnostics: showDiagnostics, syncServiceStatus } = require('../../utils/service-status.js');
 const { formatApriltagValue } = require('../../utils/apriltag.js');
 const { formatOrderName } = require('../../utils/order-display.js');
+const { requestDeliveryCompleteSubscription } = require('../../utils/delivery-notice.js');
 
 const POLL_INTERVAL_MS = 3000;
 const HIDDEN_STATUSES = ['cancelled'];
+const CLEARABLE_STATUSES = ['created', 'delivered', 'failed', 'cancelled'];
 const WEATHER_FAILURE_KEYWORDS = ['恶劣天气', '天气管制', '天气保护', '接收保护'];
+
+function canClearOrder(order) {
+  return CLEARABLE_STATUSES.includes(order && order.status);
+}
 
 function decorateOrder(order) {
   const noteText = String(order && order.note || '').trim();
@@ -18,7 +24,8 @@ function decorateOrder(order) {
     status_text: statusLabel(order.status),
     apriltag_text: formatApriltagValue(order && order.target_id),
     note_text: noteText,
-    is_failed: order && order.status === 'failed'
+    is_failed: order && order.status === 'failed',
+    can_clear: canClearOrder(order)
   };
 }
 
@@ -40,6 +47,7 @@ Page({
     orders: [],
     creating: false,
     loading: false,
+    clearingOrderId: '',
     loadError: '',
     hasLoaded: false
   }, defaultServiceStatus()),
@@ -154,6 +162,7 @@ Page({
     }
 
     this._confirmingCreate = true;
+    const deliveryNotice = await requestDeliveryCompleteSubscription();
     const confirmed = await this.confirmCreateOrder();
     this._confirmingCreate = false;
     if (!confirmed) {
@@ -184,7 +193,9 @@ Page({
 
     try {
       const order = await api.createOrder({
-        receiver_id: receiverId
+        receiver_id: receiverId,
+        delivery_notice_subscribed: deliveryNotice.accepted,
+        delivery_notice_template_id: deliveryNotice.templateId
       });
 
       wx.hideLoading();
@@ -215,6 +226,19 @@ Page({
         title: '确认下单',
         content: '确定现在提交一笔新的配送订单吗？',
         confirmText: '确定',
+        cancelText: '取消',
+        success: (res) => resolve(!!res.confirm),
+        fail: () => resolve(false)
+      });
+    });
+  },
+
+  confirmClearOrder(orderName) {
+    return new Promise((resolve) => {
+      wx.showModal({
+        title: '清除订单',
+        content: `确定从后台删除 ${orderName || '该订单'} 吗？删除后不能恢复。`,
+        confirmText: '清除',
         cancelText: '取消',
         success: (res) => resolve(!!res.confirm),
         fail: () => resolve(false)
@@ -317,6 +341,44 @@ Page({
     }
 
     this.stopPolling();
+  },
+
+  async clearOrder(e) {
+    const orderId = e.currentTarget.dataset.orderId;
+    const orderName = e.currentTarget.dataset.orderName;
+    if (!orderId || this.data.clearingOrderId) {
+      return;
+    }
+
+    const confirmed = await this.confirmClearOrder(orderName);
+    if (!confirmed) {
+      return;
+    }
+
+    this.setData({ clearingOrderId: orderId });
+    wx.showLoading({ title: '清除中' });
+
+    try {
+      await api.deleteOrder(orderId);
+      this.setData({
+        orders: this.data.orders.filter((item) => item.order_id !== orderId)
+      });
+      wx.hideLoading();
+      wx.showToast({
+        title: '已清除',
+        icon: 'success'
+      });
+      this.fetchOrders({ silent: true }).catch(() => {});
+    } catch (err) {
+      wx.hideLoading();
+      wx.showModal({
+        title: '清除失败',
+        content: err.message || '无法清除订单',
+        showCancel: false
+      });
+    } finally {
+      this.setData({ clearingOrderId: '' });
+    }
   },
 
   openOrder(e) {
