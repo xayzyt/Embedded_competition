@@ -19,6 +19,7 @@ static const char *TAG = "app_preview";
 #define APP_CAMERA_START_TASK_PRIO      5
 #define APP_TASK_EVENT_TASK_STACK       (8 * 1024)
 #define APP_TASK_EVENT_TASK_PRIO        5
+#define APP_TASK_STATE_POLL_MS          250U
 #define APP_PREVIEW_FIRST_FRAME_WAIT_MS 12000U
 #define APP_PREVIEW_SWITCH_WAIT_MS      800U
 
@@ -26,6 +27,9 @@ static TaskHandle_t s_task_event_task = NULL;
 static QueueHandle_t s_task_event_queue = NULL;
 static bool s_camera_started = false;
 static bool s_event_callback_registered = false;
+static volatile bool s_preview_visible = false;
+static app_task_state_t s_last_handled_state = APP_TASK_STATE_IDLE;
+static bool s_have_last_handled_state = false;
 
 // 相机启动失败时返回主屏并显示失败状态。
 static void app_show_camera_failure(void)
@@ -38,11 +42,30 @@ static void app_show_camera_failure(void)
 }
 
 // 暂停预览并返回主屏；相机资源保留供下一次任务复用。
-static void app_leave_camera_preview(bool show_pickup)
+static bool app_leave_camera_preview(bool show_pickup)
 {
     app_camera_pause();
-    app_ui_show_main_screen();
+    if (!app_ui_show_main_screen())
+    {
+        ESP_LOGW(TAG, "show main screen failed, will retry");
+        return false;
+    }
     app_ui_main_screen_show_pickup(show_pickup);
+    s_preview_visible = false;
+    return true;
+}
+
+// 只有活动中的识别、鉴权和机械执行阶段需要停留在相机预览。
+static bool app_task_snapshot_wants_camera_preview(const app_task_snapshot_t *snap)
+{
+    if (snap == NULL)
+    {
+        return true;
+    }
+    return snap->active &&
+           (snap->state == APP_TASK_STATE_WAIT_APPROACH ||
+            snap->state == APP_TASK_STATE_AUTH_PASSED ||
+            snap->state == APP_TASK_STATE_DOCKING);
 }
 
 // 判断当前任务阶段是否需要显示相机预览。
@@ -53,10 +76,7 @@ static bool app_task_wants_camera_preview(void)
     {
         return true;
     }
-    return snap.active &&
-           (snap.state == APP_TASK_STATE_WAIT_APPROACH ||
-            snap.state == APP_TASK_STATE_AUTH_PASSED ||
-            snap.state == APP_TASK_STATE_DOCKING);
+    return app_task_snapshot_wants_camera_preview(&snap);
 }
 
 // 启动 AI、相机、视觉和预览；AI 超时不会阻止相机继续启动。
@@ -125,6 +145,7 @@ static void app_camera_start_task(void *arg)
     {
         ESP_LOGI(TAG, "enter camera preview");
         app_ui_hide_main_screen();
+        s_preview_visible = true;
     }
     vTaskDelete(NULL);
 }
@@ -170,6 +191,7 @@ static void app_switch_to_camera_preview(void)
         if (app_task_wants_camera_preview())
         {
             app_ui_hide_main_screen();
+            s_preview_visible = true;
         }
         return;
     }
@@ -185,22 +207,39 @@ static void app_handle_task_state_changed(const app_task_snapshot_t *snap)
         return;
     }
 
-    // 任务开始进入预览，任务结束或异常时返回主屏。
-    switch (snap->state) {
-    case APP_TASK_STATE_WAIT_APPROACH:
-        app_switch_to_camera_preview();
-        break;
-    case APP_TASK_STATE_COMPLETED:
-        app_leave_camera_preview(true);
-        app_ui_main_screen_set_task_state(APP_UI_MAIN_TASK_COMPLETED);
-        break;
-    case APP_TASK_STATE_FAULT:
-    case APP_TASK_STATE_CANCELLED:
-        app_leave_camera_preview(false);
-        break;
-    default:
-        break;
+    const bool wants_preview = app_task_snapshot_wants_camera_preview(snap);
+    const bool state_changed =
+        !s_have_last_handled_state || s_last_handled_state != snap->state;
+    const bool needs_visibility_fix =
+        wants_preview ? !s_preview_visible : s_preview_visible;
+
+    if (!state_changed && !needs_visibility_fix)
+    {
+        return;
     }
+
+    // 任务开始进入预览，任务结束或异常时返回主屏；周期轮询负责补救丢失的事件。
+    if (wants_preview)
+    {
+        app_switch_to_camera_preview();
+    }
+    else
+    {
+        const bool completed = snap->state == APP_TASK_STATE_COMPLETED;
+        const bool terminal =
+            completed ||
+            snap->state == APP_TASK_STATE_FAULT ||
+            snap->state == APP_TASK_STATE_CANCELLED;
+        if ((needs_visibility_fix || terminal) &&
+            app_leave_camera_preview(completed) &&
+            completed)
+        {
+            app_ui_main_screen_set_task_state(APP_UI_MAIN_TASK_COMPLETED);
+        }
+    }
+
+    s_last_handled_state = snap->state;
+    s_have_last_handled_state = true;
 }
 
 static void app_task_event_task(void *arg)
@@ -209,7 +248,16 @@ static void app_task_event_task(void *arg)
     app_task_snapshot_t snap = {0};
     for (;;)
     {
-        if (xQueueReceive(s_task_event_queue, &snap, portMAX_DELAY) == pdPASS)
+        if (xQueueReceive(s_task_event_queue,
+            &snap,
+            pdMS_TO_TICKS(APP_TASK_STATE_POLL_MS)) != pdPASS)
+        {
+            if (!app_task_peek_snapshot(&snap))
+            {
+                continue;
+            }
+        }
+        if (snap.inited)
         {
             app_handle_task_state_changed(&snap);
         }

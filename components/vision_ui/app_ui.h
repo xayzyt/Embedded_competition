@@ -81,9 +81,30 @@ void app_ui_main_screen_apply_weather_state(const char *weather_text,
                                             bool simulated,
                                             const char *task_text);
 
+// 异常演示界面：不启动摄像头，只展示 CH32 机械状态和天气保护入口。
+typedef enum {
+    APP_UI_EXCEPTION_DEMO_READY = 0,
+    APP_UI_EXCEPTION_DEMO_STARTING,
+    APP_UI_EXCEPTION_DEMO_RUNNING,
+    APP_UI_EXCEPTION_DEMO_WEATHER,
+    APP_UI_EXCEPTION_DEMO_SAFE,
+    APP_UI_EXCEPTION_DEMO_FAILED,
+    APP_UI_EXCEPTION_DEMO_CH32_OFFLINE,
+} app_ui_exception_demo_state_t;
+
+bool app_ui_show_exception_demo_screen(void);
+void app_ui_exception_demo_set_state(app_ui_exception_demo_state_t state);
+void app_ui_exception_demo_update_ch32(int stage, uint8_t error);
+
 // 主屏取货按钮回调。
 typedef void (*app_ui_pickup_cb_t)(void);
 void app_ui_set_pickup_callback(app_ui_pickup_cb_t cb);
+
+typedef void (*app_ui_exception_demo_cb_t)(void);
+void app_ui_set_exception_demo_callback(app_ui_exception_demo_cb_t cb);
+
+typedef void (*app_ui_exception_back_cb_t)(void);
+void app_ui_set_exception_back_callback(app_ui_exception_back_cb_t cb);
 
 // 天气模拟和紧急保护按钮回调。
 typedef void (*app_ui_weather_sim_cb_t)(void);

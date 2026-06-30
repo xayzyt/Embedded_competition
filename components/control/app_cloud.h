@@ -23,6 +23,8 @@ bool app_cloud_is_mqtt_connected(void);
 // 设置或触发天气保护。
 void app_cloud_set_weather_simulated(bool simulated);
 void app_cloud_trigger_weather_emergency(void);
+esp_err_t app_cloud_trigger_weather_emergency_wait(void);
+esp_err_t app_cloud_trigger_weather_demo_protection_wait(void);
 // 查询天气保护状态。
 bool app_cloud_is_weather_simulated(void);
 bool app_cloud_is_weather_docking_blocked(void);

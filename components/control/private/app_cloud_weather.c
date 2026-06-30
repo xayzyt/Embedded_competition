@@ -157,7 +157,7 @@ static void app_cloud_show_weather_fallback(void)
         NULL);
 }
 // 恶劣天气紧急保护：优先安全关闭，失败再请求中止。
-static void app_cloud_send_weather_protection(void)
+static esp_err_t app_cloud_send_weather_protection(void)
 {
     if (!app_ch32_link_is_ready())
     {
@@ -166,7 +166,7 @@ static void app_cloud_send_weather_protection(void)
     esp_err_t ret = app_ch32_link_send_proto_cmd_and_wait_ack(APP_CH32_PROTO_CMD_SAFE_CLOSE, 3000);
     if (ret == ESP_OK)
     {
-        return;
+        return ESP_OK;
     }
     ESP_LOGW(TAG, "SAFE_CLOSE failed, fallback abort: %s", esp_err_to_name(ret));
     ret = app_ch32_link_send_proto_cmd_and_wait_ack(APP_CH32_PROTO_CMD_ABORT, APP_CLOUD_ABORT_WAIT_MS);
@@ -174,21 +174,23 @@ static void app_cloud_send_weather_protection(void)
     {
         ESP_LOGW(TAG, "abort dock for severe weather failed: %s", esp_err_to_name(ret));
     }
+    return ret;
 }
 // 将天气策略应用到任务状态机和 CH32 执行机构。
-static void app_cloud_apply_weather_docking_policy(bool simulated)
+static esp_err_t app_cloud_apply_weather_docking_policy(bool simulated)
 {
     s_cloud.weather_docking_blocked = simulated;
     if (!simulated)
     {
         s_cloud.weather_docking_policy_applied = false;
-        return;
+        return ESP_OK;
     }
     if (s_cloud.weather_docking_policy_applied)
     {
-        return;
+        return ESP_OK;
     }
     s_cloud.weather_docking_policy_applied = true;
+    esp_err_t ret = ESP_OK;
     app_task_snapshot_t snap = {0};
     const bool active_task = app_task_peek_snapshot(&snap) && app_cloud_snapshot_is_active_task(&snap);
     if (active_task)
@@ -204,16 +206,17 @@ static void app_cloud_apply_weather_docking_policy(bool simulated)
     }
     if (s_cloud.weather_mode == APP_CLOUD_WEATHER_MODE_EMERGENCY)
     {
-        app_cloud_send_weather_protection();
+        ret = app_cloud_send_weather_protection();
     }
     else if (active_task && app_ch32_link_is_ready())
     {
-        esp_err_t ret = app_ch32_link_send_proto_cmd_and_wait_ack(APP_CH32_PROTO_CMD_ABORT, APP_CLOUD_ABORT_WAIT_MS);
+        ret = app_ch32_link_send_proto_cmd_and_wait_ack(APP_CH32_PROTO_CMD_ABORT, APP_CLOUD_ABORT_WAIT_MS);
         if (ret != ESP_OK)
         {
             ESP_LOGW(TAG, "abort dock for severe weather failed: %s", esp_err_to_name(ret));
         }
     }
+    return ret;
 }
 // 主屏展示模拟恶劣天气，并把任务状态置为天气阻止。
 static void app_cloud_show_simulated_weather_ui(void)
@@ -448,7 +451,7 @@ void app_cloud_set_weather_simulated(bool simulated)
     app_cloud_notify_weather_task();
 }
 // 紧急保护入口：强制进入恶劣天气模式并立即执行保护策略。
-void app_cloud_trigger_weather_emergency(void)
+esp_err_t app_cloud_trigger_weather_emergency_wait(void)
 {
     s_cloud.weather_simulated = true;
     s_cloud.weather_docking_blocked = true;
@@ -457,8 +460,19 @@ void app_cloud_trigger_weather_emergency(void)
     s_cloud.weather_mode = APP_CLOUD_WEATHER_MODE_EMERGENCY;
     app_cloud_show_simulated_weather_ui();
     app_cloud_publish_current_state();
-    app_cloud_apply_weather_docking_policy(true);
+    esp_err_t ret = app_cloud_apply_weather_docking_policy(true);
     app_cloud_notify_weather_task();
+    return ret;
+}
+
+esp_err_t app_cloud_trigger_weather_demo_protection_wait(void)
+{
+    return app_cloud_send_weather_protection();
+}
+
+void app_cloud_trigger_weather_emergency(void)
+{
+    (void)app_cloud_trigger_weather_emergency_wait();
 }
 bool app_cloud_is_weather_simulated(void)
 {

@@ -10,6 +10,7 @@
 #include "app_dock_judge.h"
 #include "app_drone_ai.h"
 #include "app_task.h"
+#include "app_ui.h"
 #include "app_vision.h"
 
 // 自动对接控制主循环（运行在 Core 1 独立任务）
@@ -130,6 +131,10 @@ void app_ctrl_on_ch32_line(const app_ch32_line_t *msg, void *user_ctx)
 {
     (void)user_ctx;
     app_ctrl_runtime_on_ch32_line(msg);
+    if (msg != NULL && msg->type == APP_CH32_LINE_PROTO_STATUS)
+    {
+        app_ui_exception_demo_update_ch32((int)msg->proto_stage, msg->proto_detail);
+    }
 }
 
 // 初始化机械状态，并监听任务切换事件。

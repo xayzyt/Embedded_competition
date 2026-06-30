@@ -1,4 +1,6 @@
 #include <stdbool.h>
+#include <stdint.h>
+#include "esp_err.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "app_ai_capture.h"
@@ -20,6 +22,13 @@ static const char *TAG = "main";
 #define APP_TARGET_TAG_ID   (1U)
 #define APP_TAG_SIZE_MM     (60)
 #define APP_FOCAL_LENGTH_PX (314.0f)
+
+typedef struct {
+    bool core_ready;
+    bool services_ready;
+    const char *status_text;
+    app_ui_main_task_state_t ui_state;
+} app_runtime_start_result_t;
 
 // 初始化 NVS；分区格式不兼容或空间不足时擦除后重试。
 static void app_init_nvs(void)
@@ -67,23 +76,144 @@ static app_dock_judge_config_t app_make_dock_config(void)
     return cfg;
 }
 
-// 按依赖顺序初始化通信、视觉、任务、AI 和控制模块。
-static void app_init_runtime_modules(const app_dock_judge_config_t *dock_cfg)
+static bool app_record_start_step(const char *name,
+    int32_t progress,
+    esp_err_t ret,
+    bool fatal)
 {
+    app_ui_set_loading_progress(progress);
+    if (ret == ESP_OK)
+    {
+        ESP_LOGI(TAG, "%s ready", name);
+        return true;
+    }
+
+    if (fatal)
+    {
+        ESP_LOGE(TAG, "%s failed: %s", name, esp_err_to_name(ret));
+    }
+    else
+    {
+        ESP_LOGW(TAG, "%s disabled: %s", name, esp_err_to_name(ret));
+    }
+    return false;
+}
+
+static void app_mark_start_failure(app_runtime_start_result_t *result,
+    const char *status_text,
+    app_ui_main_task_state_t ui_state,
+    bool core_failed)
+{
+    result->status_text = status_text;
+    result->ui_state = ui_state;
+    if (core_failed)
+    {
+        result->core_ready = false;
+    }
+    result->services_ready = false;
+    app_ui_set_status(status_text);
+    app_ui_main_screen_set_task_state(ui_state);
+}
+
+// 按依赖顺序初始化通信、视觉、任务、AI 和控制模块。
+static app_runtime_start_result_t app_init_runtime_modules(const app_dock_judge_config_t *dock_cfg)
+{
+    app_runtime_start_result_t result = {
+        .core_ready = true,
+        .services_ready = true,
+        .status_text = dock_cfg->use_distance_gate ?
+            "task: configured / dist gate on" :
+            "task: configured / demo loose",
+        .ui_state = APP_UI_MAIN_TASK_CONFIGURED,
+    };
+
     app_ui_set_loading_progress(5);
-    ESP_ERROR_CHECK(app_ch32_link_init(app_ctrl_on_ch32_line, NULL));
-    app_ui_set_loading_progress(15);
-    ESP_ERROR_CHECK(app_vision_init());
-    app_ui_set_loading_progress(25);
-    ESP_ERROR_CHECK(app_dock_judge_init(dock_cfg));
-    app_ui_set_loading_progress(35);
-    ESP_ERROR_CHECK(app_task_init(APP_TARGET_TAG_ID));
-    app_ui_set_loading_progress(45);
-    ESP_ERROR_CHECK(app_drone_ai_init());
-    app_ui_set_loading_progress(55);
-    ESP_ERROR_CHECK(app_ctrl_init());
-    ESP_ERROR_CHECK(app_ctrl_start());
-    app_ui_set_loading_progress(65);
+    const bool ch32_ok = app_record_start_step("ch32 link",
+        15,
+        app_ch32_link_init(app_ctrl_on_ch32_line, NULL),
+        false);
+
+    if (!app_record_start_step("vision",
+        25,
+        app_vision_init(),
+        true))
+    {
+        app_mark_start_failure(&result,
+            "task: camera failed / vision init",
+            APP_UI_MAIN_TASK_CAMERA_FAILED,
+            true);
+        return result;
+    }
+
+    if (!app_record_start_step("dock judge",
+        35,
+        app_dock_judge_init(dock_cfg),
+        true))
+    {
+        app_mark_start_failure(&result,
+            "task: local mode / dock init failed",
+            APP_UI_MAIN_TASK_LOCAL_WAIT,
+            true);
+        return result;
+    }
+
+    if (!app_record_start_step("task state",
+        45,
+        app_task_init(APP_TARGET_TAG_ID),
+        true))
+    {
+        app_mark_start_failure(&result,
+            "task: local mode / task init failed",
+            APP_UI_MAIN_TASK_LOCAL_WAIT,
+            true);
+        return result;
+    }
+
+    if (!app_record_start_step("drone ai",
+        55,
+        app_drone_ai_init(),
+        false))
+    {
+        result.status_text = "task: configured / ai init failed";
+        result.ui_state = APP_UI_MAIN_TASK_CONFIGURED;
+        app_ui_set_status(result.status_text);
+        app_ui_main_screen_set_task_state(result.ui_state);
+    }
+
+    if (!ch32_ok)
+    {
+        app_mark_start_failure(&result,
+            "task: local mode / ch32 init failed",
+            APP_UI_MAIN_TASK_LOCAL_WAIT,
+            false);
+        app_ui_set_loading_progress(65);
+        return result;
+    }
+
+    if (!app_record_start_step("control init",
+        60,
+        app_ctrl_init(),
+        false))
+    {
+        app_mark_start_failure(&result,
+            "task: local mode / ctrl init failed",
+            APP_UI_MAIN_TASK_LOCAL_WAIT,
+            false);
+        app_ui_set_loading_progress(65);
+        return result;
+    }
+
+    if (!app_record_start_step("control task",
+        65,
+        app_ctrl_start(),
+        false))
+    {
+        app_mark_start_failure(&result,
+            "task: local mode / ctrl start failed",
+            APP_UI_MAIN_TASK_LOCAL_WAIT,
+            false);
+        return result;
+    }
 
     // 抓图是辅助功能，初始化失败时只关闭抓图，不中止系统启动。
     esp_err_t capture_ret = app_ai_capture_init();
@@ -91,15 +221,14 @@ static void app_init_runtime_modules(const app_dock_judge_config_t *dock_cfg)
     {
         ESP_LOGW(TAG, "AI capture disabled: %s", esp_err_to_name(capture_ret));
     }
+    return result;
 }
 
 // 在主屏显示系统就绪状态和当前距离限制模式。
-static void app_show_ready_status(const app_dock_judge_config_t *dock_cfg)
+static void app_show_runtime_status(const app_runtime_start_result_t *result)
 {
-    app_ui_set_status(dock_cfg->use_distance_gate ?
-        "task: configured / dist gate on" :
-        "task: configured / demo loose");
-    app_ui_main_screen_set_task_state(APP_UI_MAIN_TASK_CONFIGURED);
+    app_ui_set_status(result->status_text);
+    app_ui_main_screen_set_task_state(result->ui_state);
 }
 
 void app_main(void)
@@ -111,14 +240,27 @@ void app_main(void)
     }
 
     app_dock_judge_config_t dock_cfg = app_make_dock_config();
-    app_init_runtime_modules(&dock_cfg);
-    app_main_services_bind_ui_callbacks();
+    app_runtime_start_result_t runtime = app_init_runtime_modules(&dock_cfg);
 
     app_ui_show_main_screen();
     app_ui_hide_loading();
-    app_show_ready_status(&dock_cfg);
+    app_show_runtime_status(&runtime);
+    if (!runtime.core_ready || !runtime.services_ready)
+    {
+        ESP_LOGW(TAG, "startup degraded, background services not started");
+        return;
+    }
+
+    app_main_services_bind_ui_callbacks();
 
     // 先监听任务状态，再启动云端，避免云端任务先到而预览尚未准备切换。
-    (void)app_preview_controller_start();
+    esp_err_t preview_ret = app_preview_controller_start();
+    if (preview_ret != ESP_OK)
+    {
+        ESP_LOGW(TAG, "preview controller disabled: %s", esp_err_to_name(preview_ret));
+        app_ui_set_status("task: local mode / event worker failed");
+        app_ui_main_screen_set_task_state(APP_UI_MAIN_TASK_LOCAL_WAIT);
+        return;
+    }
     app_main_services_start();
 }
