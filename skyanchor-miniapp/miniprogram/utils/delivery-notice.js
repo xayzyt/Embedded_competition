@@ -2,10 +2,6 @@ const config = require('../config/index.js');
 
 const DELIVERY_MODAL_STORAGE_PREFIX = 'skyanchor_delivery_modal_seen_';
 
-function getDeliveryTemplateId() {
-  return String(config.deliveryCompleteTemplateId || '').trim();
-}
-
 function getDispatcherPhoneNumber() {
   return String(config.dispatcherPhoneNumber || '').trim();
 }
@@ -16,49 +12,6 @@ function getDispatcherContactName() {
 
 function hasDispatcherPhoneNumber() {
   return !!getDispatcherPhoneNumber();
-}
-
-function requestDeliveryCompleteSubscription() {
-  const templateId = getDeliveryTemplateId();
-  if (!templateId) {
-    return Promise.resolve({
-      enabled: false,
-      accepted: false,
-      templateId: '',
-      reason: 'template_missing'
-    });
-  }
-
-  if (!wx.requestSubscribeMessage) {
-    return Promise.resolve({
-      enabled: true,
-      accepted: false,
-      templateId,
-      reason: 'api_unavailable'
-    });
-  }
-
-  return new Promise((resolve) => {
-    wx.requestSubscribeMessage({
-      tmplIds: [templateId],
-      success(res) {
-        resolve({
-          enabled: true,
-          accepted: res[templateId] === 'accept',
-          templateId,
-          reason: String(res[templateId] || '')
-        });
-      },
-      fail(err) {
-        resolve({
-          enabled: true,
-          accepted: false,
-          templateId,
-          reason: (err && err.errMsg) || 'request_failed'
-        });
-      }
-    });
-  });
 }
 
 function buildDeliveryModalKey(orderId) {
@@ -109,6 +62,5 @@ module.exports = {
   getDispatcherPhoneNumber,
   hasDispatcherPhoneNumber,
   markDeliveryCompleteModalShown,
-  requestDeliveryCompleteSubscription,
   shouldShowDeliveryCompleteModal
 };

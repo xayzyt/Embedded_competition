@@ -66,10 +66,19 @@
           <view class="order-side">
             <view class="status-badge status-{{item.status}}">{{item.status_text}}</view>
             <button
+              wx:if="{{item.can_cancel}}"
+              class="cancel-order-btn"
+              loading="{{cancellingOrderId == item.order_id}}"
+              disabled="{{cancellingOrderId || clearingOrderId}}"
+              data-order-id="{{item.order_id}}"
+              data-order-name="{{item.order_name_text}}"
+              catchtap="cancelOrder"
+            >取消</button>
+            <button
               wx:if="{{item.can_clear}}"
               class="clear-order-btn"
               loading="{{clearingOrderId == item.order_id}}"
-              disabled="{{clearingOrderId}}"
+              disabled="{{clearingOrderId || cancellingOrderId}}"
               data-order-id="{{item.order_id}}"
               data-order-name="{{item.order_name_text}}"
               catchtap="clearOrder"

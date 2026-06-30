@@ -3,9 +3,7 @@ module.exports = {
   envId: 'cloud1-d5g90ikff6eed3f26',
   serviceFunctionName: 'skyanchorService',
   requestTimeout: 10000,
-  // 在微信公众平台申请“配送完成通知”订阅消息模板后，把模板 ID 填到这里和云函数中。
-  deliveryCompleteTemplateId: '',
-  // 用户主动点击“联系配送员”时才会拉起拨号界面；留空时页面会提示先配置号码。
-  dispatcherPhoneNumber: '',
+  // 用户主动点击“联系配送员”时才会拉起拨号界面；留空时不显示电话按钮。
+  dispatcherPhoneNumber: '15234711471',
   dispatcherContactName: '配送员'
 };

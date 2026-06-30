@@ -1,43 +1,12 @@
 ﻿<view class="page role-page">
   <view class="role-shell">
     <view class="brand-visual">
-      <view class="mission-panel">
-        <view class="flow-line flow-line-cloud"></view>
-        <view class="flow-line flow-line-tag"></view>
-        <view class="flow-dot flow-dot-cloud"></view>
-        <view class="flow-dot flow-dot-tag"></view>
-
-        <view class="cloud-node">
-          <view class="cloud-mark"></view>
-          <view class="node-label">云端</view>
-        </view>
-
-        <view class="chip-node">
-          <view class="chip-core">P4</view>
-          <view class="shield-mark"></view>
-        </view>
-
-        <view class="drone-unit">
-          <view class="drone-axis drone-axis-a"></view>
-          <view class="drone-axis drone-axis-b"></view>
-          <view class="drone-rotor drone-rotor-a"></view>
-          <view class="drone-rotor drone-rotor-b"></view>
-          <view class="drone-rotor drone-rotor-c"></view>
-          <view class="drone-rotor drone-rotor-d"></view>
-          <view class="drone-body">
-            <view class="drone-light"></view>
-          </view>
-          <view class="drone-cargo"></view>
-        </view>
-
-        <view class="tag-target">
-          <view class="tag-frame"></view>
-          <view class="tag-text">Tag</view>
-        </view>
+      <view class="contest-panel">
+        <image class="contest-logo-img" src="/assets/competition-logo.png" mode="aspectFit"></image>
       </view>
     </view>
     <view class="title role-title">SkyAnchor</view>
-    <view class="subtitle role-subtitle">智能配送演示</view>
+    <view class="subtitle role-subtitle">智能配送演示系统</view>
     <view class="role-copy">选择身份</view>
     <view class="button-row role-button-row">
       <button class="primary-btn role-btn" bindtap="openReceiverCenter">

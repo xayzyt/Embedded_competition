@@ -59,6 +59,7 @@ App({
       .getHealth()
       .then((payload) => {
         const nextStatus = buildServiceStatusFromHealth(payload);
+        this.globalData.deliveryNoticeTemplateId = String(payload && payload.delivery_notice_template_id || '').trim();
         this.globalData.serviceStatus = nextStatus;
         return nextStatus;
       })
@@ -77,6 +78,7 @@ App({
   globalData: {
     demoProfile: getDemoProfile(),
     receiverId: '',
+    deliveryNoticeTemplateId: '',
     serviceStatus: defaultServiceStatus()
   }
 });

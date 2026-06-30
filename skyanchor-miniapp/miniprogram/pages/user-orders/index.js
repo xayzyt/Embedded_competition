@@ -4,15 +4,26 @@ const { statusLabel } = require('../../utils/order-status-labels.js');
 const { defaultServiceStatus, showServiceDiagnostics: showDiagnostics, syncServiceStatus } = require('../../utils/service-status.js');
 const { formatApriltagValue } = require('../../utils/apriltag.js');
 const { formatOrderName } = require('../../utils/order-display.js');
-const { requestDeliveryCompleteSubscription } = require('../../utils/delivery-notice.js');
+const {
+  callDispatcher,
+  getDispatcherContactName,
+  hasDispatcherPhoneNumber,
+  markDeliveryCompleteModalShown,
+  shouldShowDeliveryCompleteModal
+} = require('../../utils/delivery-notice.js');
 
 const POLL_INTERVAL_MS = 3000;
 const HIDDEN_STATUSES = ['cancelled'];
-const CLEARABLE_STATUSES = ['created', 'delivered', 'failed', 'cancelled'];
+const TERMINAL_STATUSES = ['delivered', 'failed', 'cancelled'];
+const CLEARABLE_STATUSES = ['delivered', 'failed', 'cancelled'];
 const WEATHER_FAILURE_KEYWORDS = ['恶劣天气', '天气管制', '天气保护', '接收保护'];
 
 function canClearOrder(order) {
   return CLEARABLE_STATUSES.includes(order && order.status);
+}
+
+function canCancelOrder(order) {
+  return order && !TERMINAL_STATUSES.includes(order.status);
 }
 
 function decorateOrder(order) {
@@ -25,6 +36,7 @@ function decorateOrder(order) {
     apriltag_text: formatApriltagValue(order && order.target_id),
     note_text: noteText,
     is_failed: order && order.status === 'failed',
+    can_cancel: canCancelOrder(order),
     can_clear: canClearOrder(order)
   };
 }
@@ -48,6 +60,7 @@ Page({
     creating: false,
     loading: false,
     clearingOrderId: '',
+    cancellingOrderId: '',
     loadError: '',
     hasLoaded: false
   }, defaultServiceStatus()),
@@ -162,7 +175,6 @@ Page({
     }
 
     this._confirmingCreate = true;
-    const deliveryNotice = await requestDeliveryCompleteSubscription();
     const confirmed = await this.confirmCreateOrder();
     this._confirmingCreate = false;
     if (!confirmed) {
@@ -193,9 +205,7 @@ Page({
 
     try {
       const order = await api.createOrder({
-        receiver_id: receiverId,
-        delivery_notice_subscribed: deliveryNotice.accepted,
-        delivery_notice_template_id: deliveryNotice.templateId
+        receiver_id: receiverId
       });
 
       wx.hideLoading();
@@ -246,6 +256,19 @@ Page({
     });
   },
 
+  confirmCancelOrder(orderName) {
+    return new Promise((resolve) => {
+      wx.showModal({
+        title: '取消订单',
+        content: `确定取消 ${orderName || '该订单'} 吗？已开始配送的订单会同步通知板端停止任务。`,
+        confirmText: '取消订单',
+        cancelText: '返回',
+        success: (res) => resolve(!!res.confirm),
+        fail: () => resolve(false)
+      });
+    });
+  },
+
   async fetchOrders(options = {}) {
     const receiverId = this.data.receiverId.trim();
     const silent = !!options.silent;
@@ -289,12 +312,14 @@ Page({
         userId: receiverId
       });
 
+      const visibleOrders = filterVisibleOrders(orders.map(decorateOrder));
       this.setData({
-        orders: filterVisibleOrders(orders.map(decorateOrder)),
+        orders: visibleOrders,
         loadError: '',
         hasLoaded: true,
         loading: false
       });
+      this.maybeShowDeliveredOrderModal(visibleOrders);
     } catch (err) {
       const nextStatus = await syncServiceStatus(this, true);
       this.setData({
@@ -341,6 +366,68 @@ Page({
     }
 
     this.stopPolling();
+  },
+
+  maybeShowDeliveredOrderModal(orders) {
+    const deliveredOrder = (orders || []).find((item) => {
+      return item && item.status === 'delivered' && shouldShowDeliveryCompleteModal(item.order_id);
+    });
+    if (!deliveredOrder) {
+      return;
+    }
+
+    markDeliveryCompleteModalShown(deliveredOrder.order_id);
+    const canCallDispatcher = hasDispatcherPhoneNumber();
+    wx.showModal({
+      title: '配送已完成',
+      content: `您的 ${deliveredOrder.order_name_text} 已送达，请前往取件。${canCallDispatcher ? `如需协助可联系${getDispatcherContactName()}。` : ''}`,
+      confirmText: canCallDispatcher ? '联系配送员' : '我知道了',
+      cancelText: '稍后',
+      showCancel: canCallDispatcher,
+      success: (res) => {
+        if (res.confirm && canCallDispatcher) {
+          callDispatcher();
+        }
+      }
+    });
+  },
+
+  async cancelOrder(e) {
+    const orderId = e.currentTarget.dataset.orderId;
+    const orderName = e.currentTarget.dataset.orderName;
+    if (!orderId || this.data.cancellingOrderId) {
+      return;
+    }
+
+    const confirmed = await this.confirmCancelOrder(orderName);
+    if (!confirmed) {
+      return;
+    }
+
+    this.setData({ cancellingOrderId: orderId });
+    wx.showLoading({ title: '取消中' });
+
+    try {
+      await api.cancelOrder(orderId);
+      this.setData({
+        orders: this.data.orders.filter((item) => item.order_id !== orderId)
+      });
+      wx.hideLoading();
+      wx.showToast({
+        title: '已取消',
+        icon: 'success'
+      });
+      this.fetchOrders({ silent: true }).catch(() => {});
+    } catch (err) {
+      wx.hideLoading();
+      wx.showModal({
+        title: '取消失败',
+        content: err.message || '无法取消订单',
+        showCancel: false
+      });
+    } finally {
+      this.setData({ cancellingOrderId: '' });
+    }
   },
 
   async clearOrder(e) {

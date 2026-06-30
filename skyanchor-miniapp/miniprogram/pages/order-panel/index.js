@@ -252,7 +252,7 @@ function decorateOrder(order) {
     is_active: ACTIVE_STATUSES.includes(order.status),
     can_manual_retract: order.status === 'acting',
     can_cancel: !TERMINAL_STATUSES.includes(order.status),
-    show_contact_dispatcher: order.status === 'delivered',
+    show_contact_dispatcher: order.status === 'delivered' && hasDispatcherPhoneNumber(),
     primary_action: primaryAction.type,
     primary_action_text: primaryAction.text,
     primary_action_disabled: primaryAction.disabled

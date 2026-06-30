@@ -28,7 +28,7 @@ const MQTT_CONFIG = {
   qos: 1
 };
 // 申请微信订阅消息模板后填写。字段示例见 buildDeliveryNoticeData()。
-const DELIVERY_NOTICE_TEMPLATE_ID = '';
+const DELIVERY_NOTICE_TEMPLATE_ID = 'VDW0I3ahja-JvOUwJNv45DvNgZx3XO79HIFnS_Ix5EE';
 const DELIVERY_NOTICE_MINIPROGRAM_STATE = 'trial';
 const DELIVERY_NOTICE_LANG = 'zh_CN';
 const STATUS_INDEX = {
@@ -130,13 +130,10 @@ function buildDeliveryNoticeData(order) {
     phrase2: {
       value: '已送达'
     },
-    thing3: {
-      value: clipTemplateValue(`Tag ${normalizeTargetId(order && order.target_id)}`)
-    },
-    time4: {
+    time3: {
       value: formatNoticeTime(order && (order.delivered_at || order.updated_at))
     },
-    thing5: {
+    thing4: {
       value: '请前往取件'
     }
   };
@@ -780,6 +777,7 @@ async function handleHealth() {
     state_topic: buildStateTopic(DEFAULT_DEVICE_NAME),
     command_topic: buildCommandTopic(DEFAULT_DEVICE_NAME),
     ack_topic: buildAckTopic(DEFAULT_DEVICE_NAME),
+    delivery_notice_template_id: DELIVERY_NOTICE_TEMPLATE_ID,
     mode: 'cloud-mqtt'
   };
 }
@@ -1075,6 +1073,10 @@ async function handleCancelOrder(payload) {
       order_id: orderId,
       status: 'cancelled'
     };
+  }
+
+  if (TERMINAL_ORDER_STATUSES.includes(order.status)) {
+    throw new AppError(`当前状态 ${order.status} 不能取消订单`);
   }
 
   if (order.status !== 'created') {

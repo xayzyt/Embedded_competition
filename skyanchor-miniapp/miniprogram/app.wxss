@@ -510,7 +510,8 @@ button::after {
   margin-top: 0;
 }
 
-.clear-order-btn {
+.clear-order-btn,
+.cancel-order-btn {
   width: auto;
   min-width: 88rpx;
   height: 46rpx;
@@ -524,12 +525,23 @@ button::after {
   font-weight: 800;
 }
 
-.clear-order-btn::after {
+.clear-order-btn::after,
+.cancel-order-btn::after {
   border: 2rpx solid #e2e8f0;
   border-radius: 999rpx;
 }
 
-.clear-order-btn[disabled] {
+.cancel-order-btn {
+  background: #fff7ed;
+  color: #c2410c;
+}
+
+.cancel-order-btn::after {
+  border-color: #fed7aa;
+}
+
+.clear-order-btn[disabled],
+.cancel-order-btn[disabled] {
   color: #94a3b8;
   background: #f1f5f9;
 }

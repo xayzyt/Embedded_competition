@@ -42,6 +42,7 @@ function defaultServiceStatus() {
     serviceDeviceStateReady: false,
     serviceDeviceStateText: '-',
     serviceDefaultDevice: '-',
+    serviceDeliveryNoticeTemplateId: '',
     serviceMode: '-',
     serviceLastCheckedAt: 0,
     serviceLastCheckedText: '未检查'
@@ -151,6 +152,7 @@ function buildServiceStatusFromHealth(payload) {
     serviceDeviceStateReady: deviceStateReady,
     serviceDeviceStateText: String(payload && payload.device_state || '').trim() || (deviceStateReady ? 'ready' : '-'),
     serviceDefaultDevice: String(payload && payload.default_device || '-'),
+    serviceDeliveryNoticeTemplateId: String(payload && payload.delivery_notice_template_id || '').trim(),
     serviceMode: String(payload && payload.mode || '-'),
     serviceLastCheckedAt: checkedAt,
     serviceLastCheckedText: formatClockTime(checkedAt)
