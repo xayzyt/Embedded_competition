@@ -5,6 +5,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "app_audio_prompt.h"
 #include "app_ctrl_runtime.h"
 #include "app_ctrl_ui.h"
 #include "app_dock_judge.h"
@@ -34,6 +35,7 @@ typedef struct {
     bool prev_ready_level;
     bool prev_dock_busy;
     bool prev_apriltag_enabled;
+    app_ch32_proto_stage_t prev_proto_stage;
     uint32_t gate_open_vision_seq;
 } app_ctrl_loop_history_t;
 
@@ -54,6 +56,12 @@ static void app_ctrl_on_task_event(app_task_event_t event,
     switch (snap->state) {
     case APP_TASK_STATE_WAIT_APPROACH:
     case APP_TASK_STATE_COMPLETED:
+        if (snap->state == APP_TASK_STATE_COMPLETED)
+        {
+            (void)app_audio_prompt_request_docking_complete();
+        }
+        app_drone_ai_reset_gate();
+        break;
     case APP_TASK_STATE_FAULT:
     case APP_TASK_STATE_CANCELLED:
         app_drone_ai_reset_gate();
@@ -61,6 +69,27 @@ static void app_ctrl_on_task_event(app_task_event_t event,
     default:
         break;
     }
+}
+
+static void app_ctrl_request_proto_stage_prompt(app_ctrl_loop_history_t *history,
+    app_ch32_proto_stage_t stage)
+{
+    if (history->prev_proto_stage == stage)
+    {
+        return;
+    }
+
+    switch (stage) {
+    case APP_CH32_STAGE_DOOR_OPENING:
+        (void)app_audio_prompt_request_outer_door_opening();
+        break;
+    case APP_CH32_STAGE_TRAY_RETRACTING:
+        (void)app_audio_prompt_request_tray_retracting();
+        break;
+    default:
+        break;
+    }
+    history->prev_proto_stage = stage;
 }
 
 // 只有 AI 已确认无人机且任务正在等待靠近时才开启 AprilTag。
@@ -111,13 +140,22 @@ static void app_ctrl_task(void *arg)
 
         // AI 未确认时不使用 AprilTag 结果。
         cycle.apriltag_enabled = app_ctrl_apriltag_enabled(&cycle.task);
+        if (cycle.apriltag_enabled && !history.prev_apriltag_enabled)
+        {
+            (void)app_audio_prompt_request_drone_identified();
+        }
         app_ctrl_apply_vision_gate(&history, cycle.apriltag_enabled, &cycle.vision);
         (void)app_dock_judge_process(&cycle.vision, &cycle.dock);
 
         // READY 从 false 变为 true 时才触发一次自动接驳。
         cycle.ready_level = cycle.dock.vision_valid &&
             cycle.dock.state == APP_DOCK_STATE_READY_TO_DOCK;
+        if (cycle.ready_level && !history.prev_ready_level)
+        {
+            (void)app_audio_prompt_request_apriltag_located();
+        }
         app_ctrl_runtime_step(&cycle);
+        app_ctrl_request_proto_stage_prompt(&history, cycle.runtime.proto_stage);
         app_ctrl_ui_publish(&cycle);
 
         history.prev_ready_level = cycle.ready_level;

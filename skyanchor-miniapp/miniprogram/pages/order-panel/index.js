@@ -727,21 +727,6 @@ Page({
       return;
     }
 
-    const confirmed = await new Promise((resolve) => {
-      wx.showModal({
-        title: '手动回收托盘',
-        content: '请确认货物已放好，再回收托盘并关闭舱门。',
-        confirmText: '回收',
-        cancelText: '取消',
-        success: (res) => resolve(!!res.confirm),
-        fail: () => resolve(false)
-      });
-    });
-
-    if (!confirmed) {
-      return;
-    }
-
     await this.runAction(() => api.manualRetractOrder(this.data.orderId), '已请求回收');
   },
 

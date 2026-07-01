@@ -12,6 +12,7 @@
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "app_ch32_link.h"
+#include "app_audio_prompt.h"
 #include "app_ui.h"
 
 // 天气子模块：拉取心知天气、缓存主屏展示，并在恶劣天气时阻止/中止对接。
@@ -190,6 +191,7 @@ static esp_err_t app_cloud_apply_weather_docking_policy(bool simulated)
         return ESP_OK;
     }
     s_cloud.weather_docking_policy_applied = true;
+    (void)app_audio_prompt_request_weather_paused();
     esp_err_t ret = ESP_OK;
     app_task_snapshot_t snap = {0};
     const bool active_task = app_task_peek_snapshot(&snap) && app_cloud_snapshot_is_active_task(&snap);
@@ -375,6 +377,11 @@ static void app_cloud_weather_task(void *arg)
             continue;
         }
         if (!app_cloud_is_wifi_connected())
+        {
+            (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000));
+            continue;
+        }
+        if (!app_cloud_is_mqtt_connected())
         {
             (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000));
             continue;

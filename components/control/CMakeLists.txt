@@ -15,6 +15,7 @@ idf_component_register(
     PRIV_INCLUDE_DIRS "private"
     REQUIRES
         app_types
+        audio_prompt
         vision_ui
         drone_ai
         nvs_flash

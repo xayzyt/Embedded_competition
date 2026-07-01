@@ -18,6 +18,34 @@ const TERMINAL_STATUSES = ['delivered', 'failed', 'cancelled'];
 const CLEARABLE_STATUSES = ['delivered', 'failed', 'cancelled'];
 const WEATHER_FAILURE_KEYWORDS = ['恶劣天气', '天气管制', '天气保护', '接收保护'];
 
+function requestDeliveryNoticeSubscription(templateId) {
+  const nextTemplateId = String(templateId || '').trim();
+  if (!nextTemplateId || !wx.requestSubscribeMessage) {
+    return Promise.resolve({
+      subscribed: false,
+      templateId: nextTemplateId
+    });
+  }
+
+  return new Promise((resolve) => {
+    wx.requestSubscribeMessage({
+      tmplIds: [nextTemplateId],
+      success: (res) => {
+        resolve({
+          subscribed: res && res[nextTemplateId] === 'accept',
+          templateId: nextTemplateId
+        });
+      },
+      fail: () => {
+        resolve({
+          subscribed: false,
+          templateId: nextTemplateId
+        });
+      }
+    });
+  });
+}
+
 function canClearOrder(order) {
   return CLEARABLE_STATUSES.includes(order && order.status);
 }
@@ -74,7 +102,6 @@ Page({
     this._pageVisible = false;
     this._pollTimer = null;
     this._polling = false;
-    this._confirmingCreate = false;
 
     this.setData({ receiverId });
     this.initializePage(!!receiverId);
@@ -170,19 +197,16 @@ Page({
     app.globalData.receiverId = receiverId;
     wx.setStorageSync('skyanchor_receiver_id', receiverId);
 
-    if (this.data.creating || this._confirmingCreate) {
+    if (this.data.creating) {
       return;
     }
 
-    this._confirmingCreate = true;
-    const confirmed = await this.confirmCreateOrder();
-    this._confirmingCreate = false;
-    if (!confirmed) {
-      return;
-    }
-
+    this.setData({ creating: true });
+    const cachedTemplateId = app.globalData.deliveryNoticeTemplateId || this.data.serviceDeliveryNoticeTemplateId;
+    let deliveryNotice = await requestDeliveryNoticeSubscription(cachedTemplateId);
     const serviceStatus = await syncServiceStatus(this, true);
     if (!serviceStatus.serviceOnline) {
+      this.setData({ creating: false });
       wx.showModal({
         title: serviceStatus.serviceBlockTitle || '云端服务未连接',
         content: serviceStatus.serviceBlockAdvice || serviceStatus.serviceMessage,
@@ -192,6 +216,7 @@ Page({
     }
 
     if (serviceStatus.serviceActionBlocked) {
+      this.setData({ creating: false });
       wx.showModal({
         title: serviceStatus.serviceBlockTitle || '服务暂不可用',
         content: serviceStatus.serviceBlockAdvice || serviceStatus.serviceMessage,
@@ -200,12 +225,17 @@ Page({
       return;
     }
 
-    this.setData({ creating: true });
+    if (!deliveryNotice.templateId && serviceStatus.serviceDeliveryNoticeTemplateId) {
+      deliveryNotice = await requestDeliveryNoticeSubscription(serviceStatus.serviceDeliveryNoticeTemplateId);
+    }
+
     wx.showLoading({ title: '提交订单中' });
 
     try {
       const order = await api.createOrder({
-        receiver_id: receiverId
+        receiver_id: receiverId,
+        delivery_notice_subscribed: deliveryNotice.subscribed,
+        delivery_notice_template_id: deliveryNotice.templateId
       });
 
       wx.hideLoading();
@@ -228,19 +258,6 @@ Page({
     } finally {
       this.setData({ creating: false });
     }
-  },
-
-  confirmCreateOrder() {
-    return new Promise((resolve) => {
-      wx.showModal({
-        title: '确认下单',
-        content: '确定现在提交一笔新的配送订单吗？',
-        confirmText: '确定',
-        cancelText: '取消',
-        success: (res) => resolve(!!res.confirm),
-        fail: () => resolve(false)
-      });
-    });
   },
 
   confirmClearOrder(orderName) {

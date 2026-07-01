@@ -5,6 +5,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "app_audio_prompt.h"
 #include "app_camera.h"
 #include "app_ch32_link.h"
 #include "app_cloud.h"
@@ -28,6 +29,9 @@ static portMUX_TYPE s_exception_demo_mux = portMUX_INITIALIZER_UNLOCKED;
 static bool s_weather_emergency_running = false;
 static bool s_exception_demo_running = false;
 static bool s_cloud_start_requested = false;
+static bool s_audio_prompt_started = false;
+static bool s_ready_prompt_requested = false;
+static bool s_ready_prompt_error_logged = false;
 static uint8_t s_exception_weather_arg = 0;
 static TaskHandle_t s_status_task = NULL;
 
@@ -79,6 +83,23 @@ static void app_start_cloud_async(void)
         app_ui_set_status("task: local mode / cloud start failed");
         app_ui_main_screen_set_task_state(APP_UI_MAIN_TASK_LOCAL_WAIT);
     }
+}
+
+static void app_start_audio_prompt_task(void)
+{
+    if (s_audio_prompt_started)
+    {
+        return;
+    }
+
+    esp_err_t ret = app_audio_prompt_init();
+    if (ret == ESP_OK)
+    {
+        s_audio_prompt_started = true;
+        return;
+    }
+
+    ESP_LOGW(TAG, "audio prompt disabled: %s", esp_err_to_name(ret));
 }
 
 // 处理取货按钮：检查天气和任务状态后请求 CH32 打开内门。
@@ -283,10 +304,25 @@ static void app_main_screen_status_task(void *arg)
     {
         app_cloud_status_t cloud = {0};
         app_cloud_get_status(&cloud);
+        const bool ch32_ready = app_ch32_link_is_ready();
         app_ui_main_screen_update_status(
             cloud.wifi_connected,
             cloud.mqtt_connected,
-            app_ch32_link_is_ready());
+            ch32_ready);
+        if (!s_ready_prompt_requested && cloud.mqtt_connected && ch32_ready)
+        {
+            esp_err_t ret = app_audio_prompt_request_ready();
+            if (ret == ESP_OK)
+            {
+                s_ready_prompt_requested = true;
+                ESP_LOGI(TAG, "ready prompt requested after MQTT and CH32 ready");
+            }
+            else if (!s_ready_prompt_error_logged)
+            {
+                s_ready_prompt_error_logged = true;
+                ESP_LOGW(TAG, "ready prompt request failed: %s", esp_err_to_name(ret));
+            }
+        }
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
@@ -302,6 +338,7 @@ void app_main_services_bind_ui_callbacks(void)
 
 void app_main_services_start(void)
 {
+    app_start_audio_prompt_task();
     app_start_cloud_async();
     if (s_status_task != NULL)
     {

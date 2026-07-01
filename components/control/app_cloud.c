@@ -308,7 +308,6 @@ static void app_cloud_wifi_event_handler(void *arg,
         app_cloud_ensure_dns_after_ip();
         app_cloud_start_sntp_once();
         app_cloud_start_weather_task_once();
-        app_cloud_notify_weather_task();
         xEventGroupSetBits(s_cloud.event_group,
             APP_CLOUD_WIFI_CONNECTED_BIT | APP_CLOUD_START_MQTT_BIT);
     }
@@ -333,6 +332,8 @@ static void app_cloud_mqtt_event_handler(void *handler_args,
         {
             app_cloud_publish_task_snapshot_internal(&s_cloud.last_snapshot);
         }
+        app_cloud_start_weather_task_once();
+        app_cloud_notify_weather_task();
         break;
     case MQTT_EVENT_DISCONNECTED:
         ESP_LOGW(TAG, "EMQX mqtt disconnected");
