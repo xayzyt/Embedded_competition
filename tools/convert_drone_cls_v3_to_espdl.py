@@ -27,10 +27,18 @@ class ImageNetCalibrationDataset(Dataset):
         return len(self.paths)
 
     def __getitem__(self, index: int) -> torch.Tensor:
-        image = Image.open(self.paths[index]).convert("RGB").resize((128, 128), Image.BILINEAR)
+        image = center_crop_square(Image.open(self.paths[index]).convert("RGB")).resize((128, 128), Image.BILINEAR)
         data = torch.frombuffer(bytearray(image.tobytes()), dtype=torch.uint8)
         data = data.view(128, 128, 3).permute(2, 0, 1).to(torch.float32).div_(255.0)
         return (data - IMAGENET_MEAN) / IMAGENET_STD
+
+
+def center_crop_square(image: Image.Image) -> Image.Image:
+    width, height = image.size
+    side = min(width, height)
+    left = (width - side) // 2
+    top = (height - side) // 2
+    return image.crop((left, top, left + side, top + side))
 
 
 def collect_images(data_root: Path, limit: int) -> list[Path]:

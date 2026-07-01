@@ -5,13 +5,15 @@
 #include "app_task.h"
 
 // 视觉检测频率高于无人机分类频率，避免两个重任务每帧同时运行。
-#define VISION_SAMPLE_INTERVAL   2
-#define DRONE_AI_SAMPLE_INTERVAL 16
+#define VISION_SAMPLE_INTERVAL   6
+#define DRONE_AI_SAMPLE_INTERVAL 8
+#define APRILTAG_GATE_SETTLE_FRAMES 12U
 
 // 这些计数器只由相机帧回调访问，不需要额外加锁。
 typedef struct {
     uint32_t vision_sample_skip;   // 距离上次视觉提交已经跳过的帧数。
     uint32_t drone_ai_sample_skip; // 距离上次 AI 提交已经跳过的帧数。
+    uint32_t apriltag_settle_remaining; // AI 确认后先保留几帧预览，避免立刻压垮显示链路。
     bool apriltag_gate_was_open;   // 用于识别门控从关闭到打开的边沿。
 } app_camera_route_runtime_t;
 
@@ -71,14 +73,18 @@ app_camera_frame_route_t app_camera_route_select(void)
     if (capture_active || !apriltag_gate_open)
     {
         s_route.vision_sample_skip = 0;
+        s_route.apriltag_settle_remaining = 0;
         s_route.apriltag_gate_was_open = false;
     }
     else if (!s_route.apriltag_gate_was_open)
     {
-        // 门控刚打开时立即提交首帧，避免额外等待一个抽样周期。
         s_route.vision_sample_skip = 0;
         s_route.apriltag_gate_was_open = true;
-        route.vision_due = true;
+        s_route.apriltag_settle_remaining = APRILTAG_GATE_SETTLE_FRAMES;
+    }
+    else if (s_route.apriltag_settle_remaining > 0U)
+    {
+        s_route.apriltag_settle_remaining--;
     }
     else if (++s_route.vision_sample_skip >= VISION_SAMPLE_INTERVAL)
     {

@@ -37,7 +37,6 @@ static const char *TAG = "drone_ai";
 #define DRONE_AI_THRESHOLD            0.85f
 #define DRONE_AI_CONFIRM_HITS         3U
 #define DRONE_AI_HIT_MIN_INTERVAL_MS  800U
-#define DRONE_AI_CONFIRM_DISPLAY_MS   1000U
 #define DRONE_AI_MOTION_REJECT_DIFF   80U
 #define DRONE_AI_MOTION_COOLDOWN_MS   500U
 #define DRONE_AI_MALLOC_PSRAM_LIMIT   0U
@@ -574,6 +573,10 @@ static void app_drone_ai_update_result(uint32_t frame_seq,
                 {
                     s_hit_count++;
                 }
+                if (s_hit_count >= DRONE_AI_CONFIRM_HITS)
+                {
+                    s_confirmed = true;
+                }
             }
         }
     }
@@ -617,11 +620,8 @@ static void app_drone_ai_task(void *arg)
             const int64_t start_us = esp_timer_get_time();
             s_model->run();
             const uint32_t infer_ms = (uint32_t)((esp_timer_get_time() - start_us) / 1000ULL);
-            taskENTER_CRITICAL(&s_ai_mux);
-            s_busy = false;
-            taskEXIT_CRITICAL(&s_ai_mux);
-            float logits[2] = {0.0f, 0.0f};
 
+            float logits[2] = {0.0f, 0.0f};
             ret = app_drone_ai_read_logits(logits);
             if (ret == ESP_OK)
             {
@@ -630,6 +630,7 @@ static void app_drone_ai_task(void *arg)
                 app_drone_ai_softmax2(logits, &nodrone_score, &drone_score);
                 taskENTER_CRITICAL(&s_ai_mux);
                 const uint8_t previous_hit_count = s_hit_count;
+                const bool previous_confirmed = s_confirmed;
                 taskEXIT_CRITICAL(&s_ai_mux);
                 app_drone_ai_update_result(slot->seq,
                                            infer_ms,
@@ -643,8 +644,6 @@ static void app_drone_ai_task(void *arg)
                 const uint32_t infer_count = s_infer_count;
                 const uint8_t hit_count = s_hit_count;
                 const bool confirmed = s_confirmed;
-                const bool confirmation_pending =
-                    !s_confirmed && s_hit_count >= DRONE_AI_CONFIRM_HITS;
                 taskEXIT_CRITICAL(&s_ai_mux);
 
                 if (infer_count == 1U ||
@@ -663,18 +662,12 @@ static void app_drone_ai_task(void *arg)
                              confirmed ? 1U : 0U);
                 }
 
-                if (confirmation_pending)
+                if (!previous_confirmed && confirmed)
                 {
-                    // Leave 3/3 visible before switching the camera route to
-                    // AprilTag. A reset during this delay cancels confirmation.
-                    vTaskDelay(pdMS_TO_TICKS(DRONE_AI_CONFIRM_DISPLAY_MS));
-                    taskENTER_CRITICAL(&s_ai_mux);
-                    if (s_hit_count >= DRONE_AI_CONFIRM_HITS)
-                    {
-                        s_confirmed = true;
-                        s_latest.confirmed = true;
-                    }
-                    taskEXIT_CRITICAL(&s_ai_mux);
+                    ESP_LOGI(TAG,
+                             "confirmed after %u/%u hits",
+                             (unsigned)hit_count,
+                             (unsigned)DRONE_AI_CONFIRM_HITS);
                 }
             }
         }
@@ -784,10 +777,9 @@ esp_err_t app_drone_ai_submit_frame(const uint8_t *rgb565,
     }
 
     taskENTER_CRITICAL(&s_ai_mux);
-    const bool gate_complete_or_pending =
-        s_confirmed || s_hit_count >= DRONE_AI_CONFIRM_HITS;
+    const bool gate_complete = s_confirmed;
     taskEXIT_CRITICAL(&s_ai_mux);
-    if (gate_complete_or_pending)
+    if (gate_complete)
     {
         return ESP_OK;
     }
