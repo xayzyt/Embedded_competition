@@ -9,7 +9,6 @@
 #include "app_camera.h"
 #include "app_ch32_link.h"
 #include "app_cloud.h"
-#include "app_task.h"
 #include "app_ui.h"
 
 // 处理主屏按钮，并启动云端和连接状态刷新任务。
@@ -39,9 +38,8 @@ static bool app_weather_emergency_try_begin(void);
 static void app_weather_emergency_finish(void);
 static void app_weather_emergency_task(void *arg);
 
-static void app_show_main_state(app_ui_main_task_state_t state, bool show_pickup)
+static void app_show_main_state(app_ui_main_task_state_t state)
 {
-    app_ui_main_screen_show_pickup(show_pickup);
     app_ui_main_screen_set_task_state(state);
 }
 
@@ -102,34 +100,15 @@ static void app_start_audio_prompt_task(void)
     ESP_LOGW(TAG, "audio prompt disabled: %s", esp_err_to_name(ret));
 }
 
-// 处理取货按钮：检查天气和任务状态后请求 CH32 打开内门。
-static void app_pickup_cb(void)
+static void app_voice_toggle_cb(void)
 {
-    if (app_cloud_is_weather_docking_blocked())
-    {
-        app_show_main_state(APP_UI_MAIN_TASK_WEATHER_BLOCKED, false);
-        return;
-    }
-
-    app_task_snapshot_t snap = {0};
-    if (!app_task_peek_snapshot(&snap) || snap.state != APP_TASK_STATE_COMPLETED)
-    {
-        app_show_main_state(APP_UI_MAIN_TASK_PICKUP_FAILED, false);
-        return;
-    }
-
-    // 开门命令必须收到 CH32 确认，失败时保留取货按钮供用户重试。
-    esp_err_t ret = app_ch32_link_send_proto_cmd_and_wait_ack(
-        APP_CH32_PROTO_CMD_OPEN_INNER_DOOR,
-        2000);
+    const bool next_enabled = !app_audio_prompt_is_enabled();
+    esp_err_t ret = app_audio_prompt_set_enabled(next_enabled, true);
     if (ret != ESP_OK)
     {
-        ESP_LOGW(TAG, "open inner door failed: %s", esp_err_to_name(ret));
-        app_show_main_state(APP_UI_MAIN_TASK_PICKUP_FAILED, true);
-        return;
+        ESP_LOGW(TAG, "set voice enabled failed: %s", esp_err_to_name(ret));
     }
-
-    app_show_main_state(APP_UI_MAIN_TASK_WAITING, false);
+    app_ui_main_screen_set_voice_enabled(app_audio_prompt_is_enabled());
 }
 
 static bool app_exception_demo_try_begin(void)
@@ -183,7 +162,6 @@ static void app_exception_demo_task(void *arg)
 static void app_exception_demo_cb(void)
 {
     app_camera_pause();
-    app_ui_main_screen_show_pickup(false);
     app_ui_main_screen_set_task_text("异常演示");
     if (!app_ui_show_exception_demo_screen())
     {
@@ -231,7 +209,7 @@ static void app_weather_sim_cb(void)
 
 static void app_exception_back_cb(void)
 {
-    app_show_main_state(APP_UI_MAIN_TASK_WAITING, false);
+    app_show_main_state(APP_UI_MAIN_TASK_WAITING);
     (void)app_ui_show_main_screen();
 }
 
@@ -276,7 +254,7 @@ static void app_weather_emergency_cb(void)
 {
     app_camera_pause();
     app_ui_show_main_screen();
-    app_show_main_state(APP_UI_MAIN_TASK_WEATHER_BLOCKED, false);
+    app_show_main_state(APP_UI_MAIN_TASK_WEATHER_BLOCKED);
     if (app_cloud_is_weather_docking_blocked() || !app_weather_emergency_try_begin())
     {
         return;
@@ -329,8 +307,9 @@ static void app_main_screen_status_task(void *arg)
 
 void app_main_services_bind_ui_callbacks(void)
 {
-    app_ui_set_pickup_callback(app_pickup_cb);
     app_ui_set_exception_demo_callback(app_exception_demo_cb);
+    app_ui_set_voice_toggle_callback(app_voice_toggle_cb);
+    app_ui_main_screen_set_voice_enabled(app_audio_prompt_is_enabled());
     app_ui_set_exception_back_callback(app_exception_back_cb);
     app_ui_set_weather_sim_callback(app_weather_sim_cb);
     app_ui_set_weather_emergency_callback(app_weather_emergency_cb);

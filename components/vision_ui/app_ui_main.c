@@ -7,7 +7,7 @@
 #include "bsp/esp-bsp.h"
 #include "bsp/display.h"
 
-// 主屏 UI：展示任务阶段、连接状态、天气、时钟和取货按钮。
+// 主屏 UI：展示任务阶段、连接状态、天气、时钟、异常演示和语音开关。
 
 const lv_image_dsc_t *app_ui_weather_image_src(int weather_code);
 
@@ -23,7 +23,7 @@ LV_IMAGE_DECLARE(logo);
 #define UI_CLOCK_VALID_EPOCH    1704067200LL
 #define UI_CLOCK_TIMEZONE       "CST-8"
 #define UI_TASK_BLINK_MS        520
-#define UI_MAIN_PHASE_COUNT     4
+#define UI_MAIN_PHASE_COUNT     3
 #define UI_MAIN_PHASE_DOCK_IDX  2
 #define UI_EXCEPTION_PHASE_COUNT 4
 static lv_obj_t *s_main_layer = NULL;
@@ -48,7 +48,8 @@ static lv_obj_t *s_main_weather_icon = NULL;
 static lv_obj_t *s_main_weather_label = NULL;
 static lv_obj_t *s_main_exception_btn = NULL;
 static lv_obj_t *s_main_exception_label = NULL;
-static lv_obj_t *s_main_pickup_btn = NULL;
+static lv_obj_t *s_main_voice_btn = NULL;
+static lv_obj_t *s_main_voice_label = NULL;
 static lv_obj_t *s_exception_layer = NULL;
 static lv_obj_t *s_exception_status_label = NULL;
 static lv_obj_t *s_exception_detail_label = NULL;
@@ -64,8 +65,8 @@ static lv_obj_t *s_exception_phase_box[UI_EXCEPTION_PHASE_COUNT] = {0};
 static lv_obj_t *s_exception_phase_label[UI_EXCEPTION_PHASE_COUNT] = {0};
 static lv_timer_t *s_main_clock_timer = NULL;
 static lv_timer_t *s_main_task_blink_timer = NULL;
-static app_ui_pickup_cb_t s_pickup_cb = NULL;
 static app_ui_exception_demo_cb_t s_exception_demo_cb = NULL;
+static app_ui_voice_toggle_cb_t s_voice_toggle_cb = NULL;
 static app_ui_exception_back_cb_t s_exception_back_cb = NULL;
 static app_ui_weather_sim_cb_t s_weather_sim_cb = NULL;
 static bool s_clock_tz_set = false;
@@ -77,7 +78,7 @@ static bool s_main_status_wifi_ok = false;
 static bool s_main_status_mqtt_ok = false;
 static bool s_main_status_ch32_ok = false;
 static bool s_main_task_weather_blocked = false;
-static bool s_main_pickup_phase_active = false;
+static bool s_main_voice_enabled = true;
 static app_ui_main_task_state_t s_main_task_state = APP_UI_MAIN_TASK_WAITING;
 static app_ui_exception_demo_state_t s_exception_state = APP_UI_EXCEPTION_DEMO_READY;
 static int s_exception_last_stage = 0;
@@ -123,13 +124,13 @@ static lv_obj_t *app_ui_create_soft_panel(lv_obj_t *parent,
     lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
     return panel;
 }
-void app_ui_set_pickup_callback(app_ui_pickup_cb_t cb)
-{
-    s_pickup_cb = cb;
-}
 void app_ui_set_exception_demo_callback(app_ui_exception_demo_cb_t cb)
 {
     s_exception_demo_cb = cb;
+}
+void app_ui_set_voice_toggle_callback(app_ui_voice_toggle_cb_t cb)
+{
+    s_voice_toggle_cb = cb;
 }
 void app_ui_set_exception_back_callback(app_ui_exception_back_cb_t cb)
 {
@@ -142,18 +143,6 @@ void app_ui_set_weather_sim_callback(app_ui_weather_sim_cb_t cb)
 
 /* ---------- 主屏按钮事件 ---------- */
 
-// 取货按钮事件，具体开门动作由 main 注册的回调完成。
-static void app_ui_pickup_event_cb(lv_event_t *e)
-{
-    if (lv_event_get_code(e) != LV_EVENT_CLICKED)
-    {
-        return;
-    }
-    if (s_pickup_cb != NULL)
-    {
-        s_pickup_cb();
-    }
-}
 static void app_ui_exception_demo_event_cb(lv_event_t *e)
 {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED)
@@ -163,6 +152,17 @@ static void app_ui_exception_demo_event_cb(lv_event_t *e)
     if (s_exception_demo_cb != NULL)
     {
         s_exception_demo_cb();
+    }
+}
+static void app_ui_voice_toggle_event_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED)
+    {
+        return;
+    }
+    if (s_voice_toggle_cb != NULL)
+    {
+        s_voice_toggle_cb();
     }
 }
 // 天气模拟按钮事件，用于演示恶劣天气保护。
@@ -323,7 +323,7 @@ static void app_ui_apply_main_phase_style_unlocked(int index, bool ready, bool d
             (ready ? lv_color_hex(0x0F766E) : lv_color_hex(0x475569)),
         0);
 }
-// 根据连接/天气/取货状态刷新顶部任务徽标。
+// 根据连接和天气状态刷新顶部任务徽标。
 static void app_ui_update_main_task_badge_unlocked(void)
 {
     if (s_main_task_badge == NULL)
@@ -340,11 +340,6 @@ static void app_ui_update_main_task_badge_unlocked(void)
     {
         text = "恶劣天气 禁止接驳";
         color = danger;
-    }
-    else if (s_main_pickup_phase_active)
-    {
-        text = "取货已完成";
-        color = normal;
     }
     else if (!s_main_status_seen)
     {
@@ -369,7 +364,7 @@ static void app_ui_update_main_task_badge_unlocked(void)
     lv_label_set_text(s_main_task_badge, text);
     lv_obj_set_style_text_color(s_main_task_badge, color, 0);
 }
-// 同步四个阶段指示：云端、从控、对接、取货。
+// 同步三个阶段指示：云端、从控、对接。
 static void app_ui_refresh_main_phase_indicators_unlocked(void)
 {
     const bool cloud_ready = s_main_status_wifi_ok && s_main_status_mqtt_ok;
@@ -381,11 +376,8 @@ static void app_ui_refresh_main_phase_indicators_unlocked(void)
         s_main_status_seen && link_ready,
         s_main_status_seen && !link_ready);
     app_ui_apply_main_phase_style_unlocked(UI_MAIN_PHASE_DOCK_IDX,
-        s_main_pickup_phase_active,
+        s_main_task_state == APP_UI_MAIN_TASK_COMPLETED,
         s_main_task_weather_blocked);
-    app_ui_apply_main_phase_style_unlocked(3,
-        s_main_pickup_phase_active,
-        false);
     app_ui_update_main_task_badge_unlocked();
 }
 // 天气阻止时切换任务卡片强调色并显示告警块。
@@ -450,6 +442,21 @@ static void app_ui_update_main_exception_button_unlocked(void)
     if (s_main_exception_btn != NULL)
     {
         lv_obj_invalidate(s_main_exception_btn);
+    }
+}
+static void app_ui_update_main_voice_button_unlocked(void)
+{
+    if (s_main_voice_label != NULL)
+    {
+        lv_label_set_text(s_main_voice_label, s_main_voice_enabled ? "语音开" : "语音关");
+        lv_obj_center(s_main_voice_label);
+    }
+    if (s_main_voice_btn != NULL)
+    {
+        lv_obj_set_style_bg_color(s_main_voice_btn,
+            s_main_voice_enabled ? lv_color_hex(0x0F766E) : lv_color_hex(0x64748B),
+            0);
+        lv_obj_invalidate(s_main_voice_btn);
     }
 }
 // 刷新天气图标、天气文案和模拟按钮状态。
@@ -625,10 +632,6 @@ static app_ui_main_task_state_t app_ui_main_task_state_from_text(const char *tex
     {
         return APP_UI_MAIN_TASK_LOCAL_WAIT;
     }
-    if (strcmp(text, "pickup failed / retry") == 0)
-    {
-        return APP_UI_MAIN_TASK_PICKUP_FAILED;
-    }
     if (strcmp(text, "weather blocked") == 0 ||
         strcmp(text, "天气故障") == 0 ||
         strcmp(text, "禁止接驳") == 0)
@@ -656,10 +659,6 @@ static void app_ui_apply_main_task_state_value_unlocked(app_ui_main_task_state_t
     case APP_UI_MAIN_TASK_CAMERA_FAILED:
         display_text = "本地等待";
         color = lv_color_hex(0xD97706);
-        break;
-    case APP_UI_MAIN_TASK_PICKUP_FAILED:
-        display_text = "取货未完成";
-        color = lv_color_hex(0xD85B5B);
         break;
     case APP_UI_MAIN_TASK_COMPLETED:
         display_text = "任务完成";
@@ -689,7 +688,6 @@ static void app_ui_apply_main_task_state_unlocked(const char *text)
         strcmp(text, "task: camera start failed") == 0 ||
         strcmp(text, "task: local mode / cloud start failed") == 0 ||
         strcmp(text, "task: local mode / cloud offline") == 0 ||
-        strcmp(text, "pickup failed / retry") == 0 ||
         strcmp(text, "weather blocked") == 0 ||
         strcmp(text, "天气故障") == 0 ||
         strcmp(text, "禁止接驳") == 0)
@@ -1219,7 +1217,6 @@ bool app_ui_show_main_screen(void)
             "云端",
             "通信",
             "接驳",
-            "取货",
         };
         const int32_t phase_w = 112;
         const int32_t phase_h = 34;
@@ -1251,7 +1248,7 @@ bool app_ui_show_main_screen(void)
         lv_obj_set_width(task_foot, task_card_w - 56);
         lv_obj_set_style_text_color(task_foot, lv_color_hex(0x94A3B8), 0);
         lv_obj_set_style_text_font(task_foot, &font_loading_cn, 0);
-        lv_label_set_text(task_foot, "云端 / 通信 / 接驳 / 取货 LED状态");
+        lv_label_set_text(task_foot, "云端 / 通信 / 接驳 LED状态");
         lv_obj_align(task_foot, LV_ALIGN_BOTTOM_LEFT, 28, -16);
         lv_obj_t *clock_card = app_ui_create_soft_panel(s_main_layer,
             side_card_w,
@@ -1351,7 +1348,7 @@ bool app_ui_show_main_screen(void)
         lv_obj_t *action_title = lv_label_create(link_bar);
         lv_obj_set_style_text_color(action_title, lv_color_hex(0x64748B), 0);
         lv_obj_set_style_text_font(action_title, &font_main_title_cn, 0);
-        lv_label_set_text(action_title, "演示 / 取货");
+        lv_label_set_text(action_title, "演示 / 语音");
         lv_obj_align(action_title, LV_ALIGN_TOP_LEFT, 654, 14);
         s_main_exception_btn = app_ui_button_create(link_bar);
         lv_obj_set_size(s_main_exception_btn, 116, 42);
@@ -1370,24 +1367,22 @@ bool app_ui_show_main_screen(void)
         lv_obj_set_style_text_align(s_main_exception_label, LV_TEXT_ALIGN_CENTER, 0);
         lv_label_set_text(s_main_exception_label, "异常演示");
         lv_obj_center(s_main_exception_label);
-        s_main_pickup_btn = app_ui_button_create(link_bar);
-        lv_obj_set_size(s_main_pickup_btn, 116, 42);
-        lv_obj_set_style_bg_color(s_main_pickup_btn, lv_color_hex(0x0F766E), 0);
-        lv_obj_set_style_bg_opa(s_main_pickup_btn, LV_OPA_COVER, 0);
-        lv_obj_set_style_border_width(s_main_pickup_btn, 0, 0);
-        lv_obj_set_style_radius(s_main_pickup_btn, 6, 0);
-        lv_obj_set_style_pad_all(s_main_pickup_btn, 0, 0);
-        lv_obj_clear_flag(s_main_pickup_btn, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_add_flag(s_main_pickup_btn, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_align(s_main_pickup_btn, LV_ALIGN_TOP_LEFT, 790, 42);
-        lv_obj_add_event_cb(s_main_pickup_btn, app_ui_pickup_event_cb, LV_EVENT_CLICKED, NULL);
-        lv_obj_t *pickup_label = lv_label_create(s_main_pickup_btn);
-        lv_obj_set_width(pickup_label, 108);
-        lv_obj_set_style_text_color(pickup_label, lv_color_hex(0xFFFFFF), 0);
-        lv_obj_set_style_text_font(pickup_label, &font_main_title_cn, 0);
-        lv_obj_set_style_text_align(pickup_label, LV_TEXT_ALIGN_CENTER, 0);
-        lv_label_set_text(pickup_label, "取货完成");
-        lv_obj_center(pickup_label);
+        s_main_voice_btn = app_ui_button_create(link_bar);
+        lv_obj_set_size(s_main_voice_btn, 116, 42);
+        lv_obj_set_style_bg_color(s_main_voice_btn, lv_color_hex(0x0F766E), 0);
+        lv_obj_set_style_bg_opa(s_main_voice_btn, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(s_main_voice_btn, 0, 0);
+        lv_obj_set_style_radius(s_main_voice_btn, 6, 0);
+        lv_obj_set_style_pad_all(s_main_voice_btn, 0, 0);
+        lv_obj_clear_flag(s_main_voice_btn, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_align(s_main_voice_btn, LV_ALIGN_TOP_LEFT, 790, 42);
+        lv_obj_add_event_cb(s_main_voice_btn, app_ui_voice_toggle_event_cb, LV_EVENT_CLICKED, NULL);
+        s_main_voice_label = lv_label_create(s_main_voice_btn);
+        lv_obj_set_width(s_main_voice_label, 108);
+        lv_obj_set_style_text_color(s_main_voice_label, lv_color_hex(0xFFFFFF), 0);
+        lv_obj_set_style_text_font(s_main_voice_label, &font_main_title_cn, 0);
+        lv_obj_set_style_text_align(s_main_voice_label, LV_TEXT_ALIGN_CENTER, 0);
+        app_ui_update_main_voice_button_unlocked();
         app_ui_apply_weather_unlocked();
         app_ui_apply_main_task_state_value_unlocked(s_main_weather_simulated ?
             APP_UI_MAIN_TASK_WEATHER_BLOCKED :
@@ -1537,10 +1532,10 @@ void app_ui_hide_main_screen(void)
     lv_refr_now(NULL);
     bsp_display_unlock();
 }
-// 显示/隐藏取货按钮，并同步主屏任务阶段。
-void app_ui_main_screen_show_pickup(bool show)
+void app_ui_main_screen_set_voice_enabled(bool enabled)
 {
-    if (s_main_pickup_btn == NULL)
+    s_main_voice_enabled = enabled;
+    if (s_main_voice_btn == NULL)
     {
         return;
     }
@@ -1548,25 +1543,7 @@ void app_ui_main_screen_show_pickup(bool show)
     {
         return;
     }
-    if (show)
-    {
-        lv_obj_clear_flag(s_main_pickup_btn, LV_OBJ_FLAG_HIDDEN);
-        s_main_pickup_phase_active = true;
-        if (s_main_weather_simulated)
-        {
-            app_ui_apply_main_task_state_value_unlocked(APP_UI_MAIN_TASK_WEATHER_BLOCKED);
-        }
-        else
-        {
-            app_ui_apply_main_task_state_value_unlocked(APP_UI_MAIN_TASK_COMPLETED);
-        }
-    }
-    else
-    {
-        lv_obj_add_flag(s_main_pickup_btn, LV_OBJ_FLAG_HIDDEN);
-        s_main_pickup_phase_active = false;
-        app_ui_apply_main_task_state_value_unlocked(APP_UI_MAIN_TASK_WAITING);
-    }
+    app_ui_update_main_voice_button_unlocked();
     bsp_display_unlock();
 }
 // 更新三路连接状态灯和阶段指示。

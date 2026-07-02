@@ -5,7 +5,7 @@
 extern "C" {
 #endif
 
-// 绑定取货、天气模拟和紧急保护按钮回调。
+// 绑定异常演示、语音开关、天气模拟和紧急保护按钮回调。
 void app_main_services_bind_ui_callbacks(void);
 
 // 启动云端初始化和连接状态刷新任务，可重复调用。

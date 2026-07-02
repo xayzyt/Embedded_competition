@@ -61,7 +61,7 @@ typedef struct {
     bool mqtt_connected;                 // MQTT 是否在线。
     bool sntp_started;                   // SNTP 是否已启动。
     bool weather_simulated;              // 是否处于天气模拟模式。
-    bool weather_docking_blocked;        // 天气策略是否阻止对接/取货。
+    bool weather_docking_blocked;        // 天气策略是否阻止对接。
     bool weather_docking_policy_applied; // 天气策略是否已经下发到任务/UI。
     bool weather_restore_pending;        // 解除模拟后是否等待刷新真实天气。
     bool have_cached_weather;            // 是否有可复用天气缓存。

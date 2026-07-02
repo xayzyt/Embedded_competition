@@ -42,7 +42,7 @@ static void app_show_camera_failure(void)
 }
 
 // 暂停预览并返回主屏；相机资源保留供下一次任务复用。
-static bool app_leave_camera_preview(bool show_pickup)
+static bool app_leave_camera_preview(void)
 {
     app_camera_pause();
     if (!app_ui_show_main_screen())
@@ -50,7 +50,6 @@ static bool app_leave_camera_preview(bool show_pickup)
         ESP_LOGW(TAG, "show main screen failed, will retry");
         return false;
     }
-    app_ui_main_screen_show_pickup(show_pickup);
     s_preview_visible = false;
     return true;
 }
@@ -231,7 +230,7 @@ static void app_handle_task_state_changed(const app_task_snapshot_t *snap)
             snap->state == APP_TASK_STATE_FAULT ||
             snap->state == APP_TASK_STATE_CANCELLED;
         if ((needs_visibility_fix || terminal) &&
-            app_leave_camera_preview(completed) &&
+            app_leave_camera_preview() &&
             completed)
         {
             app_ui_main_screen_set_task_state(APP_UI_MAIN_TASK_COMPLETED);

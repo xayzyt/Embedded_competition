@@ -39,7 +39,6 @@ extern "C" {
 #define ESP32_COMM_PROTO_CMD_READ_WEIGHT    0x08U
 #define ESP32_COMM_PROTO_CMD_ABORT          0x09U
 #define ESP32_COMM_PROTO_CMD_RESET_FAULT    0x0AU
-#define ESP32_COMM_PROTO_CMD_OPEN_INNER_DOOR 0x0BU
 #define ESP32_COMM_PROTO_CMD_SAFE_CLOSE     0x0CU
 
 /* Stage code. Keep values aligned with APP_CH32_STAGE_* on ESP32. */

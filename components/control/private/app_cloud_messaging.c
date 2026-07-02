@@ -10,6 +10,7 @@
 #include "app_audio_prompt.h"
 #include "app_cloud_cmd.h"
 #include "app_ch32_link.h"
+#include "app_ui.h"
 
 // MQTT 消息层：负责云端命令解析、ACK 回复和任务状态 JSON 上报。
 
@@ -338,6 +339,7 @@ static esp_err_t app_cloud_receive_set_voice(const app_cloud_cmd_t *cmd)
         return ESP_ERR_INVALID_ARG;
     }
     esp_err_t ret = app_audio_prompt_set_enabled(cmd->voice_enabled, true);
+    app_ui_main_screen_set_voice_enabled(app_audio_prompt_is_enabled());
     app_cloud_publish_current_state();
     return ret;
 }

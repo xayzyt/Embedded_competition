@@ -14,7 +14,7 @@ typedef struct {
     bool wifi_connected;          // Wi-Fi 是否在线。
     bool mqtt_connected;          // MQTT 是否在线。
     bool weather_simulated;       // 是否使用模拟恶劣天气。
-    bool weather_docking_blocked; // 天气策略是否禁止对接/取货。
+    bool weather_docking_blocked; // 天气策略是否禁止对接。
 } app_cloud_status_t;
 // 读取云端模块状态。
 void app_cloud_get_status(app_cloud_status_t *out);

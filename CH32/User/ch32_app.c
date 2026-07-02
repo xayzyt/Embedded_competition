@@ -2,7 +2,6 @@
 #include "TMC2209.h"
 #include "L298N.h"
 #include "HX711.h"
-#include "inner_door.h"
 #include "esp32_com.h"
 #include "ch32_app.h"
 
@@ -627,13 +626,6 @@ static void ch32_app_handle_reset_fault(const ESP32_Comm_Packet_t *pkt)
     ch32_app_publish_stage(ESP32_COMM_STAGE_READY, ESP32_COMM_ERR_NONE);
 }
 
-static void ch32_app_handle_open_inner_door(const ESP32_Comm_Packet_t *pkt)
-{
-    ESP32_Comm_SendProtoAck(pkt->proto_cmd, pkt->proto_seq);
-    InnerDoor_Open();
-    ch32_app_publish_stage(s_app.current_stage, ESP32_COMM_ERR_NONE);
-}
-
 static void ch32_app_dispatch_command(const ESP32_Comm_Packet_t *pkt)
 {
     if(pkt->proto_type != ESP32_COMM_PROTO_TYPE_CMD)
@@ -676,10 +668,6 @@ static void ch32_app_dispatch_command(const ESP32_Comm_Packet_t *pkt)
             ch32_app_handle_reset_fault(pkt);
             break;
 
-        case ESP32_COMM_PROTO_CMD_OPEN_INNER_DOOR:
-            ch32_app_handle_open_inner_door(pkt);
-            break;
-
         default:
             ESP32_Comm_SendProtoNack(pkt->proto_cmd,
                                      pkt->proto_seq,
@@ -694,10 +682,8 @@ void CH32_App_Init(void)
     TMC2209_Init();
     PushRod_Init();
     HX711_Init();
-    InnerDoor_Init();
 
     ch32_app_stop_motion();
-    InnerDoor_Close();
 
     memset(&s_app, 0, sizeof(s_app));
     s_app.current_stage = ESP32_COMM_STAGE_READY;

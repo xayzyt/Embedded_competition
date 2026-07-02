@@ -10,7 +10,7 @@
 
 | 文件 | 一句话 |
 |------|--------|
-| [main/main.c](main/main.c) | **系统总装配**：初始化 NVS→屏幕→各模块→相机管线，协调主屏/预览切换、天气保护、取货按钮 |
+| [main/main.c](main/main.c) | **系统总装配**：初始化 NVS→屏幕→各模块→相机管线，协调主屏/预览切换、天气保护、异常演示 |
 
 ### 控制层 (components/control/) — 核心大脑
 
@@ -40,7 +40,7 @@
 | [app_vision.h](components/vision_ui/app_vision.h) / [.c](components/vision_ui/app_vision.c) | **视觉管线**：接收 RGB565 帧→下采样灰度图→调 AprilTag 检测→发布结果 |
 | [app_apriltag.h](components/vision_ui/app_apriltag.h) / [.c](components/vision_ui/app_apriltag.c) | **自研 AprilTag 检测器**：二值化→连通域→透视采样→与 tag36h11 码表匹配（纯 C 实现，不依赖第三方库） |
 | [app_ui.h](components/vision_ui/app_ui.h) / [.c](components/vision_ui/app_ui.c) | **HUD 预览 UI**：相机画面 + 对接框 + 状态叠加文字 + 抓图按钮 |
-| [app_ui_main.c](components/vision_ui/app_ui_main.c) | **主屏 UI**：任务阶段条、Wi-Fi/MQTT/CH32 状态灯、天气、时钟、取货按钮 |
+| [app_ui_main.c](components/vision_ui/app_ui_main.c) | **主屏 UI**：任务阶段条、Wi-Fi/MQTT/CH32 状态灯、天气、时钟、异常演示按钮和语音开关 |
 | [app_ai_capture.h](components/vision_ui/app_ai_capture.h) / [.c](components/vision_ui/app_ai_capture.c) | **AI 样本采集**：从相机帧抽样保存为 BMP 到 SD 卡（分有/无无人机两个目录） |
 | [app_ui_assets.c](components/vision_ui/app_ui_assets.c) + assets/*.c | LVGL 字体和 logo 图片资源 |
 

@@ -56,10 +56,9 @@ void app_ui_update_control_state(const char *status,
 // 主屏显示/隐藏和状态灯更新。
 bool app_ui_show_main_screen(void);
 void app_ui_hide_main_screen(void);
-void app_ui_main_screen_show_pickup(bool show);
 void app_ui_main_screen_update_status(bool wifi_ok, bool mqtt_ok, bool ch32_ok);
 
-// 主屏任务状态，用于控制标题、阶段灯和取货提示。
+// 主屏任务状态，用于控制标题、阶段灯和提示。
 typedef enum {
     APP_UI_MAIN_TASK_WAITING = 0,
     APP_UI_MAIN_TASK_ACTIVE,
@@ -67,7 +66,6 @@ typedef enum {
     APP_UI_MAIN_TASK_LOCAL_WAIT,
     APP_UI_MAIN_TASK_CAMERA_FAILED,
     APP_UI_MAIN_TASK_WEATHER_BLOCKED,
-    APP_UI_MAIN_TASK_PICKUP_FAILED,
     APP_UI_MAIN_TASK_COMPLETED,
 } app_ui_main_task_state_t;
 
@@ -76,6 +74,7 @@ void app_ui_main_screen_set_task_state(app_ui_main_task_state_t state);
 void app_ui_main_screen_set_task_text(const char *text);
 void app_ui_main_screen_set_weather(const char *text, int weather_code);
 void app_ui_main_screen_set_weather_simulated(bool simulated);
+void app_ui_main_screen_set_voice_enabled(bool enabled);
 void app_ui_main_screen_apply_weather_state(const char *weather_text,
                                             int weather_code,
                                             bool simulated,
@@ -96,12 +95,11 @@ bool app_ui_show_exception_demo_screen(void);
 void app_ui_exception_demo_set_state(app_ui_exception_demo_state_t state);
 void app_ui_exception_demo_update_ch32(int stage, uint8_t error);
 
-// 主屏取货按钮回调。
-typedef void (*app_ui_pickup_cb_t)(void);
-void app_ui_set_pickup_callback(app_ui_pickup_cb_t cb);
-
 typedef void (*app_ui_exception_demo_cb_t)(void);
 void app_ui_set_exception_demo_callback(app_ui_exception_demo_cb_t cb);
+
+typedef void (*app_ui_voice_toggle_cb_t)(void);
+void app_ui_set_voice_toggle_callback(app_ui_voice_toggle_cb_t cb);
 
 typedef void (*app_ui_exception_back_cb_t)(void);
 void app_ui_set_exception_back_callback(app_ui_exception_back_cb_t cb);
