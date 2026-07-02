@@ -448,7 +448,7 @@ static void app_ui_update_main_voice_button_unlocked(void)
 {
     if (s_main_voice_label != NULL)
     {
-        lv_label_set_text(s_main_voice_label, s_main_voice_enabled ? "语音开" : "语音关");
+        lv_label_set_text(s_main_voice_label, s_main_voice_enabled ? "语音打开" : "语音关闭");
         lv_obj_center(s_main_voice_label);
     }
     if (s_main_voice_btn != NULL)
