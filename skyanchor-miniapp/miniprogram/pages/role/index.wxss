@@ -3,11 +3,7 @@
 .role-page {
   padding-top: 0;
   overflow: hidden;
-  background-color: #f2f6fb;
-  background:
-    radial-gradient(circle at 18% 12%, rgba(96, 165, 250, 0.22), transparent 32%),
-    radial-gradient(circle at 88% 22%, rgba(34, 197, 94, 0.13), transparent 30%),
-    linear-gradient(180deg, #eef5ff 0%, #f7faff 46%, #f2f6fb 100%);
+  background: #f7f9fc;
 }
 
 .role-page .page-footnote {
@@ -17,26 +13,7 @@
 
 .role-page::before,
 .role-page::after {
-  content: "";
-  position: absolute;
-  pointer-events: none;
-  border-radius: 999rpx;
-}
-
-.role-page::before {
-  left: -150rpx;
-  top: 120rpx;
-  width: 340rpx;
-  height: 340rpx;
-  background: rgba(37, 99, 235, 0.07);
-}
-
-.role-page::after {
-  right: -190rpx;
-  bottom: 190rpx;
-  width: 390rpx;
-  height: 390rpx;
-  background: rgba(14, 165, 233, 0.06);
+  display: none;
 }
 
 .role-shell {
@@ -46,7 +23,7 @@
   width: 100%;
   max-width: 640rpx;
   margin: 0 auto;
-  padding: 96rpx 30rpx 44rpx;
+  padding: 88rpx 30rpx 44rpx;
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
@@ -56,9 +33,9 @@
 
 .brand-visual {
   position: relative;
-  width: 590rpx;
-  height: 280rpx;
-  margin-bottom: 30rpx;
+  width: 560rpx;
+  height: 236rpx;
+  margin-bottom: 34rpx;
 }
 
 .contest-panel {
@@ -68,27 +45,17 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 24rpx;
-  border: 1rpx solid rgba(191, 219, 254, 0.86);
-  border-radius: 26rpx;
-  background-color: #ffffff;
-  background:
-    radial-gradient(circle at 18% 18%, rgba(219, 234, 254, 0.96), transparent 36%),
-    linear-gradient(135deg, #ffffff 0%, #eff6ff 100%);
-  box-shadow: 0 24rpx 48rpx rgba(37, 99, 235, 0.14);
+  padding: 22rpx;
+  border: 1rpx solid #e5edf5;
+  border-radius: 24rpx;
+  background: #ffffff;
+  box-shadow: 0 12rpx 28rpx rgba(23, 32, 51, 0.06);
   box-sizing: border-box;
   overflow: hidden;
 }
 
 .contest-panel::after {
-  content: "";
-  position: absolute;
-  right: -72rpx;
-  bottom: -86rpx;
-  width: 220rpx;
-  height: 220rpx;
-  border-radius: 999rpx;
-  background: rgba(96, 165, 250, 0.1);
+  display: none;
 }
 
 .contest-logo-img {
@@ -98,8 +65,8 @@
 
 .contest-logo-img {
   flex-shrink: 0;
-  width: 360rpx;
-  height: 230rpx;
+  width: 330rpx;
+  height: 198rpx;
 }
 
 .mission-panel {
@@ -110,8 +77,7 @@
   border-radius: 26rpx;
   background-color: #f8fbff;
   background:
-    radial-gradient(circle at 20% 30%, rgba(191, 219, 254, 0.5), transparent 34%),
-    linear-gradient(135deg, #ffffff 0%, #eff6ff 100%);
+    linear-gradient(135deg, #ffffff 0%, #eef7ff 48%, #f2fbf5 100%);
   box-shadow: 0 24rpx 48rpx rgba(37, 99, 235, 0.14);
   overflow: hidden;
 }
@@ -408,7 +374,7 @@
   text-align: center;
   width: 100%;
   color: #111827;
-  font-size: 72rpx;
+  font-size: 68rpx;
   line-height: 1.02;
   margin-bottom: 14rpx;
 }
@@ -426,44 +392,53 @@
 .role-copy {
   text-align: center;
   width: 100%;
-  color: #64748b;
-  font-size: 24rpx;
+  color: #6b7280;
+  font-size: 23rpx;
   line-height: 1.45;
-  margin-top: 20rpx;
-  margin-bottom: 30rpx;
+  margin-top: 16rpx;
+  margin-bottom: 28rpx;
 }
 
 .role-button-row {
   width: 100%;
-  max-width: 470rpx;
+  max-width: 486rpx;
   flex-direction: column;
   gap: 16rpx;
 }
 
 .role-btn {
   width: 100%;
-  min-height: 100rpx;
-  padding: 18rpx 22rpx;
+  min-height: 102rpx;
+  padding: 0;
   flex-direction: row;
   justify-content: flex-start;
-  gap: 18rpx;
+  gap: 0;
   text-align: left;
   overflow: hidden;
+  border-radius: 18rpx;
+}
+
+.primary-btn.role-btn {
+  border: none;
+  background: #2563eb;
+  color: #ffffff;
+  box-shadow: 0 16rpx 34rpx rgba(37, 99, 235, 0.22);
 }
 
 .ghost-btn.role-btn {
-  background: rgba(255, 255, 255, 0.88);
+  border: 1rpx solid rgba(226, 232, 240, 0.92);
+  background: #ffffff;
   color: #172033;
-  box-shadow: 0 12rpx 28rpx rgba(15, 23, 42, 0.055);
+  box-shadow: 0 14rpx 30rpx rgba(15, 23, 42, 0.06);
 }
 
 .role-btn-icon {
   position: relative;
   flex-shrink: 0;
-  width: 48rpx;
-  height: 48rpx;
-  border-radius: 14rpx;
-  background: rgba(255, 255, 255, 0.2);
+  width: 92rpx;
+  height: 102rpx;
+  border-radius: 0;
+  background: rgba(255, 255, 255, 0.14);
 }
 
 .role-btn-icon::before,
@@ -474,8 +449,8 @@
 }
 
 .role-btn-icon-user::before {
-  left: 14rpx;
-  top: 9rpx;
+  left: 34rpx;
+  top: 27rpx;
   width: 20rpx;
   height: 20rpx;
   border: 4rpx solid #ffffff;
@@ -483,8 +458,8 @@
 }
 
 .role-btn-icon-user::after {
-  left: 9rpx;
-  bottom: 8rpx;
+  left: 29rpx;
+  bottom: 25rpx;
   width: 30rpx;
   height: 16rpx;
   border: 4rpx solid #ffffff;
@@ -493,12 +468,12 @@
 }
 
 .role-btn-icon-dispatch {
-  background: #ffffff;
+  background: #eff6ff;
 }
 
 .role-btn-icon-dispatch::before {
-  left: 12rpx;
-  top: 14rpx;
+  left: 32rpx;
+  top: 37rpx;
   width: 24rpx;
   height: 18rpx;
   border: 5rpx solid #2563eb;
@@ -506,8 +481,8 @@
 }
 
 .role-btn-icon-dispatch::after {
-  left: 18rpx;
-  top: 23rpx;
+  left: 38rpx;
+  top: 46rpx;
   width: 12rpx;
   height: 5rpx;
   border-radius: 999rpx;
@@ -517,10 +492,15 @@
 .role-btn-copy {
   flex: 1;
   min-width: 0;
+  height: 102rpx;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 0 22rpx;
 }
 
 .role-btn-title {
-  font-size: 30rpx;
+  font-size: 29rpx;
   font-weight: 900;
   line-height: 1.2;
 }
@@ -532,10 +512,10 @@
   line-height: 1.25;
 }
 
-.primary-btn .role-btn-subtitle {
-  color: rgba(255, 255, 255, 0.78);
-}
-
 .ghost-btn .role-btn-subtitle {
   color: #64748b;
+}
+
+.primary-btn .role-btn-subtitle {
+  color: rgba(255, 255, 255, 0.78);
 }

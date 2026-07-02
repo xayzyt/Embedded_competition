@@ -26,6 +26,28 @@
     <view class="service-detail-btn" bindtap="showServiceDiagnostics">诊断</view>
   </view>
 
+  <view class="weather-strip">
+    <block wx:for="{{weatherSummary.items}}" wx:key="key">
+      <view class="weather-item weather-{{item.state}}">
+        <view class="weather-label">{{item.label}}</view>
+        <view class="weather-value">{{item.value}}</view>
+      </view>
+    </block>
+  </view>
+
+  <view class="voice-setting-row">
+    <view class="voice-setting-copy">
+      <view class="voice-setting-title">语音播报</view>
+      <view class="voice-setting-subtitle">{{serviceVoiceEnabled ? '现场播报开启' : '调试静音中'}}</view>
+    </view>
+    <switch
+      checked="{{serviceVoiceEnabled}}"
+      disabled="{{voiceSwitchPending || !serviceOnline || !serviceMqttReady || !serviceDeviceStateReady}}"
+      color="#10b981"
+      bindchange="toggleVoice"
+    />
+  </view>
+
   <view class="card list-card">
     <view class="section-head">
       <view class="section-title">待调度</view>
@@ -45,10 +67,8 @@
         <view class="list-item order-row" data-order-id="{{item.order_id}}" bindtap="openDetail">
           <view class="order-main">
             <view class="item-title">{{item.order_name_text}}</view>
-            <view class="item-subtitle">用户 {{item.receiver_id}} · Tag {{item.apriltag_text}}</view>
-            <view class="item-meta">{{item.stage_hint}}</view>
+            <view class="item-subtitle">{{item.receiver_id}}</view>
           </view>
-          <view class="status-badge status-{{item.status}}">{{item.status_text}}</view>
         </view>
       </block>
     </block>
@@ -72,8 +92,7 @@
         <view class="list-item order-row" data-order-id="{{item.order_id}}" bindtap="openDetail">
           <view class="order-main">
             <view class="item-title">{{item.order_name_text}}</view>
-            <view class="item-subtitle">用户 {{item.receiver_id}} · Tag {{item.apriltag_text}}</view>
-            <view class="item-meta">{{item.stage_hint}}</view>
+            <view class="item-subtitle">{{item.receiver_id}} · Tag {{item.apriltag_text}}</view>
           </view>
           <view class="status-badge status-{{item.status}}">{{item.status_text}}</view>
         </view>

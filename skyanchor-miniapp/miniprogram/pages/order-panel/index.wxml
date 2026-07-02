@@ -1,13 +1,7 @@
 <view class="page app-page order-detail-page">
-  <view class="hero page-hero hero-card">
-    <view class="title">订单详情</view>
-    <view class="hero-meta">{{isReceiverView ? '用户端视图' : '调度台视图'}}</view>
-  </view>
-
-  <view class="service-banner status-{{serviceState}}">
+  <view class="service-banner status-{{serviceState}}" bindtap="showServiceDiagnostics">
     <view class="service-dot"></view>
     <view class="service-message">{{serviceMessage}}</view>
-    <view class="service-detail-btn" bindtap="showServiceDiagnostics">诊断</view>
   </view>
 
   <view class="card" wx:if="{{loadError}}">
@@ -26,14 +20,14 @@
     </view>
   </view>
 
-  <view class="card" wx:elif="{{order}}">
+  <view class="card order-sheet" wx:elif="{{order}}">
     <view class="detail-head">
       <view class="detail-main">
-        <view class="detail-kicker">订单编号</view>
         <view class="section-title">{{order.order_name_text}}</view>
-        <view class="detail-chip-row">
-          <view class="info-chip" wx:if="{{!isReceiverView}}">用户 {{order.receiver_id}}</view>
-          <view class="info-chip">Tag {{order.apriltag_text}}</view>
+        <view class="detail-meta-line">
+          <text wx:if="{{!isReceiverView}}">用户 {{order.receiver_id}}</text>
+          <text>Tag {{order.apriltag_text}}</text>
+          <text wx:if="{{order.last_device_state_text}}">板端 {{order.last_device_state_text}}</text>
         </view>
       </view>
       <view class="status-badge status-{{order.status}}">{{order.status_text}}</view>
@@ -48,67 +42,44 @@
       </block>
     </view>
 
-    <view class="detail-insights">
-      <view class="insight-group">
-        <view class="insight-group-title">链路状态</view>
-        <view class="insight-chip-row">
-          <block wx:for="{{detailStatusTiles}}" wx:key="key">
-            <view class="insight-chip insight-{{item.state}}">
-              <text class="insight-label">{{item.label}}</text>
-              <text class="insight-value">{{item.value}}</text>
-            </view>
-          </block>
+    <view class="weather-strip weather-strip-detail">
+      <block wx:for="{{runtimeSummary.items}}" wx:key="key">
+        <view class="weather-item weather-{{item.state}}">
+          <text class="weather-label">{{item.label}}</text>
+          <text class="weather-value">{{item.value}}</text>
         </view>
-      </view>
-      <view class="insight-group">
-        <view class="insight-group-title">安全策略</view>
-        <view class="insight-chip-row">
-          <block wx:for="{{safetyBadges}}" wx:key="key">
-            <view class="insight-chip insight-{{item.state}}">
-              <text class="insight-label">{{item.label}}</text>
-              <text class="insight-value">{{item.value}}</text>
-            </view>
-          </block>
-        </view>
-      </view>
+      </block>
     </view>
 
-    <view class="brief-lines" wx:if="{{order.note_text || order.last_device_state_text}}">
-      <view class="brief-line" wx:if="{{order.note_text}}">
-        <text class="brief-key">{{order.note_label}}</text>
-        <text class="brief-value">{{order.note_text}}</text>
-      </view>
-      <view class="brief-line" wx:if="{{order.last_device_state_text}}">
-        <text class="brief-key">板端</text>
-        <text class="brief-value">{{order.last_device_state_text}}</text>
-      </view>
+    <view class="failure-card failure-{{order.issue.level}}" wx:if="{{order.issue.show}}">
+      <view class="failure-title">原因：{{order.failure_reason_text}}</view>
+      <view class="failure-advice">建议：{{order.failure_advice_text}}</view>
     </view>
 
     <view class="delivery-report report-{{order.report.class_name}}" wx:if="{{order.show_report}}">
-      <view class="report-head">
-        <view>
-          <view class="report-kicker">智能配送闭环</view>
+      <view class="report-hero">
+        <view class="report-mark">{{order.report.result_text}}</view>
+        <view class="report-copy">
           <view class="report-title">{{order.report.title}}</view>
+          <view class="report-summary">{{order.report.summary_text}}</view>
         </view>
-        <view class="report-result">{{order.report.result_text}}</view>
       </view>
-      <view class="report-summary">{{order.report.summary_text}}</view>
       <view class="report-grid">
         <view class="report-item">
-          <view class="report-label">目标 Tag</view>
+          <view class="report-label">Tag</view>
           <view class="report-value">{{order.report.tag_text}}</view>
         </view>
         <view class="report-item">
-          <view class="report-label">总耗时</view>
+          <view class="report-label">耗时</view>
           <view class="report-value">{{order.report.duration_text}}</view>
         </view>
         <view class="report-item">
-          <view class="report-label">板端状态</view>
-          <view class="report-value">{{order.report.device_text}}</view>
+          <view class="report-label">结束</view>
+          <view class="report-value">{{order.report.finished_text}}</view>
         </view>
         <view class="report-item">
-          <view class="report-label">说明</view>
-          <view class="report-value">{{order.report.note_text}}</view>
+          <view class="report-label">状态</view>
+          <view class="report-value">{{order.report.device_text}}</view>
         </view>
       </view>
       <view class="button-row report-action-row" wx:if="{{isReceiverView && order.show_contact_dispatcher}}">
@@ -116,24 +87,33 @@
       </view>
     </view>
 
-    <view class="button-row detail-action-row {{isReceiverView ? 'single-action-row' : ''}}">
+    <view class="button-row detail-action-row {{isReceiverView || (order.primary_action_disabled && !order.can_demo_reset) ? 'single-action-row' : ''}}">
       <button class="ghost-btn refresh-btn" loading="{{loading}}" disabled="{{actionPending}}" bindtap="fetchDetail">刷新</button>
       <button
-        wx:if="{{!isReceiverView}}"
+        wx:if="{{!isReceiverView && !order.primary_action_disabled}}"
         class="primary-btn"
         loading="{{actionPending && !loading}}"
-        disabled="{{loading || actionPending || order.primary_action_disabled || (serviceActionBlocked && order.primary_action == 'start')}}"
+        disabled="{{loading || actionPending || (serviceActionBlocked && order.primary_action == 'start')}}"
         bindtap="handlePrimaryAction"
       >
         {{order.primary_action_text}}
       </button>
       <button
-        wx:if="{{!isReceiverView}}"
+        wx:if="{{!isReceiverView && order.can_cancel}}"
         class="warn-btn"
         disabled="{{loading || actionPending || !order.can_cancel}}"
         bindtap="cancelOrder"
       >
         取消
+      </button>
+      <button
+        wx:if="{{!isReceiverView && order.can_demo_reset}}"
+        class="warn-btn reset-btn"
+        loading="{{actionPending && !loading}}"
+        disabled="{{loading || actionPending || !order.can_demo_reset}}"
+        bindtap="demoResetOrder"
+      >
+        演示复位
       </button>
     </view>
 
@@ -144,15 +124,15 @@
         disabled="{{loading || actionPending || !order.can_manual_retract}}"
         bindtap="manualRetractTray"
       >
-        手动回收托盘
+        回收托盘
       </button>
     </view>
   </view>
 
-  <view class="card" wx:if="{{events.length}}">
+  <view class="timeline-card" wx:if="{{events.length}}">
     <view class="section-head">
-      <view class="section-title">智能配送时间线</view>
-      <view class="count-pill">{{events.length}} 条</view>
+      <view class="section-title">记录</view>
+      <view class="count-pill">{{events.length}}</view>
     </view>
     <block wx:for="{{events}}" wx:key="id">
       <view class="timeline-item">
@@ -168,8 +148,39 @@
     </block>
   </view>
 
-  <view class="page-footnote">
-    <view class="page-footnote-team">地线引力队</view>
-    <view>第九届（2026）全国大学生嵌入式芯片与系统设计竞赛</view>
+  <view class="report-modal-mask" wx:if="{{showDeliveryReportModal}}" catchtap="closeDeliveryReport">
+    <view class="report-modal" catchtap="noop">
+      <view class="modal-report-mark">{{deliveryReportModal.result_text}}</view>
+      <view class="modal-report-title">配送报告</view>
+      <view class="modal-order-name">{{deliveryReportModal.order_name_text}}</view>
+      <view class="modal-report-grid">
+        <view class="modal-report-item">
+          <text class="modal-report-label">Tag</text>
+          <text class="modal-report-value">{{deliveryReportModal.tag_text}}</text>
+        </view>
+        <view class="modal-report-item">
+          <text class="modal-report-label">耗时</text>
+          <text class="modal-report-value">{{deliveryReportModal.duration_text}}</text>
+        </view>
+        <view class="modal-report-item">
+          <text class="modal-report-label">结束</text>
+          <text class="modal-report-value">{{deliveryReportModal.finished_text}}</text>
+        </view>
+        <view class="modal-report-item">
+          <text class="modal-report-label">状态</text>
+          <text class="modal-report-value">{{deliveryReportModal.device_text}}</text>
+        </view>
+      </view>
+      <view class="modal-actions">
+        <button
+          wx:if="{{deliveryReportModal.can_contact_dispatcher}}"
+          class="ghost-btn modal-btn"
+          bindtap="contactDispatcher"
+        >
+          联系配送员
+        </button>
+        <button class="primary-btn modal-btn" bindtap="closeDeliveryReport">知道了</button>
+      </view>
+    </view>
   </view>
 </view>

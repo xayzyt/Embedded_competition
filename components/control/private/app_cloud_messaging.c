@@ -7,6 +7,7 @@
 #include "sdkconfig.h"
 #include "esp_err.h"
 #include "esp_log.h"
+#include "app_audio_prompt.h"
 #include "app_cloud_cmd.h"
 #include "app_ch32_link.h"
 
@@ -87,6 +88,81 @@ static const char *app_cloud_weather_mode_text(app_cloud_weather_mode_t mode)
     }
 }
 /* ---------- MQTT 发布 ---------- */
+
+static bool app_cloud_note_contains(const char *note, const char *needle)
+{
+    if (note == NULL || needle == NULL || needle[0] == '\0')
+    {
+        return false;
+    }
+    return strstr(note, needle) != NULL;
+}
+
+static const char *app_cloud_fault_code_from_snapshot(const app_task_snapshot_t *snap)
+{
+    if (snap == NULL)
+    {
+        return "";
+    }
+
+    const char *note = snap->note;
+    if (snap->state == APP_TASK_STATE_CANCELLED)
+    {
+        if (app_cloud_note_contains(note, "demo reset"))
+        {
+            return "demo_reset";
+        }
+        if (app_cloud_note_contains(note, "weather") || app_cloud_note_contains(note, "severe"))
+        {
+            return "weather_blocked";
+        }
+        if (app_cloud_note_contains(note, "cloud"))
+        {
+            return "cloud_cancelled";
+        }
+        return "task_cancelled";
+    }
+
+    if (snap->state != APP_TASK_STATE_FAULT)
+    {
+        return s_cloud.weather_docking_blocked ? "weather_blocked" : "";
+    }
+
+    if (app_cloud_note_contains(note, "manual retract"))
+    {
+        return "manual_retract_requested";
+    }
+    if (app_cloud_note_contains(note, "cancel safety") ||
+        app_cloud_note_contains(note, "SAFE_CLOSE"))
+    {
+        return "safe_close_failed";
+    }
+    if (app_cloud_note_contains(note, "CH32 ack timeout"))
+    {
+        return "ch32_ack_timeout";
+    }
+    if (app_cloud_note_contains(note, "CH32 timeout"))
+    {
+        return "ch32_timeout";
+    }
+    if (app_cloud_note_contains(note, "CH32 rejected"))
+    {
+        return "ch32_rejected";
+    }
+    if (app_cloud_note_contains(note, "weather") || app_cloud_note_contains(note, "severe"))
+    {
+        return "weather_blocked";
+    }
+    if (app_cloud_note_contains(note, "camera"))
+    {
+        return "camera_failed";
+    }
+    if (app_cloud_note_contains(note, "vision") || app_cloud_note_contains(note, "tag"))
+    {
+        return "vision_failed";
+    }
+    return "task_fault";
+}
 
 static esp_err_t app_cloud_publish_raw(const char *topic,
     const char *payload,
@@ -183,6 +259,7 @@ void app_cloud_publish_task_snapshot_internal(const app_task_snapshot_t *snap)
     int cargo_received = (snap->state == APP_TASK_STATE_COMPLETED) ? 1 : 0;
     int fault = (snap->state == APP_TASK_STATE_FAULT) ? 1 : 0;
     int accept_orders = (!s_cloud.weather_docking_blocked && !snap->active) ? 1 : 0;
+    const char *fault_code = app_cloud_fault_code_from_snapshot(snap);
     cJSON *root = cJSON_CreateObject();
     if (root == NULL)
     {
@@ -201,6 +278,8 @@ void app_cloud_publish_task_snapshot_internal(const app_task_snapshot_t *snap)
         app_cloud_json_add_number(root, "matched_tag_id", snap->matched_tag_id) &&
         app_cloud_json_add_number(root, "cargo_received", cargo_received) &&
         app_cloud_json_add_number(root, "fault", fault) &&
+        app_cloud_json_add_string(root, "fault_code", fault_code) &&
+        app_cloud_json_add_number(root, "voice_enabled", app_audio_prompt_is_enabled() ? 1U : 0U) &&
         app_cloud_json_add_number(root, "weather_blocked", s_cloud.weather_docking_blocked ? 1U : 0U) &&
         app_cloud_json_add_number(root, "weather_simulated", s_cloud.weather_simulated ? 1U : 0U) &&
         app_cloud_json_add_number(root, "accept_orders", accept_orders) &&
@@ -250,6 +329,17 @@ void app_cloud_on_task_event(app_task_event_t event,
 static esp_err_t app_cloud_receive_set_target(uint16_t target_id)
 {
     return app_task_set_target_id(target_id, true);
+}
+
+static esp_err_t app_cloud_receive_set_voice(const app_cloud_cmd_t *cmd)
+{
+    if (cmd == NULL || !cmd->voice_enabled_set)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+    esp_err_t ret = app_audio_prompt_set_enabled(cmd->voice_enabled, true);
+    app_cloud_publish_current_state();
+    return ret;
 }
 // 处理云端 start_task；天气保护期间拒绝接单并保持原订单上下文。
 static esp_err_t app_cloud_receive_start_task(const app_cloud_cmd_t *cmd)
@@ -335,6 +425,41 @@ static esp_err_t app_cloud_receive_cancel(void)
     return ret;
 }
 
+static esp_err_t app_cloud_receive_demo_reset(void)
+{
+    app_task_snapshot_t snap = {0};
+    if (!app_task_peek_snapshot(&snap) || !snap.active)
+    {
+        ESP_LOGI(TAG, "cloud demo reset ignored: no active task");
+        app_cloud_publish_current_state();
+        return ESP_OK;
+    }
+
+    const bool need_safe_close = snap.state == APP_TASK_STATE_DOCKING;
+    app_task_cancel("demo reset requested");
+    if (!need_safe_close)
+    {
+        return ESP_OK;
+    }
+
+    esp_err_t ret = app_ch32_link_send_proto_cmd_and_wait_ack(APP_CH32_PROTO_CMD_SAFE_CLOSE,
+        APP_CLOUD_MANUAL_RETRACT_WAIT_MS);
+    if (ret == ESP_OK)
+    {
+        return ESP_OK;
+    }
+
+    ESP_LOGW(TAG, "SAFE_CLOSE for demo reset failed: %s", esp_err_to_name(ret));
+    ret = app_ch32_link_send_proto_cmd_and_wait_ack(APP_CH32_PROTO_CMD_ABORT,
+        APP_CLOUD_ABORT_WAIT_MS);
+    if (ret != ESP_OK)
+    {
+        ESP_LOGW(TAG, "ABORT for demo reset failed: %s", esp_err_to_name(ret));
+        app_task_mark_fault("demo reset safety command failed");
+    }
+    return ret;
+}
+
 static esp_err_t app_cloud_receive_manual_retract(void)
 {
     app_task_snapshot_t snap = {0};
@@ -390,6 +515,16 @@ static const char *app_cloud_cancel_ack_msg(esp_err_t ret)
     return (ret == ESP_OK) ? "accepted" : "cancel_failed";
 }
 
+static const char *app_cloud_demo_reset_ack_msg(esp_err_t ret)
+{
+    return (ret == ESP_OK) ? "accepted" : "demo_reset_failed";
+}
+
+static const char *app_cloud_set_voice_ack_msg(esp_err_t ret)
+{
+    return (ret == ESP_OK) ? "accepted" : "set_voice_failed";
+}
+
 // MQTT cmd 负载入口，按 cmd 字段分发到对应业务处理。
 static esp_err_t app_cloud_handle_command(const char *payload, size_t payload_len)
 {
@@ -430,6 +565,15 @@ static esp_err_t app_cloud_handle_command(const char *payload, size_t payload_le
             cmd.target_id);
         return ret;
     }
+    if (strcmp(cmd.cmd, "set_voice") == 0)
+    {
+        ret = app_cloud_receive_set_voice(&cmd);
+        (void)app_cloud_publish_ack(&cmd,
+            (ret == ESP_OK) ? 0 : -1,
+            app_cloud_set_voice_ack_msg(ret),
+            0U);
+        return ret;
+    }
     if (strcmp(cmd.cmd, "manual_retract") == 0)
     {
         ret = app_cloud_receive_manual_retract();
@@ -446,6 +590,15 @@ static esp_err_t app_cloud_handle_command(const char *payload, size_t payload_le
             (ret == ESP_OK) ? 0 : -1,
             app_cloud_cancel_ack_msg(ret),
             0U);
+        return ret;
+    }
+    if (strcmp(cmd.cmd, "demo_reset") == 0)
+    {
+        ret = app_cloud_receive_demo_reset();
+        (void)app_cloud_publish_ack(&cmd,
+            (ret == ESP_OK) ? 0 : -1,
+            app_cloud_demo_reset_ack_msg(ret),
+            cmd.target_id);
         return ret;
     }
     ESP_LOGW(TAG, "unknown cmd=%s", cmd.cmd);

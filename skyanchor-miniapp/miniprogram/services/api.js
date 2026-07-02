@@ -58,9 +58,27 @@ function startOrder(orderId) {
   });
 }
 
+function setVoiceEnabled(enabled) {
+  return request({
+    action: 'setVoiceEnabled',
+    data: {
+      enabled: !!enabled
+    }
+  });
+}
+
 function manualRetractOrder(orderId) {
   return request({
     action: 'manualRetractOrder',
+    data: {
+      order_id: orderId
+    }
+  });
+}
+
+function demoResetOrder(orderId) {
+  return request({
+    action: 'demoResetOrder',
     data: {
       order_id: orderId
     }
@@ -84,6 +102,8 @@ module.exports = {
   deleteOrder,
   assignOrder,
   startOrder,
+  setVoiceEnabled,
   manualRetractOrder,
+  demoResetOrder,
   cancelOrder
 };

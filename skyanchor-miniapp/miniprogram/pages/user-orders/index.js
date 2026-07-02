@@ -1,9 +1,9 @@
 ﻿const api = require('../../services/api.js');
 const { getDemoProfile } = require('../../utils/demo-profile.js');
 const { statusLabel } = require('../../utils/order-status-labels.js');
-const { defaultServiceStatus, showServiceDiagnostics: showDiagnostics, syncServiceStatus } = require('../../utils/service-status.js');
+const { buildWeatherSummary, defaultServiceStatus, showServiceDiagnostics: showDiagnostics, syncServiceStatus } = require('../../utils/service-status.js');
 const { formatApriltagValue } = require('../../utils/apriltag.js');
-const { formatOrderName } = require('../../utils/order-display.js');
+const { buildOrderInsight, formatOrderName } = require('../../utils/order-display.js');
 const {
   callDispatcher,
   getDispatcherContactName,
@@ -13,10 +13,10 @@ const {
 } = require('../../utils/delivery-notice.js');
 
 const POLL_INTERVAL_MS = 3000;
+const WEATHER_CHECK_INTERVAL_MS = 30000;
 const HIDDEN_STATUSES = ['cancelled'];
 const TERMINAL_STATUSES = ['delivered', 'failed', 'cancelled'];
 const CLEARABLE_STATUSES = ['delivered', 'failed', 'cancelled'];
-const WEATHER_FAILURE_KEYWORDS = ['恶劣天气', '天气管制', '天气保护', '接收保护'];
 
 function requestDeliveryNoticeSubscription(templateId) {
   const nextTemplateId = String(templateId || '').trim();
@@ -56,6 +56,7 @@ function canCancelOrder(order) {
 
 function decorateOrder(order) {
   const noteText = String(order && order.note || '').trim();
+  const insight = buildOrderInsight(order);
 
   return {
     ...order,
@@ -64,6 +65,9 @@ function decorateOrder(order) {
     apriltag_text: formatApriltagValue(order && order.target_id),
     note_text: noteText,
     is_failed: order && order.status === 'failed',
+    show_failure: !!insight.show,
+    failure_reason_text: insight.reason_text,
+    failure_advice_text: insight.advice_text,
     can_cancel: canCancelOrder(order),
     can_clear: canClearOrder(order)
   };
@@ -75,9 +79,7 @@ function filterVisibleOrders(orders) {
       return false;
     }
 
-    const noteText = String(item && item.note_text || item && item.note || '').trim();
-    const weatherFailure = item.status === 'failed' && WEATHER_FAILURE_KEYWORDS.some((keyword) => noteText.includes(keyword));
-    return !weatherFailure;
+    return true;
   });
 }
 
@@ -90,7 +92,8 @@ Page({
     clearingOrderId: '',
     cancellingOrderId: '',
     loadError: '',
-    hasLoaded: false
+    hasLoaded: false,
+    weatherSummary: buildWeatherSummary()
   }, defaultServiceStatus()),
 
   onLoad(query) {
@@ -101,7 +104,9 @@ Page({
     this._skipNextOnShow = true;
     this._pageVisible = false;
     this._pollTimer = null;
+    this._weatherTimer = null;
     this._polling = false;
+    this._weatherChecking = false;
 
     this.setData({ receiverId });
     this.initializePage(!!receiverId);
@@ -109,6 +114,7 @@ Page({
 
   async onShow() {
     this._pageVisible = true;
+    this.syncWeatherPollingState();
 
     if (this._skipNextOnShow) {
       this._skipNextOnShow = false;
@@ -117,35 +123,39 @@ Page({
     }
 
     if (this.data.receiverId.trim()) {
-      await this.fetchOrders();
+      await this.fetchOrders({ forceStatus: true });
       return;
     }
 
-    await syncServiceStatus(this, true);
+    const serviceStatus = await syncServiceStatus(this, true);
+    this.setData({ weatherSummary: buildWeatherSummary(serviceStatus) });
     this.syncPollingState();
   },
 
   onHide() {
     this._pageVisible = false;
     this.stopPolling();
+    this.stopWeatherPolling();
   },
 
   onUnload() {
     this._pageVisible = false;
     this.stopPolling();
+    this.stopWeatherPolling();
   },
 
   onPullDownRefresh() {
-    this.fetchOrders().finally(() => wx.stopPullDownRefresh());
+    this.fetchOrders({ forceStatus: true }).finally(() => wx.stopPullDownRefresh());
   },
 
   async initializePage(shouldLoad) {
     if (shouldLoad) {
-      await this.fetchOrders();
+      await this.fetchOrders({ forceStatus: true });
       return;
     }
 
-    await syncServiceStatus(this, true);
+    const serviceStatus = await syncServiceStatus(this, true);
+    this.setData({ weatherSummary: buildWeatherSummary(serviceStatus) });
   },
 
   handleInput(e) {
@@ -205,6 +215,7 @@ Page({
     const cachedTemplateId = app.globalData.deliveryNoticeTemplateId || this.data.serviceDeliveryNoticeTemplateId;
     let deliveryNotice = await requestDeliveryNoticeSubscription(cachedTemplateId);
     const serviceStatus = await syncServiceStatus(this, true);
+    this.setData({ weatherSummary: buildWeatherSummary(serviceStatus) });
     if (!serviceStatus.serviceOnline) {
       this.setData({ creating: false });
       wx.showModal({
@@ -248,7 +259,8 @@ Page({
         url: `/pages/order-panel/index?order_id=${encodeURIComponent(order.order_id)}&role=receiver`
       });
     } catch (err) {
-      await syncServiceStatus(this, true);
+      const nextStatus = await syncServiceStatus(this, true);
+      this.setData({ weatherSummary: buildWeatherSummary(nextStatus) });
       wx.hideLoading();
       wx.showModal({
         title: '提交失败',
@@ -311,7 +323,8 @@ Page({
       loadError: silent ? this.data.loadError : ''
     });
 
-    const serviceStatus = await syncServiceStatus(this, true);
+    const serviceStatus = await syncServiceStatus(this, !!options.forceStatus);
+    this.setData({ weatherSummary: buildWeatherSummary(serviceStatus) });
     if (!serviceStatus.serviceOnline) {
       this.setData({
         orders: [],
@@ -338,9 +351,10 @@ Page({
       });
       this.maybeShowDeliveredOrderModal(visibleOrders);
     } catch (err) {
-      const nextStatus = await syncServiceStatus(this, true);
+      const nextStatus = await syncServiceStatus(this, !!options.forceStatus);
       this.setData({
         orders: [],
+        weatherSummary: buildWeatherSummary(nextStatus),
         loadError: nextStatus.serviceOnline
           ? (err.message || '无法获取订单列表')
           : nextStatus.serviceMessage,
@@ -374,6 +388,49 @@ Page({
       clearInterval(this._pollTimer);
       this._pollTimer = null;
     }
+  },
+
+  async refreshWeatherSummary(options = {}) {
+    if (this._weatherChecking) {
+      return;
+    }
+
+    this._weatherChecking = true;
+    try {
+      const serviceStatus = await syncServiceStatus(this, !!options.force);
+      if (!this._pageVisible) {
+        return;
+      }
+      this.setData({ weatherSummary: buildWeatherSummary(serviceStatus) });
+    } finally {
+      this._weatherChecking = false;
+    }
+  },
+
+  startWeatherPolling() {
+    if (this._weatherTimer || !this._pageVisible) {
+      return;
+    }
+
+    this._weatherTimer = setInterval(() => {
+      this.refreshWeatherSummary({ force: true });
+    }, WEATHER_CHECK_INTERVAL_MS);
+  },
+
+  stopWeatherPolling() {
+    if (this._weatherTimer) {
+      clearInterval(this._weatherTimer);
+      this._weatherTimer = null;
+    }
+  },
+
+  syncWeatherPollingState() {
+    if (this._pageVisible) {
+      this.startWeatherPolling();
+      return;
+    }
+
+    this.stopWeatherPolling();
   },
 
   syncPollingState() {

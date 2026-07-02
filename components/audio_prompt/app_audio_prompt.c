@@ -10,6 +10,7 @@
 #include "esp_err.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "nvs.h"
 #include "bsp/esp-bsp.h"
 #include "esp_codec_dev.h"
 
@@ -24,6 +25,8 @@ static const char *TAG = "audio_prompt";
 #define APP_AUDIO_PROMPT_BITS        16U
 #define APP_AUDIO_PROMPT_VOLUME      65
 #define APP_AUDIO_PROMPT_CHUNK_BYTES 2048U
+#define APP_AUDIO_PROMPT_NVS_NS      "audio_prompt"
+#define APP_AUDIO_PROMPT_NVS_KEY     "enabled"
 
 extern const uint8_t s_ready_pcm_start[] asm("_binary_ready_pcm_start");
 extern const uint8_t s_ready_pcm_end[] asm("_binary_ready_pcm_end");
@@ -101,6 +104,8 @@ static esp_codec_dev_handle_t s_spk_codec = NULL;
 static bool s_codec_opened = false;
 static uint32_t s_pending_mask = 0;
 static uint32_t s_played_once_mask = 0;
+static bool s_audio_enabled = true;
+static bool s_audio_enabled_loaded = false;
 static app_audio_prompt_id_t s_playing_prompt = APP_AUDIO_PROMPT_COUNT;
 
 static uint32_t app_audio_prompt_bit(app_audio_prompt_id_t prompt)
@@ -115,6 +120,56 @@ static const app_audio_prompt_asset_t *app_audio_prompt_asset(app_audio_prompt_i
         return NULL;
     }
     return &s_prompt_assets[prompt];
+}
+
+static void app_audio_prompt_load_enabled_once(void)
+{
+    taskENTER_CRITICAL(&s_audio_mux);
+    const bool loaded = s_audio_enabled_loaded;
+    taskEXIT_CRITICAL(&s_audio_mux);
+    if (loaded)
+    {
+        return;
+    }
+
+    bool enabled = true;
+    nvs_handle_t handle;
+    esp_err_t ret = nvs_open(APP_AUDIO_PROMPT_NVS_NS, NVS_READONLY, &handle);
+    if (ret == ESP_OK)
+    {
+        uint8_t stored = 1U;
+        ret = nvs_get_u8(handle, APP_AUDIO_PROMPT_NVS_KEY, &stored);
+        if (ret == ESP_OK)
+        {
+            enabled = stored != 0U;
+        }
+        nvs_close(handle);
+    }
+
+    taskENTER_CRITICAL(&s_audio_mux);
+    if (!s_audio_enabled_loaded)
+    {
+        s_audio_enabled = enabled;
+        s_audio_enabled_loaded = true;
+    }
+    taskEXIT_CRITICAL(&s_audio_mux);
+}
+
+static esp_err_t app_audio_prompt_persist_enabled(bool enabled)
+{
+    nvs_handle_t handle;
+    esp_err_t ret = nvs_open(APP_AUDIO_PROMPT_NVS_NS, NVS_READWRITE, &handle);
+    if (ret != ESP_OK)
+    {
+        return ret;
+    }
+    ret = nvs_set_u8(handle, APP_AUDIO_PROMPT_NVS_KEY, enabled ? 1U : 0U);
+    if (ret == ESP_OK)
+    {
+        ret = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    return ret;
 }
 
 static esp_err_t app_audio_prompt_open_codec(void)
@@ -179,6 +234,11 @@ static esp_err_t app_audio_prompt_write_pcm(const uint8_t *pcm, size_t len)
     esp_err_t result = ESP_OK;
     while (offset < len)
     {
+        if (!app_audio_prompt_is_enabled())
+        {
+            result = ESP_ERR_INVALID_STATE;
+            break;
+        }
         size_t copy_len = len - offset;
         if (copy_len > APP_AUDIO_PROMPT_CHUNK_BYTES)
         {
@@ -253,6 +313,7 @@ static void app_audio_prompt_task(void *arg)
 
 esp_err_t app_audio_prompt_init(void)
 {
+    app_audio_prompt_load_enabled_once();
     if (s_audio_task != NULL)
     {
         return ESP_OK;
@@ -284,12 +345,56 @@ esp_err_t app_audio_prompt_init(void)
     return ESP_OK;
 }
 
+bool app_audio_prompt_is_enabled(void)
+{
+    app_audio_prompt_load_enabled_once();
+    taskENTER_CRITICAL(&s_audio_mux);
+    const bool enabled = s_audio_enabled;
+    taskEXIT_CRITICAL(&s_audio_mux);
+    return enabled;
+}
+
+esp_err_t app_audio_prompt_set_enabled(bool enabled, bool persist)
+{
+    app_audio_prompt_load_enabled_once();
+
+    taskENTER_CRITICAL(&s_audio_mux);
+    s_audio_enabled = enabled;
+    s_audio_enabled_loaded = true;
+    if (!enabled)
+    {
+        s_pending_mask = 0;
+    }
+    taskEXIT_CRITICAL(&s_audio_mux);
+
+    if (!enabled && s_audio_queue != NULL)
+    {
+        (void)xQueueReset(s_audio_queue);
+    }
+
+    if (!persist)
+    {
+        return ESP_OK;
+    }
+
+    esp_err_t ret = app_audio_prompt_persist_enabled(enabled);
+    if (ret != ESP_OK)
+    {
+        ESP_LOGW(TAG, "persist audio enabled failed: %s", esp_err_to_name(ret));
+    }
+    return ret;
+}
+
 esp_err_t app_audio_prompt_request(app_audio_prompt_id_t prompt)
 {
     const app_audio_prompt_asset_t *asset = app_audio_prompt_asset(prompt);
     if (asset == NULL)
     {
         return ESP_ERR_INVALID_ARG;
+    }
+    if (!app_audio_prompt_is_enabled())
+    {
+        return ESP_OK;
     }
     if (s_audio_queue == NULL)
     {

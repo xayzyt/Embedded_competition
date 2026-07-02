@@ -16,6 +16,7 @@ const CLEARABLE_ORDER_STATUSES = ['created', 'delivered', 'failed', 'cancelled']
 const DEFAULT_DEVICE_NAME = 'skyanchor-p4';
 const DEVICE_CANDIDATES = [DEFAULT_DEVICE_NAME];
 const MANUAL_RETRACT_ORDER_STATUSES = ['acting'];
+const DEMO_RESET_ORDER_STATUSES = ['pending_start', 'delivering', 'tag_matched', 'acting'];
 // 这里复用当前仓库里已经在板子侧生效的 MQTT 参数，先完成最小真实闭环。
 const MQTT_CONFIG = {
   brokerUrl: 'mqtts://cd29033a.ala.cn-hangzhou.emqxsl.cn:8883',
@@ -151,6 +152,25 @@ function normalizeTargetId(value) {
 function normalizeAssignedTargetId(value) {
   const parsed = normalizeTargetId(value);
   return parsed !== null && VALID_TARGET_IDS.has(parsed) ? parsed : null;
+}
+
+function normalizeBoolean(value, fieldName) {
+  if (value === true || value === false) {
+    return value;
+  }
+  if (value === 1 || value === 0) {
+    return Number(value) === 1;
+  }
+  if (typeof value === 'string') {
+    const text = value.trim().toLowerCase();
+    if (['1', 'true', 'on', 'yes', 'enabled'].includes(text)) {
+      return true;
+    }
+    if (['0', 'false', 'off', 'no', 'disabled'].includes(text)) {
+      return false;
+    }
+  }
+  throw new AppError(`${fieldName || 'value'} must be boolean`);
 }
 
 function ensureString(value, fieldName) {
@@ -380,6 +400,18 @@ function assertDeviceAckAccepted(ack) {
 
   if (msg === 'weather_blocked') {
     throw new AppError('恶劣天气管制中，暂时不能开始配送', 'WEATHER_BLOCKED');
+  }
+
+  if (msg === 'demo_reset_failed') {
+    throw new AppError('板端演示复位未完成，请检查机构状态后重试', 'DEVICE_RESET_FAILED');
+  }
+
+  if (msg === 'manual_retract_failed') {
+    throw new AppError('板端托盘回收未完成，请检查机构状态后重试', 'DEVICE_RETRACT_FAILED');
+  }
+
+  if (msg === 'set_voice_failed') {
+    throw new AppError('板端语音开关未更新成功，请稍后重试', 'DEVICE_VOICE_FAILED');
   }
 
   throw new AppError(msg || '板端拒绝执行配送命令', 'DEVICE_REJECTED');
@@ -730,7 +762,11 @@ async function syncOrderWithRealDeviceState(order, deviceStateCache = null) {
   }
 
   const matchedTagId = normalizeAssignedTargetId(deviceState.matched_tag_id);
-  const nextNote = String(deviceState.note || deviceState.state || order.note || '').trim();
+  const faultCode = String(deviceState.fault_code || '').trim();
+  const rawNote = String(deviceState.note || deviceState.state || order.note || '').trim();
+  const nextNote = faultCode
+    ? (rawNote && rawNote !== faultCode ? `${faultCode}: ${rawNote}` : faultCode)
+    : rawNote;
   const nextDeviceState = String(deviceState.state || order.last_device_state || '').trim();
 
   await addOrderEvent(order.order_id, 'device_state', {
@@ -772,6 +808,12 @@ async function handleHealth() {
     device_ready: deviceStateReady && acceptOrders && !weatherBlocked,
     weather_mode: String(deviceState && deviceState.weather_mode || 'normal'),
     device_state: String(deviceState && deviceState.state || ''),
+    device_note: String(deviceState && deviceState.note || ''),
+    device_fault: Number(deviceState && deviceState.fault || 0),
+    device_fault_code: String(deviceState && deviceState.fault_code || ''),
+    voice_enabled: deviceState && deviceState.voice_enabled !== undefined
+      ? Number(deviceState.voice_enabled) !== 0
+      : true,
     default_device: DEFAULT_DEVICE_NAME,
     device_candidates: DEVICE_CANDIDATES,
     state_topic: buildStateTopic(DEFAULT_DEVICE_NAME),
@@ -1005,6 +1047,42 @@ async function handleStartOrder(payload) {
   };
 }
 
+async function handleSetVoiceEnabled(payload) {
+  const enabled = normalizeBoolean(
+    payload.enabled !== undefined ? payload.enabled : payload.voice_enabled,
+    'enabled'
+  );
+  const deviceName = normalizeDeviceName(payload.device_name || DEFAULT_DEVICE_NAME);
+  const requestId = `VOICE-${now()}`;
+
+  try {
+    const ack = await publishMqttCommand(deviceName, {
+      cmd: 'set_voice',
+      voice_enabled: enabled ? 1 : 0,
+      request_id: requestId
+    }, {
+      waitAck: true,
+      ackTimeoutMs: 5000
+    });
+    assertDeviceAckAccepted(ack);
+  } catch (error) {
+    if (error instanceof AppError) {
+      throw error;
+    }
+    console.error('[skyanchorService] MQTT set_voice 发送失败', {
+      device_name: deviceName,
+      message: error && error.message
+    });
+    throw new AppError('MQTT 调度通道不可用，语音开关未发送成功', 'MQTT_UNAVAILABLE');
+  }
+
+  return {
+    device_name: deviceName,
+    voice_enabled: enabled,
+    mqtt_sent: true
+  };
+}
+
 async function handleManualRetractOrder(payload) {
   const orderId = ensureString(payload.order_id, 'order_id');
   const order = await getOrderById(orderId);
@@ -1056,6 +1134,65 @@ async function handleManualRetractOrder(payload) {
   return {
     order_id: orderId,
     status: order.status,
+    mqtt_sent: true
+  };
+}
+
+async function handleDemoResetOrder(payload) {
+  const orderId = ensureString(payload.order_id, 'order_id');
+  const order = await getOrderById(orderId);
+
+  if (!order) {
+    throw new AppError('订单不存在', 'NOT_FOUND');
+  }
+
+  if (!DEMO_RESET_ORDER_STATUSES.includes(order.status)) {
+    throw new AppError(`当前状态 ${order.status} 不能执行演示复位`);
+  }
+
+  const assignedDeviceName = String(order.device_name || '').trim();
+  if (!assignedDeviceName) {
+    throw new AppError('订单还没有分配设备');
+  }
+  const deviceName = normalizeDeviceName(assignedDeviceName);
+
+  try {
+    const ack = await publishMqttCommand(deviceName, {
+      cmd: 'demo_reset',
+      order_id: order.order_id,
+      order_name: getOrderName(order),
+      target_id: Number(order.target_id),
+      request_id: String(order.request_id || order.order_id)
+    }, {
+      waitAck: true,
+      ackTimeoutMs: 7000
+    });
+    assertDeviceAckAccepted(ack);
+  } catch (error) {
+    if (error instanceof AppError) {
+      throw error;
+    }
+    console.error('[skyanchorService] MQTT demo_reset 发送失败', {
+      order_id: order.order_id,
+      device_name: deviceName,
+      message: error && error.message
+    });
+    throw new AppError('MQTT 调度通道不可用，演示复位命令未发送成功', 'MQTT_UNAVAILABLE');
+  }
+
+  await addOrderEvent(orderId, 'demo_reset_requested', {
+    note: 'demo_reset',
+    device_name: deviceName,
+    request_id: String(order.request_id || order.order_id)
+  });
+
+  const updated = await updateOrderStatus(order, 'cancelled', 'demo_reset', {
+    last_device_state: 'cancelled'
+  });
+
+  return {
+    order_id: updated.order_id,
+    status: updated.status,
     mqtt_sent: true
   };
 }
@@ -1127,8 +1264,12 @@ async function routeAction(action, payload) {
       return handleAssignOrder(payload);
     case 'startOrder':
       return handleStartOrder(payload);
+    case 'setVoiceEnabled':
+      return handleSetVoiceEnabled(payload);
     case 'manualRetractOrder':
       return handleManualRetractOrder(payload);
+    case 'demoResetOrder':
+      return handleDemoResetOrder(payload);
     case 'cancelOrder':
       return handleCancelOrder(payload);
     default:

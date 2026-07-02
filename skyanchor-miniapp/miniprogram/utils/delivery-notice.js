@@ -1,6 +1,6 @@
 const config = require('../config/index.js');
 
-const DELIVERY_MODAL_STORAGE_PREFIX = 'skyanchor_delivery_modal_seen_';
+const DELIVERY_MODAL_STORAGE_PREFIX = 'skyanchor_delivery_report_seen_';
 
 function getDispatcherPhoneNumber() {
   return String(config.dispatcherPhoneNumber || '').trim();

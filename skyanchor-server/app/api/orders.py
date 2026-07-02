@@ -233,6 +233,7 @@ def cancel_order_endpoint(order_id: str) -> dict:
             order["device_name"],
             {
                 "cmd": "cancel",
+                "order_id": order["order_id"],
                 "target_id": order["target_id"],
                 "request_id": order["request_id"],
             },

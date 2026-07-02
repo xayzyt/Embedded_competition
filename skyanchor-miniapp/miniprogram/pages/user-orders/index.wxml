@@ -19,6 +19,15 @@
     <view class="service-detail-btn" bindtap="showServiceDiagnostics">诊断</view>
   </view>
 
+  <view class="weather-strip">
+    <block wx:for="{{weatherSummary.items}}" wx:key="key">
+      <view class="weather-item weather-{{item.state}}">
+        <view class="weather-label">{{item.label}}</view>
+        <view class="weather-value">{{item.value}}</view>
+      </view>
+    </block>
+  </view>
+
   <view class="card profile-card">
     <view class="section-head">
       <view class="section-title">用户信息</view>
@@ -61,7 +70,8 @@
           <view class="order-main">
             <view class="item-title">{{item.order_name_text}}</view>
             <view class="item-subtitle">Tag {{item.apriltag_text}}</view>
-            <view class="item-meta item-alert" wx:if="{{item.is_failed && item.note_text}}">失败原因：{{item.note_text}}</view>
+            <view class="item-meta item-alert" wx:if="{{item.show_failure}}">原因：{{item.failure_reason_text}}</view>
+            <view class="item-meta item-advice" wx:if="{{item.show_failure}}">建议：{{item.failure_advice_text}}</view>
           </view>
           <view class="order-side">
             <view class="status-badge status-{{item.status}}">{{item.status_text}}</view>

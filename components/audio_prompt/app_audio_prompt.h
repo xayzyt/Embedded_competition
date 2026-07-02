@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stdbool.h>
 #include "esp_err.h"
 
 #ifdef __cplusplus
@@ -18,6 +19,8 @@ typedef enum {
 } app_audio_prompt_id_t;
 
 esp_err_t app_audio_prompt_init(void);
+bool app_audio_prompt_is_enabled(void);
+esp_err_t app_audio_prompt_set_enabled(bool enabled, bool persist);
 esp_err_t app_audio_prompt_request(app_audio_prompt_id_t prompt);
 esp_err_t app_audio_prompt_request_ready(void);
 esp_err_t app_audio_prompt_request_docking_complete(void);

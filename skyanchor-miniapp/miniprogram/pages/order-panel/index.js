@@ -1,20 +1,26 @@
 ﻿const api = require('../../services/api.js');
 const { statusLabel } = require('../../utils/order-status-labels.js');
-const { defaultServiceStatus, formatClockTime, showServiceDiagnostics: showDiagnostics, syncServiceStatus } = require('../../utils/service-status.js');
+const { buildWeatherSummary, defaultServiceStatus, formatClockTime, showServiceDiagnostics: showDiagnostics, syncServiceStatus } = require('../../utils/service-status.js');
 const { APRILTAG_OPTIONS, isAssignedApriltag, formatApriltagValue } = require('../../utils/apriltag.js');
-const { formatOrderName } = require('../../utils/order-display.js');
+const {
+  buildOrderInsight,
+  formatDeviceState,
+  formatOrderName,
+  formatVoiceNodeFromDeviceState,
+  formatVoiceNodeFromStatus
+} = require('../../utils/order-display.js');
 const {
   callDispatcher,
-  getDispatcherContactName,
   hasDispatcherPhoneNumber,
   markDeliveryCompleteModalShown,
   shouldShowDeliveryCompleteModal
 } = require('../../utils/delivery-notice.js');
 
 const ACTIVE_STATUSES = ['created', 'pending_start', 'delivering', 'tag_matched', 'acting'];
-const BUSY_STATUSES = ['pending_start', 'delivering', 'tag_matched', 'acting'];
 const TERMINAL_STATUSES = ['delivered', 'failed', 'cancelled'];
+const DEMO_RESET_STATUSES = ['pending_start', 'delivering', 'tag_matched', 'acting'];
 const POLL_INTERVAL_MS = 2000;
+const WEATHER_CHECK_INTERVAL_MS = 30000;
 const ORDER_FLOW_STEPS = [
   { key: 'created', label: '调度' },
   { key: 'pending_start', label: '响应' },
@@ -36,7 +42,8 @@ const EVENT_TYPE_LABELS = {
   created: '订单创建',
   dispatch_assigned: '分配 Tag',
   start_requested: '开始配送',
-  manual_retract_requested: '手动回收',
+  manual_retract_requested: '回收',
+  demo_reset_requested: '演示复位',
   status_changed: '状态更新',
   device_state: '板端上报'
 };
@@ -78,7 +85,7 @@ function formatDuration(startValue, endValue) {
   return restMinutes ? `${hours} 小时 ${restMinutes} 分` : `${hours} 小时`;
 }
 
-function buildReport(order, noteText, deviceStateText) {
+function buildReport(order, deviceStateText, insight) {
   if (!TERMINAL_STATUSES.includes(order.status)) {
     return {
       show: false
@@ -87,98 +94,43 @@ function buildReport(order, noteText, deviceStateText) {
 
   const endTime = order.delivered_at || order.failed_at || order.updated_at;
   const durationText = formatDuration(order.created_at, endTime);
+  const finishedText = formatClockTime(endTime);
+  const stateText = formatDeviceState(deviceStateText);
   const base = {
     show: true,
     duration_text: durationText,
+    finished_text: finishedText,
     tag_text: formatApriltagValue(order.target_id),
-    device_text: deviceStateText || '-',
-    note_text: noteText || '-',
+    device_text: stateText,
+    reason_text: insight && insight.reason_text || '',
+    advice_text: insight && insight.advice_text || '',
     class_name: order.status
   };
 
   if (order.status === 'delivered') {
     return {
       ...base,
-      title: '配送报告',
-      result_text: '已送达',
-      summary_text: '识别、Tag、接驳闭环完成。'
+      title: '完成',
+      result_text: '送达',
+      summary_text: '语音播报、订单时间线和板端状态已完成闭环。'
     };
   }
 
   if (order.status === 'failed') {
     return {
       ...base,
-      title: '异常报告',
+      title: '异常',
       result_text: '失败',
-      summary_text: noteText || '未送达，已进入失败状态。'
+      summary_text: insight && insight.reason_text || '异常结束，任务已停止。'
     };
   }
 
   return {
     ...base,
-    title: '取消报告',
-    result_text: '已取消',
-    summary_text: noteText || '已取消，不再推进。'
+    title: '取消',
+    result_text: '取消',
+    summary_text: insight && insight.reason_text || '已停止，不再推进。'
   };
-}
-
-function buildDetailStatusTiles(status) {
-  return [
-    {
-      key: 'cloud',
-      label: '云端',
-      value: status.serviceOnline ? '在线' : '离线',
-      state: status.serviceOnline ? 'ok' : 'warn'
-    },
-    {
-      key: 'mqtt',
-      label: 'MQTT',
-      value: status.serviceMqttReady ? '已连接' : '未就绪',
-      state: status.serviceMqttReady ? 'ok' : 'warn'
-    },
-    {
-      key: 'device',
-      label: '板端',
-      value: status.serviceDeviceStateReady ? status.serviceDeviceStateText : '未上报',
-      state: status.serviceDeviceStateReady ? 'ok' : 'warn'
-    },
-    {
-      key: 'policy',
-      label: '策略',
-      value: status.serviceWeatherBlocked ? '天气保护' : (status.serviceAcceptOrders ? '可接单' : '忙碌保护'),
-      state: status.serviceWeatherBlocked ? 'warn' : 'ok'
-    }
-  ];
-}
-
-function buildSafetyBadges(order, status) {
-  const active = order && BUSY_STATUSES.includes(order.status);
-  return [
-    {
-      key: 'weather',
-      label: '天气',
-      value: status.serviceWeatherBlocked ? '保护中' : '正常',
-      state: status.serviceWeatherBlocked ? 'warn' : 'ok'
-    },
-    {
-      key: 'busy',
-      label: '忙碌',
-      value: active ? '锁定本单' : '空闲',
-      state: active ? 'warn' : 'ok'
-    },
-    {
-      key: 'cancel',
-      label: '取消',
-      value: order && order.can_cancel ? '可用' : '终态',
-      state: order && order.can_cancel ? 'ok' : 'muted'
-    },
-    {
-      key: 'retract',
-      label: '回收',
-      value: order && order.can_manual_retract ? '可用' : '待接驳',
-      state: order && order.can_manual_retract ? 'ok' : 'muted'
-    }
-  ];
 }
 
 function buildFlowSteps(status) {
@@ -234,24 +186,26 @@ function decorateOrder(order) {
   }
 
   const primaryAction = buildPrimaryAction(order);
-  const noteText = String(order.note || '').trim();
   const deviceStateText = String(order.last_device_state || '').trim();
-  const report = buildReport(order, noteText, deviceStateText);
+  const issue = buildOrderInsight(order);
+  const report = buildReport(order, deviceStateText, issue);
 
   return {
     ...order,
     order_name_text: formatOrderName(order),
     status_text: statusLabel(order.status),
     apriltag_text: formatApriltagValue(order.target_id),
-    note_text: noteText,
-    note_label: order.status === 'failed' ? '失败原因' : '备注',
-    last_device_state_text: deviceStateText,
+    last_device_state_text: deviceStateText ? formatDeviceState(deviceStateText) : '',
+    failure_reason_text: issue.reason_text,
+    failure_advice_text: issue.advice_text,
+    issue,
     report,
     show_report: report.show,
     flow_steps: buildFlowSteps(order.status),
     is_active: ACTIVE_STATUSES.includes(order.status),
     can_manual_retract: order.status === 'acting',
-    can_cancel: !TERMINAL_STATUSES.includes(order.status),
+    can_demo_reset: DEMO_RESET_STATUSES.includes(order.status),
+    can_cancel: order.status === 'created',
     show_contact_dispatcher: order.status === 'delivered' && hasDispatcherPhoneNumber(),
     primary_action: primaryAction.type,
     primary_action_text: primaryAction.text,
@@ -269,6 +223,10 @@ function buildEventTitle(event) {
 
   if (eventType === 'status_changed') {
     const status = String(data.status || '').trim();
+    const voiceText = formatVoiceNodeFromStatus(status);
+    if (voiceText) {
+      return voiceText;
+    }
     if (status === 'pending_start') {
       return '云端任务已下发';
     }
@@ -294,13 +252,18 @@ function buildEventTitle(event) {
   }
 
   if (eventType === 'manual_retract_requested') {
-    return '已请求手动回收托盘';
+    return '播报：托盘回收中';
+  }
+
+  if (eventType === 'demo_reset_requested') {
+    return '播报：演示复位';
   }
 
   if (eventType === 'device_state') {
     const payload = data.payload || {};
     const state = String(payload.state || data.last_device_state || '').trim();
-    return state ? `板端上报 ${state}` : '板端上报';
+    const voiceText = formatVoiceNodeFromDeviceState(payload, state);
+    return voiceText || (state ? `板端上报：${formatDeviceState(state)}` : '板端上报');
   }
 
   return EVENT_TYPE_LABELS[eventType] || eventType || '事件';
@@ -326,8 +289,13 @@ function buildEventDetail(event) {
     return `设备 ${data.device_name || '-'} · request ${data.request_id || '-'}`;
   }
 
+  if (eventType === 'demo_reset_requested') {
+    return `设备 ${data.device_name || '-'} · request ${data.request_id || '-'}`;
+  }
+
   if (eventType === 'status_changed') {
-    return data.note || data.last_device_state || '状态已同步';
+    const stateText = formatDeviceState(data.last_device_state);
+    return data.note || (stateText !== '-' ? `状态已同步：${stateText}` : '状态已同步');
   }
 
   if (eventType === 'device_state') {
@@ -335,7 +303,22 @@ function buildEventDetail(event) {
     const state = String(payload.state || '').trim() || '-';
     const fault = Number(payload.fault || 0);
     const cargo = Number(payload.cargo_received || 0);
-    return `state=${state} · fault=${fault} · cargo=${cargo}`;
+    const faultCode = String(payload.fault_code || '').trim();
+    const note = String(payload.note || '').trim();
+    const parts = [`状态 ${formatDeviceState(state)}`];
+    if (fault) {
+      parts.push('故障标记');
+    }
+    if (faultCode) {
+      parts.push(`原因码 ${faultCode}`);
+    }
+    if (cargo) {
+      parts.push('货物已接收');
+    }
+    if (note) {
+      parts.push(note);
+    }
+    return parts.join(' · ');
   }
 
   return '';
@@ -353,6 +336,20 @@ function decorateEvents(events) {
     }));
 }
 
+function buildDeliveryReportModal(order, canContactDispatcher) {
+  const report = order && order.report || {};
+  return {
+    order_name_text: order ? order.order_name_text : '',
+    result_text: report.result_text || '送达',
+    summary_text: report.summary_text || '闭环完成',
+    tag_text: report.tag_text || '-',
+    duration_text: report.duration_text || '-',
+    finished_text: report.finished_text || '-',
+    device_text: report.device_text || '-',
+    can_contact_dispatcher: !!canContactDispatcher
+  };
+}
+
 Page({
   data: Object.assign({
     orderId: '',
@@ -360,12 +357,13 @@ Page({
     isReceiverView: false,
     order: null,
     events: [],
-    detailStatusTiles: [],
-    safetyBadges: [],
+    runtimeSummary: buildWeatherSummary(),
     actionPending: false,
     loading: false,
     loadError: '',
-    hasLoaded: false
+    hasLoaded: false,
+    showDeliveryReportModal: false,
+    deliveryReportModal: null
   }, defaultServiceStatus()),
 
   onLoad(query) {
@@ -380,7 +378,9 @@ Page({
     this._skipNextOnShow = true;
     this._pageVisible = false;
     this._pollTimer = null;
+    this._weatherTimer = null;
     this._polling = false;
+    this._weatherChecking = false;
     this._selectingTag = false;
 
     this.initializePage();
@@ -388,6 +388,7 @@ Page({
 
   async onShow() {
     this._pageVisible = true;
+    this.syncWeatherPollingState();
 
     if (this._skipNextOnShow) {
       this._skipNextOnShow = false;
@@ -396,35 +397,39 @@ Page({
     }
 
     if (this.data.orderId) {
-      await this.fetchDetail();
+      await this.fetchDetail({ forceStatus: true });
       return;
     }
 
-    await syncServiceStatus(this, true);
+    const serviceStatus = await syncServiceStatus(this, true);
+    this.setData({ runtimeSummary: buildWeatherSummary(serviceStatus) });
     this.syncPollingState();
   },
 
   onHide() {
     this._pageVisible = false;
     this.stopPolling();
+    this.stopWeatherPolling();
   },
 
   onUnload() {
     this._pageVisible = false;
     this.stopPolling();
+    this.stopWeatherPolling();
   },
 
   onPullDownRefresh() {
-    this.fetchDetail().finally(() => wx.stopPullDownRefresh());
+    this.fetchDetail({ forceStatus: true }).finally(() => wx.stopPullDownRefresh());
   },
 
   async initializePage() {
     if (this.data.orderId) {
-      await this.fetchDetail();
+      await this.fetchDetail({ forceStatus: true });
       return;
     }
 
-    await syncServiceStatus(this, true);
+    const serviceStatus = await syncServiceStatus(this, true);
+    this.setData({ runtimeSummary: buildWeatherSummary(serviceStatus) });
   },
 
   async fetchDetail(options = {}) {
@@ -435,7 +440,7 @@ Page({
       this.setData({
         order: null,
         events: [],
-        loadError: '缺少订单编号，无法查看详情。',
+        loadError: '缺少订单，无法查看。',
         hasLoaded: true,
         loading: false
       });
@@ -447,9 +452,10 @@ Page({
       loadError: silent ? this.data.loadError : ''
     });
 
-    const serviceStatus = await syncServiceStatus(this, true);
+    const serviceStatus = await syncServiceStatus(this, !!options.forceStatus);
     if (!serviceStatus.serviceOnline) {
       this.setData({
+        runtimeSummary: buildWeatherSummary(serviceStatus),
         loadError: serviceStatus.serviceMessage,
         hasLoaded: true,
         loading: false
@@ -465,18 +471,18 @@ Page({
       this.setData({
         order,
         events: decorateEvents(data.events || []),
-        detailStatusTiles: buildDetailStatusTiles(serviceStatus),
-        safetyBadges: buildSafetyBadges(order, serviceStatus),
+        runtimeSummary: buildWeatherSummary(serviceStatus),
         loadError: '',
         hasLoaded: true,
         loading: false
       });
-      this.maybeShowDeliveryCompleteModal(order);
+      this.maybeShowDeliveryReport(order);
     } catch (err) {
-      const nextStatus = await syncServiceStatus(this, true);
+      const nextStatus = await syncServiceStatus(this, !!options.forceStatus);
       this.setData({
         order: null,
         events: [],
+        runtimeSummary: buildWeatherSummary(nextStatus),
         loadError: nextStatus.serviceOnline
           ? (err.message || '无法获取订单详情')
           : nextStatus.serviceMessage,
@@ -512,6 +518,49 @@ Page({
     }
   },
 
+  async refreshWeatherSummary(options = {}) {
+    if (this._weatherChecking) {
+      return;
+    }
+
+    this._weatherChecking = true;
+    try {
+      const serviceStatus = await syncServiceStatus(this, !!options.force);
+      if (!this._pageVisible) {
+        return;
+      }
+      this.setData({ runtimeSummary: buildWeatherSummary(serviceStatus) });
+    } finally {
+      this._weatherChecking = false;
+    }
+  },
+
+  startWeatherPolling() {
+    if (this._weatherTimer || !this._pageVisible) {
+      return;
+    }
+
+    this._weatherTimer = setInterval(() => {
+      this.refreshWeatherSummary({ force: true });
+    }, WEATHER_CHECK_INTERVAL_MS);
+  },
+
+  stopWeatherPolling() {
+    if (this._weatherTimer) {
+      clearInterval(this._weatherTimer);
+      this._weatherTimer = null;
+    }
+  },
+
+  syncWeatherPollingState() {
+    if (this._pageVisible) {
+      this.startWeatherPolling();
+      return;
+    }
+
+    this.stopWeatherPolling();
+  },
+
   syncPollingState() {
     if (this._pageVisible && this.data.order && this.data.order.is_active) {
       this.startPolling();
@@ -525,7 +574,7 @@ Page({
     showDiagnostics(this.data);
   },
 
-  maybeShowDeliveryCompleteModal(order) {
+  maybeShowDeliveryReport(order) {
     if (!this.data.isReceiverView || !order || order.status !== 'delivered') {
       return;
     }
@@ -535,22 +584,26 @@ Page({
     }
 
     markDeliveryCompleteModalShown(order.order_id);
-    const canCallDispatcher = hasDispatcherPhoneNumber();
-    wx.showModal({
-      title: '配送已完成',
-      content: `您的 ${order.order_name_text} 已送达，请前往取件。${canCallDispatcher ? `如需协助可联系${getDispatcherContactName()}。` : ''}`,
-      confirmText: canCallDispatcher ? '联系配送员' : '我知道了',
-      cancelText: '稍后',
-      showCancel: canCallDispatcher,
-      success: (res) => {
-        if (res.confirm && canCallDispatcher) {
-          callDispatcher();
-        }
-      }
+    this.setData({
+      showDeliveryReportModal: true,
+      deliveryReportModal: buildDeliveryReportModal(order, this.data.isReceiverView && order.show_contact_dispatcher)
     });
   },
 
+  closeDeliveryReport() {
+    this.setData({
+      showDeliveryReportModal: false
+    });
+  },
+
+  noop() {},
+
   contactDispatcher() {
+    if (this.data.showDeliveryReportModal) {
+      this.setData({
+        showDeliveryReportModal: false
+      });
+    }
     callDispatcher();
   },
 
@@ -638,6 +691,30 @@ Page({
     return true;
   },
 
+  async ensureCancelCommandReady(actionLabel) {
+    const serviceStatus = await syncServiceStatus(this, true);
+
+    if (!serviceStatus.serviceOnline) {
+      wx.showModal({
+        title: serviceStatus.serviceBlockTitle || '云端服务未连接',
+        content: serviceStatus.serviceBlockAdvice || serviceStatus.serviceMessage,
+        showCancel: false
+      });
+      return false;
+    }
+
+    if (!serviceStatus.serviceMqttReady) {
+      wx.showModal({
+        title: serviceStatus.serviceBlockTitle || '云端调度未就绪',
+        content: `${serviceStatus.serviceBlockAdvice || '请检查 MQTT 与板端连接。'}\n\n当前暂时无法${actionLabel}。`,
+        showCancel: false
+      });
+      return false;
+    }
+
+    return true;
+  },
+
   async assignApriltag() {
     const order = this.data.order;
     if (!order || order.primary_action !== 'assign' || this.data.actionPending || this._selectingTag) {
@@ -707,7 +784,7 @@ Page({
     }
 
     if (order.status !== 'created') {
-      const ready = await this.ensureMessagingReady('取消订单');
+      const ready = await this.ensureCancelCommandReady('取消订单');
       if (!ready) {
         return;
       }
@@ -716,13 +793,27 @@ Page({
     await this.runAction(() => api.cancelOrder(this.data.orderId), '已取消订单');
   },
 
+  async demoResetOrder() {
+    const order = this.data.order;
+    if (!order || !order.can_demo_reset || this.data.isReceiverView || this.data.actionPending) {
+      return;
+    }
+
+    const ready = await this.ensureCancelCommandReady('演示复位');
+    if (!ready) {
+      return;
+    }
+
+    await this.runAction(() => api.demoResetOrder(this.data.orderId), '已触发复位');
+  },
+
   async manualRetractTray() {
     const order = this.data.order;
     if (!order || !order.can_manual_retract || this.data.actionPending) {
       return;
     }
 
-    const ready = await this.ensureDeviceCommandReady('手动回收托盘');
+    const ready = await this.ensureDeviceCommandReady('回收托盘');
     if (!ready) {
       return;
     }

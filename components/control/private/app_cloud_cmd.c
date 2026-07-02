@@ -43,6 +43,26 @@ static bool app_cloud_cmd_get_u16(const cJSON *root, const char *key, uint16_t *
     return ok;
 }
 
+static bool app_cloud_cmd_get_bool(const cJSON *root, const char *key, bool *out)
+{
+    if (root == NULL || key == NULL || out == NULL)
+    {
+        return false;
+    }
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(root, key);
+    if (cJSON_IsBool(item))
+    {
+        *out = cJSON_IsTrue(item);
+        return true;
+    }
+    if (cJSON_IsNumber(item))
+    {
+        *out = item->valuedouble != 0;
+        return true;
+    }
+    return false;
+}
+
 // 解析云端命令，cmd 为必填，其余字段按不同命令可选。
 esp_err_t app_cloud_cmd_parse_json(const char *payload, app_cloud_cmd_t *out)
 {
@@ -64,6 +84,8 @@ esp_err_t app_cloud_cmd_parse_json(const char *payload, app_cloud_cmd_t *out)
         return ESP_ERR_INVALID_ARG;
     }
     (void)app_cloud_cmd_get_u16(root, "target_id", &out->target_id);
+    out->voice_enabled_set =
+        app_cloud_cmd_get_bool(root, "voice_enabled", &out->voice_enabled);
     (void)app_cloud_cmd_get_string(root, "request_id", out->request_id, sizeof(out->request_id));
     (void)app_cloud_cmd_get_string(root, "order_id", out->order_id, sizeof(out->order_id));
     (void)app_cloud_cmd_get_string(root, "order_name", out->order_name, sizeof(out->order_name));

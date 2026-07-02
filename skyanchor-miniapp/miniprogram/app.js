@@ -10,6 +10,7 @@ const {
 
 const RECEIVER_ID_STORAGE_KEY = 'skyanchor_receiver_id';
 const LEGACY_DEMO_RECEIVER_IDS = ['receiver_003', 'receiver__003'];
+const SERVICE_HEALTH_CACHE_MS = 30000;
 
 function resolveInitialReceiverId(defaultReceiverId) {
   const fallbackReceiverId = String(defaultReceiverId || '').trim() || 'receiver';
@@ -49,7 +50,14 @@ App({
   },
 
   async refreshServiceHealth(force) {
-    if (this._serviceHealthPromise && !force) {
+    const now = Date.now();
+    const currentStatus = this.globalData.serviceStatus || defaultServiceStatus();
+
+    if (!force && currentStatus.serviceChecked && this._lastServiceHealthAt && now - this._lastServiceHealthAt < SERVICE_HEALTH_CACHE_MS) {
+      return currentStatus;
+    }
+
+    if (this._serviceHealthPromise) {
       return this._serviceHealthPromise;
     }
 
@@ -61,11 +69,13 @@ App({
         const nextStatus = buildServiceStatusFromHealth(payload);
         this.globalData.deliveryNoticeTemplateId = String(payload && payload.delivery_notice_template_id || '').trim();
         this.globalData.serviceStatus = nextStatus;
+        this._lastServiceHealthAt = Date.now();
         return nextStatus;
       })
       .catch((err) => {
         const nextStatus = buildServiceStatusFromError(err);
         this.globalData.serviceStatus = nextStatus;
+        this._lastServiceHealthAt = Date.now();
         return nextStatus;
       })
       .finally(() => {
