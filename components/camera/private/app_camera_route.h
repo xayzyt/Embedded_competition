@@ -16,6 +16,7 @@ typedef struct {
     bool ai_due;      // 本帧是否提交无人机分类模型。
     bool vision_due;  // 本帧是否提交 AprilTag 视觉管线。
     bool capture_due; // 本帧是否保存为训练样本。
+    bool delivery_due; // 本帧是否保存为送达照片。
 } app_camera_frame_route_t;
 
 // 清空抽样计数和门控边沿状态；重新启动预览前调用。

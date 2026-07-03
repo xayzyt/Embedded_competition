@@ -284,8 +284,6 @@ Page({
     }
 
     this.setData({ creating: true });
-    const cachedTemplateId = app.globalData.deliveryNoticeTemplateId || this.data.serviceDeliveryNoticeTemplateId;
-    let deliveryNotice = await requestDeliveryNoticeSubscription(cachedTemplateId);
     const serviceStatus = await syncServiceStatus(this, true);
     this.setData({ weatherSummary: buildWeatherSummary(serviceStatus) });
     if (!serviceStatus.serviceOnline) {
@@ -308,9 +306,10 @@ Page({
       return;
     }
 
-    if (!deliveryNotice.templateId && serviceStatus.serviceDeliveryNoticeTemplateId) {
-      deliveryNotice = await requestDeliveryNoticeSubscription(serviceStatus.serviceDeliveryNoticeTemplateId);
-    }
+    const templateId = serviceStatus.serviceDeliveryNoticeTemplateId ||
+      app.globalData.deliveryNoticeTemplateId ||
+      this.data.serviceDeliveryNoticeTemplateId;
+    const deliveryNotice = await requestDeliveryNoticeSubscription(templateId);
 
     wx.showLoading({ title: '提交订单中' });
 

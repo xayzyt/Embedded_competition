@@ -6,6 +6,7 @@
 #include "app_ai_capture.h"
 #include "app_ch32_link.h"
 #include "app_ctrl.h"
+#include "app_delivery_photo.h"
 #include "app_dock_judge.h"
 #include "app_drone_ai.h"
 #include "app_main_services.h"
@@ -222,6 +223,11 @@ static app_runtime_start_result_t app_init_runtime_modules(const app_dock_judge_
     if (capture_ret != ESP_OK)
     {
         ESP_LOGW(TAG, "AI capture disabled: %s", esp_err_to_name(capture_ret));
+    }
+    esp_err_t photo_ret = app_delivery_photo_init();
+    if (photo_ret != ESP_OK)
+    {
+        ESP_LOGW(TAG, "delivery photo disabled: %s", esp_err_to_name(photo_ret));
     }
     return result;
 }

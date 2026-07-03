@@ -250,6 +250,56 @@
   white-space: nowrap;
 }
 
+.delivery-photo-entry {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16rpx;
+  margin-top: 16rpx;
+  padding: 18rpx 20rpx;
+  border-radius: 18rpx;
+  background: rgba(255, 255, 255, 0.78);
+}
+
+.delivery-photo-copy {
+  min-width: 0;
+}
+
+.delivery-photo-title {
+  color: #172033;
+  font-size: 25rpx;
+  font-weight: 900;
+  line-height: 1.2;
+}
+
+.delivery-photo-desc {
+  margin-top: 5rpx;
+  color: #64748b;
+  font-size: 21rpx;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.delivery-photo-action {
+  flex-shrink: 0;
+  min-width: 120rpx;
+  padding: 11rpx 18rpx;
+  border-radius: 999rpx;
+  text-align: center;
+  font-size: 21rpx;
+  font-weight: 900;
+}
+
+.delivery-photo-action.ready {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.delivery-photo-action.pending {
+  background: #f1f5f9;
+  color: #64748b;
+}
+
 .order-detail-page .detail-action-row {
   margin-top: 18rpx;
   gap: 12rpx;

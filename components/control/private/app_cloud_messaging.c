@@ -1,6 +1,7 @@
 #include "app_cloud_internal.h"
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include "cJSON.h"
@@ -10,11 +11,24 @@
 #include "app_audio_prompt.h"
 #include "app_cloud_cmd.h"
 #include "app_ch32_link.h"
+#include "app_delivery_photo.h"
+#include "mbedtls/base64.h"
 #include "app_ui.h"
 
 // MQTT 消息层：负责云端命令解析、ACK 回复和任务状态 JSON 上报。
 
 static const char *TAG = "app_cloud";
+
+#define APP_CLOUD_PHOTO_B64_BUF_LEN 520
+#define APP_CLOUD_PHOTO_RAW_BUF_LEN 384
+#define APP_CLOUD_PHOTO_CHUNK_DELAY_MS 120U
+#define APP_CLOUD_PHOTO_FIRST_DELAY_MS 5000U
+#define APP_CLOUD_PHOTO_RETRY_MS 30000U
+#define APP_CLOUD_PHOTO_CHUNK_QOS 1
+#define APP_CLOUD_PHOTO_INLINE_MAX_BYTES (8 * 1024U)
+
+static char s_photo_upload_photo_id[16] = {0};
+static TickType_t s_photo_upload_next_tick = 0;
 
 /* ---------- JSON 与订单字段辅助函数 ---------- */
 
@@ -247,6 +261,260 @@ static esp_err_t app_cloud_publish_ack(const app_cloud_cmd_t *cmd,
     cJSON_Delete(root);
     return ret;
 }
+
+static void app_cloud_build_photo_topic(char *out,
+    size_t out_size,
+    const char *photo_id,
+    const char *suffix)
+{
+    if (out == NULL || out_size == 0U)
+    {
+        return;
+    }
+    snprintf(out,
+        out_size,
+        "%s/%s/photo/%s/%s",
+        CONFIG_SKY_MQTT_TOPIC_PREFIX,
+        CONFIG_SKY_MQTT_DEVICE_NAME,
+        photo_id != NULL ? photo_id : "-",
+        suffix != NULL ? suffix : "-");
+}
+
+static esp_err_t app_cloud_publish_photo_meta(const app_delivery_photo_info_t *photo)
+{
+    if (photo == NULL || photo->photo_id[0] == '\0')
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+    char topic[APP_CLOUD_TOPIC_BUF_LEN] = {0};
+    app_cloud_build_photo_topic(topic, sizeof(topic), photo->photo_id, "meta");
+    cJSON *root = cJSON_CreateObject();
+    if (root == NULL)
+    {
+        return ESP_ERR_NO_MEM;
+    }
+    bool ok = app_cloud_json_add_string(root, "order_id", photo->order_id) &&
+        app_cloud_json_add_string(root, "request_id", photo->request_id) &&
+        app_cloud_json_add_string(root, "order_name", photo->order_name) &&
+        app_cloud_json_add_string(root, "photo_id", photo->photo_id) &&
+        app_cloud_json_add_string(root, "mime", "image/jpeg") &&
+        app_cloud_json_add_number(root, "target_id", photo->target_id) &&
+        app_cloud_json_add_number(root, "width", photo->width) &&
+        app_cloud_json_add_number(root, "height", photo->height) &&
+        app_cloud_json_add_number(root, "size", photo->size) &&
+        app_cloud_json_add_number(root, "chunks", photo->chunks) &&
+        app_cloud_json_add_number(root, "chunk_raw_size", photo->chunk_raw_size) &&
+        app_cloud_json_add_string(root, "sha256", photo->sha256_hex);
+    esp_err_t ret = ok ? app_cloud_publish_json(topic, root, 1) : ESP_ERR_NO_MEM;
+    cJSON_Delete(root);
+    return ret;
+}
+
+static esp_err_t app_cloud_publish_photo_chunks(const app_delivery_photo_info_t *photo)
+{
+    if (photo == NULL || photo->photo_id[0] == '\0' || photo->chunks == 0U)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (photo->chunk_raw_size == 0U || photo->chunk_raw_size > APP_CLOUD_PHOTO_RAW_BUF_LEN)
+    {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    uint8_t raw[APP_CLOUD_PHOTO_RAW_BUF_LEN] = {0};
+    unsigned char b64[APP_CLOUD_PHOTO_B64_BUF_LEN] = {0};
+    esp_err_t ret = ESP_OK;
+    for (uint16_t idx = 0; idx < photo->chunks; idx++)
+    {
+        size_t raw_len = 0;
+        ret = app_delivery_photo_read_jpeg_chunk(photo->photo_id,
+            (uint32_t)idx * photo->chunk_raw_size,
+            raw,
+            photo->chunk_raw_size,
+            &raw_len);
+        if (ret != ESP_OK || raw_len == 0U)
+        {
+            ret = (ret != ESP_OK) ? ret : ESP_FAIL;
+            break;
+        }
+        size_t b64_len = 0;
+        int enc_ret = mbedtls_base64_encode(b64,
+            sizeof(b64) - 1U,
+            &b64_len,
+            raw,
+            raw_len);
+        if (enc_ret != 0)
+        {
+            ret = ESP_FAIL;
+            break;
+        }
+        b64[b64_len] = '\0';
+        char suffix[24] = {0};
+        snprintf(suffix, sizeof(suffix), "chunk/%03u", (unsigned)idx);
+        char topic[APP_CLOUD_TOPIC_BUF_LEN] = {0};
+        app_cloud_build_photo_topic(topic, sizeof(topic), photo->photo_id, suffix);
+        ret = app_cloud_publish_raw(topic, (const char *)b64, APP_CLOUD_PHOTO_CHUNK_QOS, 1);
+        if (ret != ESP_OK)
+        {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(APP_CLOUD_PHOTO_CHUNK_DELAY_MS));
+    }
+    if (ret == ESP_OK)
+    {
+        ret = app_cloud_publish_photo_meta(photo);
+    }
+    return ret;
+}
+
+static bool app_cloud_json_add_inline_photo(cJSON *root, const app_delivery_photo_info_t *photo)
+{
+    if (root == NULL || photo == NULL ||
+        photo->photo_id[0] == '\0' ||
+        photo->size == 0U ||
+        photo->size > APP_CLOUD_PHOTO_INLINE_MAX_BYTES)
+    {
+        return true;
+    }
+
+    uint8_t *raw = (uint8_t *)malloc(photo->size);
+    if (raw == NULL)
+    {
+        return true;
+    }
+    size_t raw_len = 0;
+    esp_err_t ret = app_delivery_photo_read_jpeg_chunk(photo->photo_id,
+        0,
+        raw,
+        photo->size,
+        &raw_len);
+    if (ret != ESP_OK || raw_len != photo->size)
+    {
+        free(raw);
+        return true;
+    }
+
+    size_t b64_cap = (((size_t)photo->size + 2U) / 3U) * 4U + 1U;
+    unsigned char *b64 = (unsigned char *)malloc(b64_cap);
+    if (b64 == NULL)
+    {
+        free(raw);
+        return true;
+    }
+    size_t b64_len = 0;
+    int enc_ret = mbedtls_base64_encode(b64,
+        b64_cap,
+        &b64_len,
+        raw,
+        raw_len);
+    free(raw);
+    if (enc_ret != 0)
+    {
+        free(b64);
+        return true;
+    }
+    b64[b64_len] = '\0';
+
+    bool ok = app_cloud_json_add_number(root, "photo_inline", 1U) &&
+        app_cloud_json_add_string(root, "photo_inline_b64", (const char *)b64) &&
+        app_cloud_json_add_string(root, "photo_mime", "image/jpeg") &&
+        app_cloud_json_add_string(root, "photo_sha256", photo->sha256_hex);
+    free(b64);
+    return ok;
+}
+
+static bool app_cloud_photo_upload_allowed(const app_delivery_photo_info_t *photo)
+{
+    if (photo == NULL || photo->order_id[0] == '\0' || photo->photo_id[0] == '\0')
+    {
+        return false;
+    }
+    if (strcmp(photo->order_id, s_cloud.current_order_id) != 0 ||
+        strcmp(photo->request_id, s_cloud.current_request_id) != 0)
+    {
+        return false;
+    }
+    app_task_snapshot_t snap = {0};
+    return app_task_peek_snapshot(&snap) &&
+        snap.state == APP_TASK_STATE_COMPLETED &&
+        !snap.active;
+}
+
+static void app_cloud_track_photo_upload_id(const app_delivery_photo_info_t *photo)
+{
+    if (photo == NULL || photo->photo_id[0] == '\0')
+    {
+        return;
+    }
+    if (strcmp(s_photo_upload_photo_id, photo->photo_id) != 0)
+    {
+        strlcpy(s_photo_upload_photo_id, photo->photo_id, sizeof(s_photo_upload_photo_id));
+        s_photo_upload_next_tick = 0;
+    }
+}
+
+void app_cloud_publish_pending_photo(void)
+{
+    app_delivery_photo_info_t photo = {0};
+    if (!app_delivery_photo_get_info(&photo))
+    {
+        return;
+    }
+    if (!s_cloud.mqtt_connected || s_cloud.mqtt_client == NULL)
+    {
+        return;
+    }
+    app_cloud_track_photo_upload_id(&photo);
+    if (photo.status != APP_DELIVERY_PHOTO_STATUS_READY &&
+        photo.status != APP_DELIVERY_PHOTO_STATUS_UPLOADING &&
+        photo.status != APP_DELIVERY_PHOTO_STATUS_UPLOADED)
+    {
+        return;
+    }
+    if (!app_cloud_photo_upload_allowed(&photo))
+    {
+        return;
+    }
+    TickType_t now_tick = xTaskGetTickCount();
+    if (s_photo_upload_next_tick != 0 &&
+        (int32_t)(now_tick - s_photo_upload_next_tick) < 0)
+    {
+        return;
+    }
+    const bool already_uploaded = photo.status == APP_DELIVERY_PHOTO_STATUS_UPLOADED;
+    app_cloud_publish_current_state();
+    if (photo.status == APP_DELIVERY_PHOTO_STATUS_READY)
+    {
+        if (app_delivery_photo_mark_uploading(photo.photo_id) != ESP_OK)
+        {
+            return;
+        }
+        (void)app_delivery_photo_get_info(&photo);
+    }
+    vTaskDelay(pdMS_TO_TICKS(APP_CLOUD_PHOTO_FIRST_DELAY_MS));
+    if (!s_cloud.mqtt_connected || s_cloud.mqtt_client == NULL)
+    {
+        (void)app_delivery_photo_mark_upload_retry(photo.photo_id, "mqtt offline");
+        s_photo_upload_next_tick = xTaskGetTickCount() + pdMS_TO_TICKS(APP_CLOUD_PHOTO_RETRY_MS);
+        app_cloud_publish_current_state();
+        return;
+    }
+    esp_err_t ret = app_cloud_publish_photo_chunks(&photo);
+    if (ret == ESP_OK)
+    {
+        if (!already_uploaded)
+        {
+            (void)app_delivery_photo_mark_uploaded(photo.photo_id);
+        }
+        s_photo_upload_next_tick = xTaskGetTickCount() + pdMS_TO_TICKS(APP_CLOUD_PHOTO_RETRY_MS);
+    }
+    else
+    {
+        (void)app_delivery_photo_mark_upload_retry(photo.photo_id, esp_err_to_name(ret));
+        s_photo_upload_next_tick = xTaskGetTickCount() + pdMS_TO_TICKS(APP_CLOUD_PHOTO_RETRY_MS);
+    }
+    app_cloud_publish_current_state();
+}
+
 // 发布任务状态快照；retain=1 让云端/调试端重连后能看到最近状态。
 void app_cloud_publish_task_snapshot_internal(const app_task_snapshot_t *snap)
 {
@@ -261,6 +529,8 @@ void app_cloud_publish_task_snapshot_internal(const app_task_snapshot_t *snap)
     int fault = (snap->state == APP_TASK_STATE_FAULT) ? 1 : 0;
     int accept_orders = (!s_cloud.weather_docking_blocked && !snap->active) ? 1 : 0;
     const char *fault_code = app_cloud_fault_code_from_snapshot(snap);
+    app_delivery_photo_info_t photo = {0};
+    (void)app_delivery_photo_get_info(&photo);
     cJSON *root = cJSON_CreateObject();
     if (root == NULL)
     {
@@ -285,6 +555,14 @@ void app_cloud_publish_task_snapshot_internal(const app_task_snapshot_t *snap)
         app_cloud_json_add_number(root, "weather_simulated", s_cloud.weather_simulated ? 1U : 0U) &&
         app_cloud_json_add_number(root, "accept_orders", accept_orders) &&
         app_cloud_json_add_string(root, "weather_mode", app_cloud_weather_mode_text(s_cloud.weather_mode)) &&
+        app_cloud_json_add_string(root, "photo_status", app_delivery_photo_status_text(photo.status)) &&
+        app_cloud_json_add_string(root, "photo_id", photo.photo_id) &&
+        app_cloud_json_add_number(root, "photo_size", photo.size) &&
+        app_cloud_json_add_number(root, "photo_width", photo.width) &&
+        app_cloud_json_add_number(root, "photo_height", photo.height) &&
+        app_cloud_json_add_number(root, "photo_chunks", photo.chunks) &&
+        app_cloud_json_add_string(root, "photo_error", photo.error) &&
+        app_cloud_json_add_inline_photo(root, &photo) &&
         app_cloud_json_add_string(root, "source", snap->source) &&
         app_cloud_json_add_string(root, "note", snap->note);
     esp_err_t ret = ok ? app_cloud_publish_json(s_cloud.topic_state, root, 1) : ESP_ERR_NO_MEM;
@@ -324,6 +602,10 @@ void app_cloud_on_task_event(app_task_event_t event,
     s_cloud.last_snapshot = *snap;
     s_cloud.have_last_snapshot = true;
     app_cloud_publish_task_snapshot_internal(snap);
+    if (snap->state == APP_TASK_STATE_COMPLETED && !snap->active)
+    {
+        app_cloud_request_photo_upload();
+    }
 }
 /* ---------- 云端命令执行 ---------- */
 
@@ -389,6 +671,13 @@ static esp_err_t app_cloud_receive_start_task(const app_cloud_cmd_t *cmd)
         strlcpy(s_cloud.current_request_id, previous_request_id, sizeof(s_cloud.current_request_id));
         strlcpy(s_cloud.current_order_id, previous_order_id, sizeof(s_cloud.current_order_id));
         strlcpy(s_cloud.current_order_name, previous_order_name, sizeof(s_cloud.current_order_name));
+    }
+    else
+    {
+        (void)app_delivery_photo_begin_order(s_cloud.current_order_id,
+            s_cloud.current_request_id,
+            s_cloud.current_order_name,
+            cmd->target_id);
     }
     return ret;
 }

@@ -17,6 +17,7 @@
 #include "bsp/display.h"
 #include "app_video.h"
 #include "app_ai_capture.h"
+#include "app_delivery_photo.h"
 #include "app_drone_ai.h"
 #include "app_vision.h"
 #include "app_camera_route.h"
@@ -868,7 +869,7 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
     bool camera_synced_for_cpu = false;
     app_camera_frame_route_t route = app_camera_route_select();
     // 只有识别/抓图需要 CPU 读帧时才做 M2C cache 同步。
-    if (route.ai_due || route.vision_due || route.capture_due)
+    if (route.ai_due || route.vision_due || route.capture_due || route.delivery_due)
     {
         if (app_camera_msync_m2c(camera_buf, camera_buf_len) == ESP_OK)
         {
@@ -890,6 +891,13 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
             if (route.capture_due)
             {
                 (void)app_ai_capture_submit_frame(camera_buf,
+                    camera_buf_hes,
+                    camera_buf_ves,
+                    camera_buf_len);
+            }
+            if (route.delivery_due)
+            {
+                (void)app_delivery_photo_submit_frame(camera_buf,
                     camera_buf_hes,
                     camera_buf_ves,
                     camera_buf_len);

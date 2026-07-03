@@ -1,6 +1,7 @@
 #include "app_camera_route.h"
 #include <string.h>
 #include "app_ai_capture.h"
+#include "app_delivery_photo.h"
 #include "app_drone_ai.h"
 #include "app_task.h"
 
@@ -94,5 +95,6 @@ app_camera_frame_route_t app_camera_route_select(void)
 
     // 抓图模块内部维护采样间隔和队列容量，路由层直接采用其决策。
     route.capture_due = app_ai_capture_should_capture_frame();
+    route.delivery_due = app_delivery_photo_should_capture_frame();
     return route;
 }

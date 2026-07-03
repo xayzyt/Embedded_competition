@@ -1,5 +1,6 @@
 const cloud = require('wx-server-sdk');
 const mqtt = require('mqtt');
+const crypto = require('crypto');
 
 cloud.init({
   env: cloud.DYNAMIC_CURRENT_ENV
@@ -9,6 +10,7 @@ const db = cloud.database();
 
 const ORDERS_COLLECTION = 'orders';
 const ORDER_EVENTS_COLLECTION = 'order_events';
+const DELIVERY_PHOTO_READY_STATUSES = ['ready', 'uploaded'];
 const VALID_TARGET_IDS = new Set([0, 1]);
 const TERMINAL_ORDER_STATUSES = ['delivered', 'failed', 'cancelled'];
 const CLEARABLE_ORDER_STATUSES = ['created', 'delivered', 'failed', 'cancelled'];
@@ -17,6 +19,7 @@ const DEFAULT_DEVICE_NAME = 'skyanchor-p4';
 const DEVICE_CANDIDATES = [DEFAULT_DEVICE_NAME];
 const MANUAL_RETRACT_ORDER_STATUSES = ['acting'];
 const DEMO_RESET_ORDER_STATUSES = ['pending_start', 'delivering', 'tag_matched', 'acting'];
+const PHOTO_META_QUIET_MS = 400;
 // 这里复用当前仓库里已经在板子侧生效的 MQTT 参数，先完成最小真实闭环。
 const MQTT_CONFIG = {
   brokerUrl: 'mqtts://cd29033a.ala.cn-hangzhou.emqxsl.cn:8883',
@@ -26,6 +29,7 @@ const MQTT_CONFIG = {
   connectTimeoutMs: 2500,
   stateWaitTimeoutMs: 3500,
   ackWaitTimeoutMs: 3500,
+  photoWaitTimeoutMs: 3000,
   qos: 1
 };
 // 申请微信订阅消息模板后填写。字段示例见 buildDeliveryNoticeData()。
@@ -62,8 +66,21 @@ function now() {
   return Date.now();
 }
 
+function sleepMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function clonePlainData(data) {
   return JSON.parse(JSON.stringify(data));
+}
+
+function cloneDeviceStateForEvent(payload) {
+  const cloned = clonePlainData(payload || {});
+  if (cloned.photo_inline_b64) {
+    delete cloned.photo_inline_b64;
+    cloned.photo_inline_omitted = true;
+  }
+  return cloned;
 }
 
 function buildOrderId() {
@@ -207,6 +224,23 @@ function buildStateTopic(deviceName) {
 
 function buildAckTopic(deviceName) {
   return `${MQTT_CONFIG.topicPrefix}/${normalizeDeviceName(deviceName)}/ack`;
+}
+
+function normalizePhotoId(photoId) {
+  const text = String(photoId || '').trim();
+  return /^[0-9A-Za-z_-]{1,32}$/.test(text) ? text : '';
+}
+
+function buildPhotoMetaTopic(deviceName, photoId) {
+  return `${MQTT_CONFIG.topicPrefix}/${normalizeDeviceName(deviceName)}/photo/${normalizePhotoId(photoId)}/meta`;
+}
+
+function buildPhotoMetaFilterTopic(deviceName) {
+  return `${MQTT_CONFIG.topicPrefix}/${normalizeDeviceName(deviceName)}/photo/+/meta`;
+}
+
+function buildPhotoChunkTopic(deviceName, photoId, index) {
+  return `${MQTT_CONFIG.topicPrefix}/${normalizeDeviceName(deviceName)}/photo/${normalizePhotoId(photoId)}/chunk/${String(index).padStart(3, '0')}`;
 }
 
 function buildMqttClientId(prefix) {
@@ -491,6 +525,121 @@ async function fetchLatestDeviceState(deviceName) {
   }
 }
 
+async function fetchRetainedMqttPayloads(topics, timeoutMs) {
+  const uniqueTopics = Array.from(new Set((topics || []).filter(Boolean)));
+  if (!uniqueTopics.length) {
+    return new Map();
+  }
+  const client = await connectMqttClient('skyanchor-cloud-photo');
+
+  try {
+    return await new Promise((resolve) => {
+      let settled = false;
+      const payloads = new Map();
+      const pending = new Set(uniqueTopics);
+
+      const finish = () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        client.removeListener('message', onMessage);
+        client.removeListener('error', onError);
+        resolve(payloads);
+      };
+
+      const onMessage = (receivedTopic, payloadBuffer) => {
+        if (!pending.has(receivedTopic)) {
+          return;
+        }
+        payloads.set(receivedTopic, Buffer.from(payloadBuffer));
+        pending.delete(receivedTopic);
+        if (!pending.size) {
+          finish();
+        }
+      };
+
+      const onError = (error) => {
+        console.warn('[skyanchorService] MQTT 照片分片读取失败', {
+          message: error && error.message
+        });
+        finish();
+      };
+
+      const timer = setTimeout(finish, Number(timeoutMs || MQTT_CONFIG.photoWaitTimeoutMs));
+
+      client.on('message', onMessage);
+      client.once('error', onError);
+      client.subscribe(uniqueTopics, { qos: MQTT_CONFIG.qos }, (error) => {
+        if (error) {
+          onError(error);
+        }
+      });
+    });
+  } finally {
+    closeMqttClient(client);
+  }
+}
+
+async function fetchRetainedMqttPayloadsByFilter(filterTopic, timeoutMs) {
+  const topic = String(filterTopic || '').trim();
+  if (!topic) {
+    return new Map();
+  }
+  const client = await connectMqttClient('skyanchor-cloud-photo-scan');
+
+  try {
+    return await new Promise((resolve) => {
+      let settled = false;
+      let quietTimer = null;
+      const payloads = new Map();
+
+      const finish = () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        clearTimeout(quietTimer);
+        client.removeListener('message', onMessage);
+        client.removeListener('error', onError);
+        resolve(payloads);
+      };
+
+      const scheduleQuietFinish = () => {
+        clearTimeout(quietTimer);
+        quietTimer = setTimeout(finish, PHOTO_META_QUIET_MS);
+      };
+
+      const onMessage = (receivedTopic, payloadBuffer) => {
+        payloads.set(receivedTopic, Buffer.from(payloadBuffer));
+        scheduleQuietFinish();
+      };
+
+      const onError = (error) => {
+        console.warn('[skyanchorService] MQTT 照片元数据扫描失败', {
+          topic,
+          message: error && error.message
+        });
+        finish();
+      };
+
+      const timer = setTimeout(finish, Number(timeoutMs || MQTT_CONFIG.photoWaitTimeoutMs));
+
+      client.on('message', onMessage);
+      client.once('error', onError);
+      client.subscribe(topic, { qos: MQTT_CONFIG.qos }, (error) => {
+        if (error) {
+          onError(error);
+        }
+      });
+    });
+  } finally {
+    closeMqttClient(client);
+  }
+}
+
 function isDeviceWeatherBlocked(payload) {
   if (!payload) {
     return false;
@@ -623,11 +772,6 @@ function stripOrderDoc(order) {
     _id,
     _openid,
     receiver_openid,
-    delivery_notice_enabled,
-    delivery_notice_template_id,
-    delivery_notice_requested_at,
-    delivery_notice_sent_at,
-    delivery_notice_error,
     ...rest
   } = order;
   return clonePlainData(rest);
@@ -644,32 +788,46 @@ async function deleteOrderEvents(orderId) {
   return Number(result && result.stats && result.stats.removed || 0);
 }
 
+async function recordDeliveryNoticeFailure(order, message) {
+  if (!order || !order._id) {
+    return;
+  }
+
+  const nextMessage = String(message || 'send failed').trim() || 'send failed';
+  await updateOrderByDocId(order._id, {
+    delivery_notice_error: nextMessage,
+    updated_at: now()
+  });
+  if (nextMessage !== String(order.delivery_notice_error || '').trim()) {
+    await addOrderEvent(order.order_id, 'delivery_notice_failed', { message: nextMessage });
+  }
+}
+
 async function sendDeliveryCompleteNotice(order) {
   if (!order || order.status !== 'delivered') {
     return;
   }
 
-  if (!DELIVERY_NOTICE_TEMPLATE_ID || !order.delivery_notice_enabled || order.delivery_notice_sent_at) {
+  const templateId = String(order.delivery_notice_template_id || DELIVERY_NOTICE_TEMPLATE_ID || '').trim();
+  if (!templateId || !order.delivery_notice_enabled || order.delivery_notice_sent_at) {
     return;
   }
 
   const receiverOpenId = String(order.receiver_openid || '').trim();
   if (!receiverOpenId) {
+    await recordDeliveryNoticeFailure(order, 'receiver openid missing');
     return;
   }
 
   if (!cloud.openapi || !cloud.openapi.subscribeMessage || !cloud.openapi.subscribeMessage.send) {
-    await updateOrderByDocId(order._id, {
-      delivery_notice_error: 'subscribeMessage API unavailable',
-      updated_at: order.updated_at || now()
-    });
+    await recordDeliveryNoticeFailure(order, 'subscribeMessage API unavailable');
     return;
   }
 
   try {
     await cloud.openapi.subscribeMessage.send({
       touser: receiverOpenId,
-      templateId: DELIVERY_NOTICE_TEMPLATE_ID,
+      templateId,
       page: buildDeliveryNoticePage(order),
       data: buildDeliveryNoticeData(order),
       miniprogramState: DELIVERY_NOTICE_MINIPROGRAM_STATE,
@@ -680,14 +838,16 @@ async function sendDeliveryCompleteNotice(order) {
       delivery_notice_sent_at: now(),
       delivery_notice_error: ''
     });
+    await addOrderEvent(order.order_id, 'delivery_notice_sent', {
+      template_id: templateId
+    });
   } catch (error) {
+    const message = error && error.message ? error.message : 'send failed';
     console.warn('[skyanchorService] 配送完成订阅消息发送失败', {
       order_id: order.order_id,
-      message: error && error.message
+      message
     });
-    await updateOrderByDocId(order._id, {
-      delivery_notice_error: error && error.message ? error.message : 'send failed'
-    });
+    await recordDeliveryNoticeFailure(order, message);
   }
 }
 
@@ -717,6 +877,385 @@ async function updateOrderStatus(order, status, note, extraPatch = {}) {
   const updatedOrder = await getOrderById(order.order_id);
   await sendDeliveryCompleteNotice(updatedOrder);
   return getOrderById(order.order_id);
+}
+
+function isDevicePhotoReady(payload) {
+  const status = String(payload && payload.photo_status || '').trim();
+  const photoId = normalizePhotoId(payload && payload.photo_id);
+  const chunks = Number(payload && payload.photo_chunks || 0);
+  return !!photoId && chunks > 0 && DELIVERY_PHOTO_READY_STATUSES.includes(status);
+}
+
+function sanitizeCloudPathPart(value) {
+  return String(value || '')
+    .trim()
+    .replace(/[^0-9A-Za-z_-]/g, '_')
+    .slice(0, 64) || 'unknown';
+}
+
+function buildDeliveryPhotoCloudPath(order, photoId) {
+  return `delivery-photos/${sanitizeCloudPathPart(order && order.order_id)}/${sanitizeCloudPathPart(photoId)}.jpg`;
+}
+
+function compactErrorMessage(error) {
+  return String(error && error.message || error || 'photo unavailable').slice(0, 120);
+}
+
+function patchDiffers(order, patch) {
+  return Object.keys(patch || {}).some((key) => {
+    const left = order && order[key];
+    const right = patch[key];
+    return JSON.stringify(left === undefined ? null : left) !== JSON.stringify(right === undefined ? null : right);
+  });
+}
+
+async function patchOrderDeliveryPhoto(order, patch) {
+  if (!order || !order._id || !patchDiffers(order, patch)) {
+    return order;
+  }
+  await updateOrderByDocId(order._id, {
+    ...patch,
+    updated_at: now()
+  });
+  return getOrderById(order.order_id);
+}
+
+function parsePhotoMeta(buffer) {
+  if (!buffer || !buffer.length) {
+    return null;
+  }
+  try {
+    return JSON.parse(buffer.toString('utf8'));
+  } catch (error) {
+    throw new AppError('照片元数据解析失败', 'PHOTO_META_BAD_JSON');
+  }
+}
+
+function extractPhotoIdFromMetaTopic(deviceName, topic) {
+  const prefix = `${MQTT_CONFIG.topicPrefix}/${normalizeDeviceName(deviceName)}/photo/`;
+  const suffix = '/meta';
+  const text = String(topic || '').trim();
+  if (!text.startsWith(prefix) || !text.endsWith(suffix)) {
+    return '';
+  }
+  return normalizePhotoId(text.slice(prefix.length, -suffix.length));
+}
+
+function normalizePhotoMeta(meta, topic, deviceName) {
+  if (!meta) {
+    return null;
+  }
+
+  const photoId = normalizePhotoId(meta.photo_id) || extractPhotoIdFromMetaTopic(deviceName, topic);
+  const size = Number(meta.size || 0);
+  const chunks = Number(meta.chunks || 0);
+  if (!photoId || size <= 0 || chunks <= 0) {
+    return null;
+  }
+
+  return {
+    ...meta,
+    photo_id: photoId,
+    order_id: String(meta.order_id || '').trim(),
+    request_id: String(meta.request_id || meta.order_id || '').trim(),
+    mime: String(meta.mime || 'image/jpeg'),
+    size,
+    chunks,
+    width: Number(meta.width || 0),
+    height: Number(meta.height || 0),
+    sha256: String(meta.sha256 || '').trim().toLowerCase()
+  };
+}
+
+function photoMetaMatchesOrderId(order, meta) {
+  const orderId = String(order && order.order_id || '').trim();
+  const metaOrderId = String(meta && meta.order_id || '').trim();
+  return !!orderId && metaOrderId === orderId;
+}
+
+function photoMetaMatchesRequestId(order, meta) {
+  const orderRequestId = String(order && (order.request_id || order.order_id) || '').trim();
+  const metaRequestId = String(meta && (meta.request_id || meta.order_id) || '').trim();
+  return !!orderRequestId && metaRequestId === orderRequestId;
+}
+
+function selectPhotoMetaForOrder(order, candidates) {
+  const metas = (candidates || []).filter(Boolean);
+  return metas.find((meta) => photoMetaMatchesOrderId(order, meta)) ||
+    metas.find((meta) => photoMetaMatchesRequestId(order, meta)) ||
+    null;
+}
+
+async function fetchDeliveryPhotoMetaCandidates(deviceName) {
+  const filterTopic = buildPhotoMetaFilterTopic(deviceName);
+  const payloads = await fetchRetainedMqttPayloadsByFilter(filterTopic, MQTT_CONFIG.photoWaitTimeoutMs);
+  const candidates = [];
+
+  for (const [topic, payload] of payloads.entries()) {
+    try {
+      const meta = normalizePhotoMeta(parsePhotoMeta(payload), topic, deviceName);
+      if (meta) {
+        candidates.push(meta);
+      }
+    } catch (error) {
+      console.warn('[skyanchorService] 跳过异常照片元数据', {
+        topic,
+        message: error && error.message
+      });
+    }
+  }
+
+  return candidates;
+}
+
+async function fetchDeliveryPhotoMetaForOrder(deviceName, order, cache = null) {
+  const normalizedDeviceName = normalizeDeviceName(deviceName);
+  const cacheKey = `__photo_meta__:${normalizedDeviceName}`;
+  let candidates = null;
+
+  if (cache) {
+    if (!cache.has(cacheKey)) {
+      cache.set(cacheKey, fetchDeliveryPhotoMetaCandidates(normalizedDeviceName));
+    }
+    candidates = await cache.get(cacheKey);
+  } else {
+    candidates = await fetchDeliveryPhotoMetaCandidates(normalizedDeviceName);
+  }
+
+  return selectPhotoMetaForOrder(order, candidates);
+}
+
+function parseInlineDeliveryPhoto(deviceState) {
+  const inline = Number(deviceState && deviceState.photo_inline || 0) === 1;
+  const b64 = String(deviceState && deviceState.photo_inline_b64 || '').trim();
+  const photoId = normalizePhotoId(deviceState && deviceState.photo_id);
+  if (!inline || !b64 || !photoId) {
+    return null;
+  }
+
+  const photoBuffer = Buffer.from(b64, 'base64');
+  const size = Number(deviceState && deviceState.photo_size || photoBuffer.length);
+  if (!photoBuffer.length || photoBuffer.length !== size) {
+    throw new AppError('内联照片大小校验失败', 'PHOTO_INLINE_SIZE_MISMATCH');
+  }
+
+  const expectedSha = String(deviceState && (deviceState.photo_sha256 || deviceState.sha256) || '').trim().toLowerCase();
+  if (expectedSha) {
+    const actualSha = crypto.createHash('sha256').update(photoBuffer).digest('hex');
+    if (actualSha !== expectedSha) {
+      throw new AppError('内联照片 sha256 校验失败', 'PHOTO_INLINE_SHA_MISMATCH');
+    }
+  }
+
+  return {
+    photo_id: photoId,
+    buffer: photoBuffer,
+    mime: String(deviceState && deviceState.photo_mime || 'image/jpeg'),
+    size: photoBuffer.length,
+    width: Number(deviceState && deviceState.photo_width || 0),
+    height: Number(deviceState && deviceState.photo_height || 0),
+    sha256: expectedSha
+  };
+}
+
+async function fetchDeliveryPhotoFromMqtt(deviceName, deviceState) {
+  const photoId = normalizePhotoId(deviceState && deviceState.photo_id);
+  const stateChunks = Number(deviceState && deviceState.photo_chunks || 0);
+  if (!photoId || stateChunks <= 0) {
+    return null;
+  }
+
+  const metaTopic = buildPhotoMetaTopic(deviceName, photoId);
+  const topics = [metaTopic];
+  for (let i = 0; i < stateChunks; i += 1) {
+    topics.push(buildPhotoChunkTopic(deviceName, photoId, i));
+  }
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const payloads = await fetchRetainedMqttPayloads(topics, MQTT_CONFIG.photoWaitTimeoutMs);
+    const meta = parsePhotoMeta(payloads.get(metaTopic));
+    if (!meta) {
+      if (attempt === 0) {
+        await sleepMs(1200);
+        continue;
+      }
+      return null;
+    }
+
+    const chunks = Number(meta.chunks || stateChunks);
+    const size = Number(meta.size || deviceState.photo_size || 0);
+    const expectedSha = String(meta.sha256 || '').trim().toLowerCase();
+    if (!chunks || !size) {
+      throw new AppError('照片元数据不完整', 'PHOTO_META_INCOMPLETE');
+    }
+
+    const pieces = [];
+    let missingChunk = false;
+    for (let i = 0; i < chunks; i += 1) {
+      const chunkTopic = buildPhotoChunkTopic(deviceName, photoId, i);
+      const chunkPayload = payloads.get(chunkTopic);
+      if (!chunkPayload || !chunkPayload.length) {
+        missingChunk = true;
+        break;
+      }
+      pieces.push(Buffer.from(chunkPayload.toString('utf8').trim(), 'base64'));
+    }
+    if (missingChunk) {
+      if (attempt === 0) {
+        await sleepMs(1200);
+        continue;
+      }
+      return null;
+    }
+
+    const photoBuffer = Buffer.concat(pieces).slice(0, size);
+    if (photoBuffer.length !== size) {
+      throw new AppError('照片大小校验失败', 'PHOTO_SIZE_MISMATCH');
+    }
+    if (expectedSha) {
+      const actualSha = crypto.createHash('sha256').update(photoBuffer).digest('hex');
+      if (actualSha !== expectedSha) {
+        throw new AppError('照片 sha256 校验失败', 'PHOTO_SHA_MISMATCH');
+      }
+    }
+
+    return {
+      photo_id: photoId,
+      buffer: photoBuffer,
+      mime: String(meta.mime || 'image/jpeg'),
+      size,
+      width: Number(meta.width || 0),
+      height: Number(meta.height || 0),
+      sha256: expectedSha
+    };
+  }
+
+  return null;
+}
+
+async function fetchDeliveryPhotoFromMeta(deviceName, meta) {
+  if (!meta) {
+    return null;
+  }
+  return fetchDeliveryPhotoFromMqtt(deviceName, {
+    photo_id: meta.photo_id,
+    photo_size: meta.size,
+    photo_width: meta.width,
+    photo_height: meta.height,
+    photo_chunks: meta.chunks
+  });
+}
+
+async function uploadDeliveryPhoto(order, photo) {
+  const cloudPath = buildDeliveryPhotoCloudPath(order, photo.photo_id);
+  const result = await cloud.uploadFile({
+    cloudPath,
+    fileContent: photo.buffer
+  });
+  return {
+    fileID: result.fileID,
+    cloudPath
+  };
+}
+
+async function resolveDeliveryPhotoForOrder(order, deviceName, state, deviceStateCache = null) {
+  const stateMatchesOrder = isPayloadForOrder(order, state);
+  let photo = null;
+  let fallbackMeta = null;
+
+  if (stateMatchesOrder && isDevicePhotoReady(state)) {
+    photo = parseInlineDeliveryPhoto(state) || await fetchDeliveryPhotoFromMqtt(deviceName, state);
+  }
+
+  if (!photo) {
+    fallbackMeta = await fetchDeliveryPhotoMetaForOrder(deviceName, order, deviceStateCache);
+    if (fallbackMeta) {
+      photo = await fetchDeliveryPhotoFromMeta(deviceName, fallbackMeta);
+    }
+  }
+
+  return {
+    photo,
+    stateMatchesOrder,
+    fallbackMeta
+  };
+}
+
+async function syncDeliveryPhotoForOrder(order, deviceState = null, deviceStateCache = null, options = {}) {
+  if (!order || order.status !== 'delivered' || order.delivery_photo_file_id) {
+    return order;
+  }
+
+  const deviceName = normalizeDeviceName(order.device_name);
+  let state = deviceState;
+  if (!state && !options.skipStateFetch) {
+    try {
+      if (deviceStateCache) {
+        if (!deviceStateCache.has(deviceName)) {
+          deviceStateCache.set(deviceName, fetchLatestDeviceState(deviceName));
+        }
+        state = await deviceStateCache.get(deviceName);
+      } else {
+        state = await fetchLatestDeviceState(deviceName);
+      }
+    } catch (error) {
+      console.warn('[skyanchorService] 读取送达照片状态失败', {
+        order_id: order.order_id,
+        message: error && error.message
+      });
+      state = null;
+    }
+  }
+
+  try {
+    const { photo, stateMatchesOrder, fallbackMeta } =
+      await resolveDeliveryPhotoForOrder(order, deviceName, state, deviceStateCache);
+
+    if (!photo) {
+      const status = stateMatchesOrder
+        ? String(state && state.photo_status || order.delivery_photo_status || 'waiting')
+        : 'waiting';
+      return patchOrderDeliveryPhoto(order, {
+        delivery_photo_status: status === 'failed' ? 'waiting' : status,
+        delivery_photo_error: stateMatchesOrder
+          ? String(state && state.photo_error || (fallbackMeta ? '照片分片未齐' : '照片待同步'))
+          : (fallbackMeta ? '照片分片未齐' : '未找到照片元数据')
+      });
+    }
+
+    const uploaded = await uploadDeliveryPhoto(order, photo);
+    await updateOrderByDocId(order._id, {
+      delivery_photo_file_id: uploaded.fileID,
+      delivery_photo_cloud_path: uploaded.cloudPath,
+      delivery_photo_status: 'ready',
+      delivery_photo_uploaded_at: now(),
+      delivery_photo_error: '',
+      delivery_photo_meta: {
+        photo_id: photo.photo_id,
+        size: photo.size,
+        width: photo.width,
+        height: photo.height,
+        mime: photo.mime,
+        sha256: photo.sha256
+      },
+      updated_at: now()
+    });
+    await addOrderEvent(order.order_id, 'delivery_photo_uploaded', {
+      photo_id: photo.photo_id,
+      size: photo.size,
+      cloud_path: uploaded.cloudPath
+    });
+    return getOrderById(order.order_id);
+  } catch (error) {
+    console.warn('[skyanchorService] 送达照片同步失败', {
+      order_id: order.order_id,
+      message: error && error.message
+    });
+    return patchOrderDeliveryPhoto(order, {
+      delivery_photo_status: 'waiting',
+      delivery_photo_error: compactErrorMessage(error)
+    });
+  }
 }
 
 async function syncOrderWithRealDeviceState(order, deviceStateCache = null) {
@@ -771,16 +1310,27 @@ async function syncOrderWithRealDeviceState(order, deviceStateCache = null) {
 
   await addOrderEvent(order.order_id, 'device_state', {
     device_name: normalizedDeviceName,
-    payload: clonePlainData(deviceState)
+    payload: cloneDeviceStateForEvent(deviceState)
   });
 
-  return updateOrderStatus(order, nextStatus, nextNote, {
+  const updatedOrder = await updateOrderStatus(order, nextStatus, nextNote, {
     matched_tag_id: matchedTagId !== null ? matchedTagId : order.matched_tag_id,
     last_device_state: nextDeviceState
   });
+  if (updatedOrder && updatedOrder.status === 'delivered') {
+    return syncDeliveryPhotoForOrder(updatedOrder, deviceState, deviceStateCache);
+  }
+  return updatedOrder;
 }
 
-async function syncOrderProgress(order, deviceStateCache = null) {
+async function syncOrderProgress(order, deviceStateCache = null, options = {}) {
+  if (order && order.status === 'delivered' && order.delivery_notice_enabled && !order.delivery_notice_sent_at) {
+    await sendDeliveryCompleteNotice(order);
+    order = await getOrderById(order.order_id);
+  }
+  if (order && order.status === 'delivered' && !order.delivery_photo_file_id && !options.skipPhotoSync) {
+    return syncDeliveryPhotoForOrder(order, null, deviceStateCache);
+  }
   return syncOrderWithRealDeviceState(order, deviceStateCache);
 }
 
@@ -842,8 +1392,7 @@ async function handleCreateOrder(payload) {
   const deliveryNoticeEnabled = !!(
     payload.delivery_notice_subscribed &&
     receiverOpenId &&
-    DELIVERY_NOTICE_TEMPLATE_ID &&
-    requestedNoticeTemplateId === DELIVERY_NOTICE_TEMPLATE_ID
+    requestedNoticeTemplateId
   );
 
   const orderData = {
@@ -865,10 +1414,16 @@ async function handleCreateOrder(payload) {
     failed_at: null,
     updated_at: currentTime,
     delivery_notice_enabled: deliveryNoticeEnabled,
-    delivery_notice_template_id: deliveryNoticeEnabled ? DELIVERY_NOTICE_TEMPLATE_ID : '',
+    delivery_notice_template_id: deliveryNoticeEnabled ? requestedNoticeTemplateId : '',
     delivery_notice_requested_at: deliveryNoticeEnabled ? currentTime : null,
     delivery_notice_sent_at: null,
-    delivery_notice_error: ''
+    delivery_notice_error: '',
+    delivery_photo_file_id: '',
+    delivery_photo_cloud_path: '',
+    delivery_photo_status: 'none',
+    delivery_photo_uploaded_at: null,
+    delivery_photo_error: '',
+    delivery_photo_meta: null
   };
 
   await db.collection(ORDERS_COLLECTION).add({
@@ -900,7 +1455,7 @@ async function handleListOrders(payload) {
   const deviceStateCache = new Map();
 
   for (const item of (result.data || []).slice()) {
-    const syncedOrder = await syncOrderProgress(item, deviceStateCache);
+    const syncedOrder = await syncOrderProgress(item, deviceStateCache, { skipPhotoSync: true });
     orders.push(stripOrderDoc(syncedOrder));
   }
 
@@ -920,6 +1475,43 @@ async function handleGetOrder(payload) {
   return {
     order: stripOrderDoc(order),
     events: await listOrderEvents(orderId)
+  };
+}
+
+async function handleSyncDeliveryPhoto(payload) {
+  const orderId = ensureString(payload.order_id, 'order_id');
+  const order = await getOrderById(orderId);
+
+  if (!order) {
+    throw new AppError('订单不存在', 'NOT_FOUND');
+  }
+
+  const photoCache = new Map();
+  const syncedOrder = await syncDeliveryPhotoForOrder(order, {}, photoCache, { skipStateFetch: true });
+  let inlinePhoto = null;
+  if (!syncedOrder || !syncedOrder.delivery_photo_file_id) {
+    try {
+      const deviceName = normalizeDeviceName(order.device_name);
+      const resolved = await resolveDeliveryPhotoForOrder(order, deviceName, {}, photoCache);
+      if (resolved.photo && resolved.photo.buffer) {
+        inlinePhoto = resolved.photo;
+      }
+    } catch (error) {
+      console.warn('[skyanchorService] 送达照片内联兜底失败', {
+        order_id: order.order_id,
+        message: error && error.message
+      });
+    }
+  }
+  return {
+    order: stripOrderDoc(syncedOrder),
+    events: await listOrderEvents(orderId),
+    photo_status: String(syncedOrder && syncedOrder.delivery_photo_status || ''),
+    photo_error: String(syncedOrder && syncedOrder.delivery_photo_error || ''),
+    photo_file_id: String(syncedOrder && syncedOrder.delivery_photo_file_id || ''),
+    photo_inline_b64: inlinePhoto ? inlinePhoto.buffer.toString('base64') : '',
+    photo_inline_mime: inlinePhoto ? inlinePhoto.mime : '',
+    photo_inline_id: inlinePhoto ? inlinePhoto.photo_id : ''
   };
 }
 
@@ -1258,6 +1850,8 @@ async function routeAction(action, payload) {
       return handleListOrders(payload);
     case 'getOrder':
       return handleGetOrder(payload);
+    case 'syncDeliveryPhoto':
+      return handleSyncDeliveryPhoto(payload);
     case 'deleteOrder':
       return handleDeleteOrder(payload);
     case 'assignOrder':

@@ -82,6 +82,13 @@
           <view class="report-value">{{order.report.device_text}}</view>
         </view>
       </view>
+      <view class="delivery-photo-entry" wx:if="{{order.delivery_photo_visible}}" bindtap="previewDeliveryPhoto">
+        <view class="delivery-photo-copy">
+          <view class="delivery-photo-title">送达照片</view>
+          <view class="delivery-photo-desc">{{order.delivery_photo_ready ? '点击查看接货画面' : order.delivery_photo_text}}</view>
+        </view>
+        <view class="delivery-photo-action {{order.delivery_photo_ready ? 'ready' : 'pending'}}">{{order.delivery_photo_text}}</view>
+      </view>
       <view class="button-row report-action-row" wx:if="{{isReceiverView && order.show_contact_dispatcher}}">
         <button class="ghost-btn phone-btn" bindtap="contactDispatcher">联系配送员</button>
       </view>
@@ -172,6 +179,13 @@
         </view>
       </view>
       <view class="modal-actions">
+        <button
+          wx:if="{{deliveryReportModal.photo_file_id}}"
+          class="ghost-btn modal-btn"
+          bindtap="previewDeliveryPhoto"
+        >
+          送达照片
+        </button>
         <button
           wx:if="{{deliveryReportModal.can_contact_dispatcher}}"
           class="ghost-btn modal-btn"

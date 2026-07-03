@@ -21,6 +21,7 @@ const TERMINAL_STATUSES = ['delivered', 'failed', 'cancelled'];
 const DEMO_RESET_STATUSES = ['pending_start', 'delivering', 'tag_matched', 'acting'];
 const POLL_INTERVAL_MS = 2000;
 const WEATHER_CHECK_INTERVAL_MS = 30000;
+const DELIVERY_PHOTO_LOCAL_PATH_PREFIX = 'delivery_photo_local_path:';
 const ORDER_FLOW_STEPS = [
   { key: 'created', label: '调度' },
   { key: 'pending_start', label: '响应' },
@@ -44,6 +45,7 @@ const EVENT_TYPE_LABELS = {
   start_requested: '开始配送',
   manual_retract_requested: '回收',
   demo_reset_requested: '演示复位',
+  delivery_photo_uploaded: '送达照片',
   status_changed: '状态更新',
   device_state: '板端上报'
 };
@@ -189,6 +191,14 @@ function decorateOrder(order) {
   const deviceStateText = String(order.last_device_state || '').trim();
   const issue = buildOrderInsight(order);
   const report = buildReport(order, deviceStateText, issue);
+  const photoFileId = String(order.delivery_photo_file_id || '').trim();
+  const photoLocalPath = String(order.delivery_photo_local_path || getCachedDeliveryPhotoPath(order.order_id)).trim();
+  const photoStatus = String(order.delivery_photo_status || '').trim();
+  const photoEmpty = !photoStatus || photoStatus === 'none';
+  const photoReady = order.status === 'delivered';
+  const photoText = photoReady
+    ? '查看照片'
+    : (photoEmpty ? '暂无照片' : '照片待同步');
 
   return {
     ...order,
@@ -201,6 +211,11 @@ function decorateOrder(order) {
     issue,
     report,
     show_report: report.show,
+    delivery_photo_file_id: photoFileId,
+    delivery_photo_local_path: photoLocalPath,
+    delivery_photo_visible: order.status === 'delivered',
+    delivery_photo_ready: photoReady,
+    delivery_photo_text: photoText,
     flow_steps: buildFlowSteps(order.status),
     is_active: ACTIVE_STATUSES.includes(order.status),
     can_manual_retract: order.status === 'acting',
@@ -259,6 +274,18 @@ function buildEventTitle(event) {
     return '播报：演示复位';
   }
 
+  if (eventType === 'delivery_photo_uploaded') {
+    return '送达照片已上传';
+  }
+
+  if (eventType === 'delivery_notice_sent') {
+    return '完成通知已发送';
+  }
+
+  if (eventType === 'delivery_notice_failed') {
+    return '完成通知发送失败';
+  }
+
   if (eventType === 'device_state') {
     const payload = data.payload || {};
     const state = String(payload.state || data.last_device_state || '').trim();
@@ -291,6 +318,18 @@ function buildEventDetail(event) {
 
   if (eventType === 'demo_reset_requested') {
     return `设备 ${data.device_name || '-'} · request ${data.request_id || '-'}`;
+  }
+
+  if (eventType === 'delivery_photo_uploaded') {
+    return data.size ? `照片 ${Math.round(Number(data.size) / 1024)} KB` : '照片已存入云端';
+  }
+
+  if (eventType === 'delivery_notice_sent') {
+    return '微信订阅消息已推送';
+  }
+
+  if (eventType === 'delivery_notice_failed') {
+    return data.message ? String(data.message).slice(0, 80) : '订阅消息未发送成功';
   }
 
   if (eventType === 'status_changed') {
@@ -339,15 +378,127 @@ function decorateEvents(events) {
 function buildDeliveryReportModal(order, canContactDispatcher) {
   const report = order && order.report || {};
   return {
-    order_name_text: order ? order.order_name_text : '',
-    result_text: report.result_text || '送达',
-    summary_text: report.summary_text || '闭环完成',
-    tag_text: report.tag_text || '-',
-    duration_text: report.duration_text || '-',
-    finished_text: report.finished_text || '-',
-    device_text: report.device_text || '-',
-    can_contact_dispatcher: !!canContactDispatcher
+      order_name_text: order ? order.order_name_text : '',
+      result_text: report.result_text || '送达',
+      summary_text: report.summary_text || '闭环完成',
+      tag_text: report.tag_text || '-',
+      duration_text: report.duration_text || '-',
+      finished_text: report.finished_text || '-',
+      device_text: report.device_text || '-',
+      photo_file_id: order && order.delivery_photo_file_id || '',
+      photo_local_path: order && order.delivery_photo_local_path || '',
+      photo_text: order && order.delivery_photo_text || '',
+      can_contact_dispatcher: !!canContactDispatcher
   };
+}
+
+function getDeliveryPhotoLocalPathKey(orderId) {
+  const text = String(orderId || '').trim();
+  return `${DELIVERY_PHOTO_LOCAL_PATH_PREFIX}${text}`;
+}
+
+function getCachedDeliveryPhotoPath(orderId) {
+  if (!orderId || !wx.getStorageSync) {
+    return '';
+  }
+  try {
+    return String(wx.getStorageSync(getDeliveryPhotoLocalPathKey(orderId)) || '').trim();
+  } catch (error) {
+    return '';
+  }
+}
+
+function setCachedDeliveryPhotoPath(orderId, filePath) {
+  if (!orderId || !filePath || !wx.setStorageSync) {
+    return;
+  }
+  try {
+    wx.setStorageSync(getDeliveryPhotoLocalPathKey(orderId), filePath);
+  } catch (error) {
+    // 本地路径缓存失败不影响本次预览。
+  }
+}
+
+function cleanupDeliveryPhotoTempFiles(fs) {
+  if (!fs || !wx.env || !wx.env.USER_DATA_PATH) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    fs.readdir({
+      dirPath: wx.env.USER_DATA_PATH,
+      success: (res) => {
+        const files = (res && res.files || [])
+          .filter((name) => {
+            const text = String(name || '');
+            return /^skyanchor-delivery-photo-.*\.jpg$/.test(text) ||
+              /^ORD-.*-photo\.jpg$/.test(text);
+          });
+        if (!files.length) {
+          resolve();
+          return;
+        }
+
+        let pending = files.length;
+        const done = () => {
+          pending -= 1;
+          if (pending <= 0) {
+            resolve();
+          }
+        };
+
+        files.forEach((name) => {
+          fs.unlink({
+            filePath: `${wx.env.USER_DATA_PATH}/${name}`,
+            success: done,
+            fail: done
+          });
+        });
+      },
+      fail: () => resolve()
+    });
+  });
+}
+
+function writeBase64File(fs, filePath, base64Data) {
+  return new Promise((resolve, reject) => {
+    fs.writeFile({
+      filePath,
+      data: base64Data,
+      encoding: 'base64',
+      success: () => resolve(filePath),
+      fail: (err) => reject(new Error(err && err.errMsg || '照片临时文件写入失败'))
+    });
+  });
+}
+
+async function writeDeliveryPhotoTempFile(orderId, base64Data) {
+  const b64 = String(base64Data || '').trim();
+  if (!b64 || !wx.getFileSystemManager || !wx.env || !wx.env.USER_DATA_PATH) {
+    return Promise.reject(new Error('照片临时文件不可用'));
+  }
+
+  const safeName = String(orderId || 'delivery')
+    .replace(/[^0-9A-Za-z_-]/g, '_')
+    .slice(0, 64);
+  const filePath = `${wx.env.USER_DATA_PATH}/skyanchor-delivery-photo-${safeName || 'delivery'}.jpg`;
+  const fs = wx.getFileSystemManager();
+
+  await cleanupDeliveryPhotoTempFiles(fs);
+  try {
+    return await writeBase64File(fs, filePath, b64);
+  } catch (error) {
+    await cleanupDeliveryPhotoTempFiles(fs);
+    try {
+      return await writeBase64File(fs, filePath, b64);
+    } catch (retryError) {
+      const message = String(retryError && retryError.message || error && error.message || '').toLowerCase();
+      if (message.includes('maximum size') || message.includes('storage limit')) {
+        throw new Error('微信本地缓存已满，请清理小程序缓存后重试');
+      }
+      throw retryError;
+    }
+  }
 }
 
 Page({
@@ -605,6 +756,127 @@ Page({
       });
     }
     callDispatcher();
+  },
+
+  async previewDeliveryPhoto() {
+    const localPath = String(
+      (this.data.deliveryReportModal && this.data.deliveryReportModal.photo_local_path) ||
+      (this.data.order && this.data.order.delivery_photo_local_path) ||
+      ''
+    ).trim();
+    if (localPath) {
+      wx.previewImage({
+        current: localPath,
+        urls: [localPath]
+      });
+      return;
+    }
+
+    let fileID = String(
+      (this.data.deliveryReportModal && this.data.deliveryReportModal.photo_file_id) ||
+      (this.data.order && this.data.order.delivery_photo_file_id) ||
+      ''
+    ).trim();
+    if (!fileID) {
+      const orderId = String(this.data.orderId || this.data.order && this.data.order.order_id || '').trim();
+      if (!orderId) {
+        wx.showToast({
+          title: this.data.order && this.data.order.delivery_photo_text || '照片待同步',
+          icon: 'none'
+        });
+        return;
+      }
+
+      let syncedPhotoError = '';
+      let inlinePhotoB64 = '';
+      try {
+        wx.showLoading({ title: '同步照片' });
+        const data = await api.syncDeliveryPhoto(orderId);
+        const order = decorateOrder(data.order || null);
+        syncedPhotoError = String(data.photo_error || order && order.delivery_photo_error || '').trim();
+        inlinePhotoB64 = String(data.photo_inline_b64 || '').trim();
+        this.setData({
+          order,
+          events: decorateEvents(data.events || [])
+        });
+        fileID = String(order && order.delivery_photo_file_id || data.photo_file_id || '').trim();
+      } catch (err) {
+        wx.hideLoading();
+        wx.showToast({
+          title: err.message || '照片待同步',
+          icon: 'none'
+        });
+        return;
+      }
+      wx.hideLoading();
+
+      if (!fileID) {
+        if (inlinePhotoB64) {
+          try {
+            wx.showLoading({ title: '打开照片' });
+            const filePath = await writeDeliveryPhotoTempFile(orderId, inlinePhotoB64);
+            setCachedDeliveryPhotoPath(orderId, filePath);
+            const nextOrder = decorateOrder({
+              ...(this.data.order || {}),
+              delivery_photo_local_path: filePath
+            });
+            this.setData({
+              order: nextOrder,
+              deliveryReportModal: this.data.deliveryReportModal
+                ? buildDeliveryReportModal(nextOrder, this.data.isReceiverView && nextOrder.show_contact_dispatcher)
+                : this.data.deliveryReportModal
+            });
+            wx.previewImage({
+              current: filePath,
+              urls: [filePath]
+            });
+          } catch (err) {
+            wx.showToast({
+              title: err.message || '照片打开失败',
+              icon: 'none'
+            });
+          } finally {
+            wx.hideLoading();
+          }
+          return;
+        }
+        const photoError = syncedPhotoError || String(this.data.order && this.data.order.delivery_photo_error || '').trim();
+        wx.showToast({
+          title: photoError || '照片同步失败',
+          icon: 'none'
+        });
+        return;
+      }
+    }
+    if (!wx.cloud || typeof wx.cloud.getTempFileURL !== 'function') {
+      wx.showToast({
+        title: '云存储不可用',
+        icon: 'none'
+      });
+      return;
+    }
+    wx.showLoading({ title: '打开照片' });
+    try {
+      const result = await wx.cloud.getTempFileURL({
+        fileList: [fileID]
+      });
+      const item = result && result.fileList && result.fileList[0];
+      const url = item && item.tempFileURL;
+      if (!url) {
+        throw new Error('未获取到照片地址');
+      }
+      wx.previewImage({
+        current: url,
+        urls: [url]
+      });
+    } catch (err) {
+      wx.showToast({
+        title: err.message || '照片打开失败',
+        icon: 'none'
+      });
+    } finally {
+      wx.hideLoading();
+    }
   },
 
   async ensureMessagingReady(actionLabel) {

@@ -15,7 +15,13 @@ function normalizeRequestError(err) {
     return new Error('云函数尚未部署，请先在微信开发者工具上传并部署 skyanchorService。');
   }
 
-  if (rawMessage.includes('timeout') || rawMessage.includes('超时')) {
+  if (
+    rawMessage.includes('timeout') ||
+    rawMessage.includes('timed out') ||
+    rawMessage.includes('-504003') ||
+    rawMessage.includes('FUNCTIONS_TIME_LIMIT_EXCEEDED') ||
+    rawMessage.includes('超时')
+  ) {
     return new Error('云函数请求超时，请检查云函数是否部署完成。');
   }
 

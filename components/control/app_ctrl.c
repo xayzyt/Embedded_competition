@@ -8,6 +8,7 @@
 #include "app_audio_prompt.h"
 #include "app_ctrl_runtime.h"
 #include "app_ctrl_ui.h"
+#include "app_delivery_photo.h"
 #include "app_dock_judge.h"
 #include "app_drone_ai.h"
 #include "app_task.h"
@@ -92,6 +93,39 @@ static void app_ctrl_request_proto_stage_prompt(app_ctrl_loop_history_t *history
     history->prev_proto_stage = stage;
 }
 
+static bool app_ctrl_ch32_status_requests_delivery_photo(const app_ch32_line_t *msg)
+{
+    if (msg == NULL || msg->type != APP_CH32_LINE_PROTO_STATUS || msg->payload_len < 8U)
+    {
+        return false;
+    }
+    if (msg->proto_stage == APP_CH32_STAGE_CARGO_DETECTED)
+    {
+        return true;
+    }
+    return msg->proto_stage == APP_CH32_STAGE_TRAY_RETRACTING &&
+        ((msg->proto_flags & APP_CH32_FLAG_CARGO_PRESENT) != 0U);
+}
+
+static void app_ctrl_request_delivery_photo_if_needed(const app_ch32_line_t *msg)
+{
+    if (!app_ctrl_ch32_status_requests_delivery_photo(msg))
+    {
+        return;
+    }
+    app_task_snapshot_t task = {0};
+    if (!app_task_peek_snapshot(&task) ||
+        !task.active ||
+        task.state != APP_TASK_STATE_DOCKING)
+    {
+        return;
+    }
+    const char *trigger = (msg->proto_stage == APP_CH32_STAGE_CARGO_DETECTED) ?
+        "cargo_detected" :
+        "tray_retracting";
+    (void)app_delivery_photo_request_once(trigger);
+}
+
 // 只有 AI 已确认无人机且任务正在等待靠近时才开启 AprilTag。
 static bool app_ctrl_apriltag_enabled(const app_task_snapshot_t *task)
 {
@@ -170,6 +204,7 @@ void app_ctrl_on_ch32_line(const app_ch32_line_t *msg, void *user_ctx)
 {
     (void)user_ctx;
     app_ctrl_runtime_on_ch32_line(msg);
+    app_ctrl_request_delivery_photo_if_needed(msg);
     if (msg != NULL && msg->type == APP_CH32_LINE_PROTO_STATUS)
     {
         app_ui_exception_demo_update_ch32((int)msg->proto_stage, msg->proto_detail);

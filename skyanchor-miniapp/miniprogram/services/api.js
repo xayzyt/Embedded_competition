@@ -30,6 +30,15 @@ function getOrder(orderId) {
   });
 }
 
+function syncDeliveryPhoto(orderId) {
+  return request({
+    action: 'syncDeliveryPhoto',
+    data: {
+      order_id: orderId
+    }
+  });
+}
+
 function deleteOrder(orderId) {
   return request({
     action: 'deleteOrder',
@@ -99,6 +108,7 @@ module.exports = {
   createOrder,
   listOrders,
   getOrder,
+  syncDeliveryPhoto,
   deleteOrder,
   assignOrder,
   startOrder,

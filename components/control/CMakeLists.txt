@@ -16,6 +16,7 @@ idf_component_register(
     REQUIRES
         app_types
         audio_prompt
+        delivery_photo
         vision_ui
         drone_ai
         nvs_flash

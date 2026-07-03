@@ -14,6 +14,7 @@
 #include "esp_netif.h"
 #include "esp_netif_sntp.h"
 #include "esp_wifi.h"
+#include "app_delivery_photo.h"
 
 // 云端连接模块：初始化 ESP-Hosted Wi-Fi、SNTP 和 MQTT，并把任务状态同步到云端。
 
@@ -209,6 +210,8 @@ static esp_err_t app_cloud_create_mqtt_client(void)
         .session.keepalive = CONFIG_SKY_MQTT_KEEPALIVE_SEC,
         .network.reconnect_timeout_ms = 5000,
         .network.timeout_ms = 10000,
+        .buffer.size = 16 * 1024,
+        .buffer.out_size = 16 * 1024,
     };
 #if CONFIG_SKY_MQTT_USE_CERT_BUNDLE
     mqtt_cfg.broker.verification.crt_bundle_attach = esp_crt_bundle_attach;
@@ -240,8 +243,21 @@ static esp_err_t app_cloud_start_mqtt_if_needed(void)
     {
         return ESP_FAIL;
     }
-    if (s_cloud.mqtt_client == NULL || s_cloud.mqtt_started)
+    if (s_cloud.mqtt_client == NULL)
     {
+        return ESP_OK;
+    }
+    if (s_cloud.mqtt_started)
+    {
+        if (!s_cloud.mqtt_connected)
+        {
+            esp_err_t ret = esp_mqtt_client_reconnect(s_cloud.mqtt_client);
+            if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE)
+            {
+                ESP_LOGW(TAG, "mqtt reconnect request failed: %s", esp_err_to_name(ret));
+                return ret;
+            }
+        }
         return ESP_OK;
     }
     esp_err_t ret = esp_mqtt_client_register_event(s_cloud.mqtt_client,
@@ -263,16 +279,31 @@ static esp_err_t app_cloud_start_mqtt_if_needed(void)
     s_cloud.mqtt_started = true;
     return ESP_OK;
 }
+
+void app_cloud_request_photo_upload(void)
+{
+    if (s_cloud.event_group != NULL)
+    {
+        xEventGroupSetBits(s_cloud.event_group, APP_CLOUD_PHOTO_UPLOAD_BIT);
+    }
+}
+
+static void app_cloud_delivery_photo_status_cb(void *user_ctx)
+{
+    (void)user_ctx;
+    app_cloud_request_photo_upload();
+}
+
 // 云端后台任务：消费“启动 MQTT”事件，避免事件回调里做重操作。
 static void app_cloud_task(void *arg)
 {
     (void)arg;
     while (1) {
         EventBits_t bits = xEventGroupWaitBits(s_cloud.event_group,
-            APP_CLOUD_START_MQTT_BIT,
+            APP_CLOUD_START_MQTT_BIT | APP_CLOUD_PHOTO_UPLOAD_BIT,
             pdTRUE,
             pdFALSE,
-            portMAX_DELAY);
+            pdMS_TO_TICKS(5000));
         if ((bits & APP_CLOUD_START_MQTT_BIT) != 0)
         {
             esp_err_t ret = app_cloud_start_mqtt_if_needed();
@@ -282,6 +313,10 @@ static void app_cloud_task(void *arg)
                 vTaskDelay(pdMS_TO_TICKS(2000));
                 xEventGroupSetBits(s_cloud.event_group, APP_CLOUD_START_MQTT_BIT);
             }
+        }
+        if ((bits & APP_CLOUD_PHOTO_UPLOAD_BIT) != 0 || bits == 0)
+        {
+            app_cloud_publish_pending_photo();
         }
     }
 }
@@ -347,6 +382,7 @@ static void app_cloud_mqtt_event_handler(void *handler_args,
         {
             app_cloud_publish_task_snapshot_internal(&s_cloud.last_snapshot);
         }
+        app_cloud_request_photo_upload();
         app_cloud_start_weather_task_once();
         app_cloud_notify_weather_task();
         break;
@@ -354,6 +390,7 @@ static void app_cloud_mqtt_event_handler(void *handler_args,
         ESP_LOGW(TAG, "EMQX mqtt disconnected");
         s_cloud.mqtt_connected = false;
         xEventGroupClearBits(s_cloud.event_group, APP_CLOUD_MQTT_CONNECTED_BIT);
+        xEventGroupSetBits(s_cloud.event_group, APP_CLOUD_START_MQTT_BIT);
         break;
     case MQTT_EVENT_DATA:
         app_cloud_handle_mqtt_data_event(event);
@@ -385,6 +422,7 @@ esp_err_t app_cloud_init(void)
     ESP_RETURN_ON_ERROR(app_task_register_event_callback(app_cloud_on_task_event, NULL),
         TAG,
         "register task callback failed");
+    (void)app_delivery_photo_register_status_callback(app_cloud_delivery_photo_status_cb, NULL);
     (void)app_task_peek_snapshot(&s_cloud.last_snapshot);
     s_cloud.have_last_snapshot = true;
     ESP_RETURN_ON_ERROR(app_cloud_init_netif_once(), TAG, "esp_netif_init failed");
