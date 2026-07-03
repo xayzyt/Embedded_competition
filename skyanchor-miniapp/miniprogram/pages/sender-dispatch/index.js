@@ -24,7 +24,6 @@ Page({
     loading: false,
     loadError: '',
     hasLoaded: false,
-    voiceSwitchPending: false,
     lastRefreshText: '未刷新',
     weatherSummary: buildWeatherSummary()
   }, defaultServiceStatus()),
@@ -209,54 +208,6 @@ Page({
     const serviceStatus = await syncServiceStatus(this, true);
     this.setData({ weatherSummary: buildWeatherSummary(serviceStatus) });
     showDiagnostics(serviceStatus, '演示自检');
-  },
-
-  async toggleVoice(e) {
-    if (this.data.voiceSwitchPending) {
-      return;
-    }
-
-    const enabled = !!(e && e.detail && e.detail.value);
-    const previous = !!this.data.serviceVoiceEnabled;
-
-    if (!this.data.serviceOnline || !this.data.serviceMqttReady || !this.data.serviceDeviceStateReady) {
-      this.setData({ serviceVoiceEnabled: previous });
-      wx.showModal({
-        title: '暂时不能切换',
-        content: '请先确认云端、MQTT 和板端状态正常。',
-        showCancel: false
-      });
-      return;
-    }
-
-    this.setData({
-      voiceSwitchPending: true,
-      serviceVoiceEnabled: enabled
-    });
-
-    try {
-      await api.setVoiceEnabled(enabled);
-      const serviceStatus = await syncServiceStatus(this, true);
-      this.setData({
-        weatherSummary: buildWeatherSummary(serviceStatus),
-        voiceSwitchPending: false
-      });
-      wx.showToast({
-        title: enabled ? '语音已开' : '语音已关',
-        icon: 'success'
-      });
-    } catch (err) {
-      const serviceStatus = await syncServiceStatus(this, true);
-      this.setData({
-        weatherSummary: buildWeatherSummary(serviceStatus),
-        voiceSwitchPending: false
-      });
-      wx.showModal({
-        title: '切换失败',
-        content: err.message || '语音开关未更新成功',
-        showCancel: false
-      });
-    }
   },
 
   openDetail(e) {

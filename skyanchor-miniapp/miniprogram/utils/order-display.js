@@ -54,7 +54,7 @@ const FAULT_CODE_LABELS = {
   cloud_cancelled: '云端取消了订单，板端任务已停止。',
   task_cancelled: '任务已取消，板端不再推进。',
   weather_blocked: '天气保护触发，配送已安全停止。',
-  manual_retract_requested: '已请求托盘回收，任务按安全流程停止。',
+  manual_retract_requested: '已请求托盘回收，用于现场称重校准。',
   safe_close_failed: '安全关闭命令未完成，机构需要现场确认。',
   ch32_timeout: 'CH32 长时间未响应，机械执行链路超时。',
   ch32_ack_timeout: 'CH32 未确认执行命令，机械控制链路超时。',
@@ -65,7 +65,6 @@ const FAULT_CODE_LABELS = {
 };
 
 const MECHANICAL_FAULT_CODES = [
-  'manual_retract_requested',
   'safe_close_failed',
   'ch32_timeout',
   'ch32_ack_timeout',

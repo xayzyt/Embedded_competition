@@ -54,6 +54,28 @@ function canCancelOrder(order) {
   return order && !TERMINAL_STATUSES.includes(order.status);
 }
 
+function buildFailureBrief(order, insight) {
+  const faultCode = String(order && order.fault_code || '').trim();
+  const note = String(order && order.note || '').trim();
+  const reason = String(insight && insight.reason_text || '').trim();
+  const source = `${faultCode} ${note} ${reason}`.toLowerCase();
+
+  if (source.includes('weather') || source.includes('天气')) {
+    return '天气保护';
+  }
+  if (source.includes('camera') || source.includes('vision') || source.includes('tag') || source.includes('识别')) {
+    return '识别异常';
+  }
+  if (source.includes('ch32') || source.includes('safe_close') || source.includes('机械')) {
+    return '机械异常';
+  }
+  if (source.includes('manual_retract') || source.includes('回收')) {
+    return '托盘回收';
+  }
+
+  return reason.replace(/[，,。.!！].*$/, '').slice(0, 8) || '未完成';
+}
+
 function decorateOrder(order) {
   const noteText = String(order && order.note || '').trim();
   const insight = buildOrderInsight(order);
@@ -66,6 +88,7 @@ function decorateOrder(order) {
     note_text: noteText,
     is_failed: order && order.status === 'failed',
     show_failure: !!insight.show,
+    failure_brief_text: buildFailureBrief(order, insight),
     failure_reason_text: insight.reason_text,
     failure_advice_text: insight.advice_text,
     can_cancel: canCancelOrder(order),
@@ -93,6 +116,7 @@ Page({
     cancellingOrderId: '',
     loadError: '',
     hasLoaded: false,
+    voiceSwitchPending: false,
     weatherSummary: buildWeatherSummary()
   }, defaultServiceStatus()),
 
@@ -190,6 +214,54 @@ Page({
 
   showServiceDiagnostics() {
     showDiagnostics(this.data);
+  },
+
+  async toggleVoice(e) {
+    if (this.data.voiceSwitchPending) {
+      return;
+    }
+
+    const enabled = !!(e && e.detail && e.detail.value);
+    const previous = !!this.data.serviceVoiceEnabled;
+
+    if (!this.data.serviceOnline || !this.data.serviceMqttReady || !this.data.serviceDeviceStateReady) {
+      this.setData({ serviceVoiceEnabled: previous });
+      wx.showModal({
+        title: '暂时不能切换',
+        content: '请先确认云端、MQTT 和板端状态正常。',
+        showCancel: false
+      });
+      return;
+    }
+
+    this.setData({
+      voiceSwitchPending: true,
+      serviceVoiceEnabled: enabled
+    });
+
+    try {
+      await api.setVoiceEnabled(enabled);
+      const serviceStatus = await syncServiceStatus(this, true);
+      this.setData({
+        weatherSummary: buildWeatherSummary(serviceStatus),
+        voiceSwitchPending: false
+      });
+      wx.showToast({
+        title: enabled ? '语音已开' : '语音已关',
+        icon: 'success'
+      });
+    } catch (err) {
+      const serviceStatus = await syncServiceStatus(this, true);
+      this.setData({
+        weatherSummary: buildWeatherSummary(serviceStatus),
+        voiceSwitchPending: false
+      });
+      wx.showModal({
+        title: '切换失败',
+        content: err.message || '语音开关未更新成功',
+        showCancel: false
+      });
+    }
   },
 
   async openCreateOrder() {

@@ -1126,7 +1126,7 @@ async function handleManualRetractOrder(payload) {
   }
 
   await addOrderEvent(orderId, 'manual_retract_requested', {
-    note: 'manual retract tray requested',
+    note: 'manual tray retract for weighing check',
     device_name: deviceName,
     request_id: String(order.request_id || order.order_id)
   });

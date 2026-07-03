@@ -35,19 +35,6 @@
     </block>
   </view>
 
-  <view class="voice-setting-row">
-    <view class="voice-setting-copy">
-      <view class="voice-setting-title">语音播报</view>
-      <view class="voice-setting-subtitle">{{serviceVoiceEnabled ? '现场播报开启' : '调试静音中'}}</view>
-    </view>
-    <switch
-      checked="{{serviceVoiceEnabled}}"
-      disabled="{{voiceSwitchPending || !serviceOnline || !serviceMqttReady || !serviceDeviceStateReady}}"
-      color="#10b981"
-      bindchange="toggleVoice"
-    />
-  </view>
-
   <view class="card list-card">
     <view class="section-head">
       <view class="section-title">待调度</view>

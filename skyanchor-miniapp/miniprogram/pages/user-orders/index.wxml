@@ -28,6 +28,19 @@
     </block>
   </view>
 
+  <view class="voice-setting-row">
+    <view class="voice-setting-copy">
+      <view class="voice-setting-title">语音播报</view>
+      <view class="voice-setting-subtitle">{{serviceVoiceEnabled ? '现场播报开启' : '现场播报关闭'}}</view>
+    </view>
+    <switch
+      checked="{{serviceVoiceEnabled}}"
+      disabled="{{voiceSwitchPending || !serviceOnline || !serviceMqttReady || !serviceDeviceStateReady}}"
+      color="#10b981"
+      bindchange="toggleVoice"
+    />
+  </view>
+
   <view class="card profile-card">
     <view class="section-head">
       <view class="section-title">用户信息</view>
@@ -70,8 +83,7 @@
           <view class="order-main">
             <view class="item-title">{{item.order_name_text}}</view>
             <view class="item-subtitle">Tag {{item.apriltag_text}}</view>
-            <view class="item-meta item-alert" wx:if="{{item.show_failure}}">原因：{{item.failure_reason_text}}</view>
-            <view class="item-meta item-advice" wx:if="{{item.show_failure}}">建议：{{item.failure_advice_text}}</view>
+            <view class="item-meta item-alert" wx:if="{{item.show_failure}}">{{item.failure_brief_text}}</view>
           </view>
           <view class="order-side">
             <view class="status-badge status-{{item.status}}">{{item.status_text}}</view>

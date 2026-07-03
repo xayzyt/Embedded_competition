@@ -42,6 +42,10 @@ bool app_ui_show_loading(void);
 void app_ui_set_loading_progress(int32_t percent);
 void app_ui_hide_loading(void);
 
+// 订单进入预览前的短暂任务接收页。
+bool app_ui_show_task_intro(uint16_t target_id);
+void app_ui_hide_task_intro(void);
+
 // 顶部状态和控制器统一刷新入口。
 void app_ui_set_status(const char *text);
 
@@ -56,6 +60,7 @@ void app_ui_update_control_state(const char *status,
 // 主屏显示/隐藏和状态灯更新。
 bool app_ui_show_main_screen(void);
 void app_ui_hide_main_screen(void);
+void app_ui_set_preview_hud_visible(bool visible);
 void app_ui_main_screen_update_status(bool wifi_ok, bool mqtt_ok, bool ch32_ok);
 
 // 主屏任务状态，用于控制标题、阶段灯和提示。

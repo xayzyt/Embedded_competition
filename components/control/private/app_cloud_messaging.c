@@ -109,6 +109,10 @@ static const char *app_cloud_fault_code_from_snapshot(const app_task_snapshot_t 
     const char *note = snap->note;
     if (snap->state == APP_TASK_STATE_CANCELLED)
     {
+        if (app_cloud_note_contains(note, "manual retract"))
+        {
+            return "manual_retract_requested";
+        }
         if (app_cloud_note_contains(note, "demo reset"))
         {
             return "demo_reset";
@@ -129,10 +133,6 @@ static const char *app_cloud_fault_code_from_snapshot(const app_task_snapshot_t 
         return s_cloud.weather_docking_blocked ? "weather_blocked" : "";
     }
 
-    if (app_cloud_note_contains(note, "manual retract"))
-    {
-        return "manual_retract_requested";
-    }
     if (app_cloud_note_contains(note, "cancel safety") ||
         app_cloud_note_contains(note, "SAFE_CLOSE"))
     {
@@ -464,13 +464,18 @@ static esp_err_t app_cloud_receive_demo_reset(void)
 
 static esp_err_t app_cloud_receive_manual_retract(void)
 {
-    app_task_snapshot_t snap = {0};
-    if (app_task_peek_snapshot(&snap) && snap.active)
-    {
-        app_task_mark_fault("manual retract requested");
-    }
-    return app_ch32_link_send_proto_cmd_and_wait_ack(APP_CH32_PROTO_CMD_SAFE_CLOSE,
+    // 现场称重/摆放校准用的主动回收，不属于板端故障。
+    esp_err_t ret = app_ch32_link_send_proto_cmd_and_wait_ack(APP_CH32_PROTO_CMD_SAFE_CLOSE,
         APP_CLOUD_MANUAL_RETRACT_WAIT_MS);
+    if (ret == ESP_OK)
+    {
+        app_task_snapshot_t snap = {0};
+        if (app_task_peek_snapshot(&snap) && snap.active)
+        {
+            app_task_cancel("manual retract completed");
+        }
+    }
+    return ret;
 }
 
 static int app_cloud_start_task_ack_code(esp_err_t ret)

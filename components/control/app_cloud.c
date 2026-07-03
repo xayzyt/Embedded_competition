@@ -79,7 +79,18 @@ static void app_cloud_request_wifi_connect(const char *reason)
             esp_err_to_name(ret));
     }
 }
-// 某些 ESP-Hosted 场景 DHCP DNS 可能为空，拿到 IP 后补一个兜底 DNS。
+static esp_err_t app_cloud_set_fallback_dns(esp_netif_dns_type_t type)
+{
+    esp_netif_dns_info_t fallback = {0};
+    fallback.ip.type = ESP_IPADDR_TYPE_V4;
+    esp_netif_set_ip4_addr(&fallback.ip.u_addr.ip4,
+        APP_CLOUD_FALLBACK_DNS_A,
+        APP_CLOUD_FALLBACK_DNS_B,
+        APP_CLOUD_FALLBACK_DNS_C,
+        APP_CLOUD_FALLBACK_DNS_D);
+    return esp_netif_set_dns_info(s_cloud.sta_netif, type, &fallback);
+}
+// 某些热点会给出不可用 DNS；保留 DHCP 主 DNS，同时补一个备份 DNS。
 static void app_cloud_ensure_dns_after_ip(void)
 {
     if (s_cloud.sta_netif == NULL)
@@ -88,29 +99,33 @@ static void app_cloud_ensure_dns_after_ip(void)
     }
     esp_netif_dns_info_t dns = {0};
     esp_err_t ret = esp_netif_get_dns_info(s_cloud.sta_netif, ESP_NETIF_DNS_MAIN, &dns);
-    if (ret == ESP_OK && dns.ip.u_addr.ip4.addr != 0)
+    if (ret != ESP_OK || dns.ip.u_addr.ip4.addr == 0)
+    {
+        ESP_LOGW(TAG,
+            "main dns missing (%s), setting fallback %u.%u.%u.%u",
+            esp_err_to_name(ret),
+            APP_CLOUD_FALLBACK_DNS_A,
+            APP_CLOUD_FALLBACK_DNS_B,
+            APP_CLOUD_FALLBACK_DNS_C,
+            APP_CLOUD_FALLBACK_DNS_D);
+        ret = app_cloud_set_fallback_dns(ESP_NETIF_DNS_MAIN);
+        if (ret != ESP_OK)
+        {
+            ESP_LOGW(TAG, "set main fallback dns failed: %s", esp_err_to_name(ret));
+        }
+        return;
+    }
+
+    esp_netif_dns_info_t backup = {0};
+    ret = esp_netif_get_dns_info(s_cloud.sta_netif, ESP_NETIF_DNS_BACKUP, &backup);
+    if (ret == ESP_OK && backup.ip.u_addr.ip4.addr != 0)
     {
         return;
     }
-    ESP_LOGW(TAG,
-        "main dns missing (%s), setting fallback %u.%u.%u.%u",
-        esp_err_to_name(ret),
-        APP_CLOUD_FALLBACK_DNS_A,
-        APP_CLOUD_FALLBACK_DNS_B,
-        APP_CLOUD_FALLBACK_DNS_C,
-        APP_CLOUD_FALLBACK_DNS_D);
-    esp_netif_dns_info_t fallback = {0};
-    fallback.ip.type = ESP_IPADDR_TYPE_V4;
-    esp_netif_set_ip4_addr(&fallback.ip.u_addr.ip4,
-        APP_CLOUD_FALLBACK_DNS_A,
-        APP_CLOUD_FALLBACK_DNS_B,
-        APP_CLOUD_FALLBACK_DNS_C,
-        APP_CLOUD_FALLBACK_DNS_D);
-    ret = esp_netif_set_dns_info(s_cloud.sta_netif, ESP_NETIF_DNS_MAIN, &fallback);
+    ret = app_cloud_set_fallback_dns(ESP_NETIF_DNS_BACKUP);
     if (ret != ESP_OK)
     {
-        ESP_LOGW(TAG, "set fallback dns failed: %s", esp_err_to_name(ret));
-        return;
+        ESP_LOGW(TAG, "set backup fallback dns failed: %s", esp_err_to_name(ret));
     }
 }
 // Wi-Fi 拿到 IP 后启动 SNTP；时区采用中国标准时间。

@@ -20,14 +20,17 @@ static const char *TAG = "app_preview";
 #define APP_TASK_EVENT_TASK_STACK       (8 * 1024)
 #define APP_TASK_EVENT_TASK_PRIO        5
 #define APP_TASK_STATE_POLL_MS          250U
+#define APP_PREVIEW_INTRO_MS            1000U
 #define APP_PREVIEW_FIRST_FRAME_WAIT_MS 12000U
 #define APP_PREVIEW_SWITCH_WAIT_MS      800U
 
 static TaskHandle_t s_task_event_task = NULL;
 static QueueHandle_t s_task_event_queue = NULL;
+static portMUX_TYPE s_preview_switch_mux = portMUX_INITIALIZER_UNLOCKED;
 static bool s_camera_started = false;
 static bool s_event_callback_registered = false;
 static volatile bool s_preview_visible = false;
+static bool s_preview_switching = false;
 static app_task_state_t s_last_handled_state = APP_TASK_STATE_IDLE;
 static bool s_have_last_handled_state = false;
 
@@ -35,6 +38,8 @@ static bool s_have_last_handled_state = false;
 static void app_show_camera_failure(void)
 {
     app_camera_pause();
+    app_ui_hide_task_intro();
+    app_ui_set_preview_hud_visible(false);
     app_ui_hide_loading();
     app_ui_set_status("task: camera start failed");
     app_ui_main_screen_set_task_state(APP_UI_MAIN_TASK_CAMERA_FAILED);
@@ -45,6 +50,8 @@ static void app_show_camera_failure(void)
 static bool app_leave_camera_preview(void)
 {
     app_camera_pause();
+    app_ui_hide_task_intro();
+    app_ui_set_preview_hud_visible(false);
     if (!app_ui_show_main_screen())
     {
         ESP_LOGW(TAG, "show main screen failed, will retry");
@@ -78,7 +85,60 @@ static bool app_task_wants_camera_preview(void)
     return app_task_snapshot_wants_camera_preview(&snap);
 }
 
-// 启动 AI、相机、视觉和预览；AI 超时不会阻止相机继续启动。
+// Guard the one-second intro against concurrent switch attempts.
+static bool app_preview_switch_try_begin(void)
+{
+    bool started = false;
+    taskENTER_CRITICAL(&s_preview_switch_mux);
+    if (!s_preview_switching)
+    {
+        s_preview_switching = true;
+        started = true;
+    }
+    taskEXIT_CRITICAL(&s_preview_switch_mux);
+    return started;
+}
+
+static void app_preview_switch_finish(void)
+{
+    taskENTER_CRITICAL(&s_preview_switch_mux);
+    s_preview_switching = false;
+    taskEXIT_CRITICAL(&s_preview_switch_mux);
+}
+
+static bool app_enter_camera_preview_with_intro(void)
+{
+    if (!app_preview_switch_try_begin())
+    {
+        return false;
+    }
+
+    app_task_snapshot_t snap = {0};
+    uint16_t target_id = 0;
+    if (app_task_peek_snapshot(&snap))
+    {
+        target_id = snap.target_id;
+    }
+
+    if (app_ui_show_task_intro(target_id))
+    {
+        vTaskDelay(pdMS_TO_TICKS(APP_PREVIEW_INTRO_MS));
+    }
+
+    bool entered = false;
+    if (app_task_wants_camera_preview())
+    {
+        app_ui_hide_main_screen();
+        app_ui_set_preview_hud_visible(true);
+        s_preview_visible = true;
+        entered = true;
+    }
+    app_ui_hide_task_intro();
+    app_preview_switch_finish();
+    return entered;
+}
+
+// Start AI, camera, vision, and preview; an AI timeout does not block preview.
 static esp_err_t app_start_camera_pipeline(void)
 {
     app_ui_set_loading_progress(80);
@@ -143,8 +203,7 @@ static void app_camera_start_task(void *arg)
     if (app_task_wants_camera_preview())
     {
         ESP_LOGI(TAG, "enter camera preview");
-        app_ui_hide_main_screen();
-        s_preview_visible = true;
+        (void)app_enter_camera_preview_with_intro();
     }
     vTaskDelete(NULL);
 }
@@ -189,8 +248,7 @@ static void app_switch_to_camera_preview(void)
     {
         if (app_task_wants_camera_preview())
         {
-            app_ui_hide_main_screen();
-            s_preview_visible = true;
+            (void)app_enter_camera_preview_with_intro();
         }
         return;
     }

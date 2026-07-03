@@ -663,11 +663,6 @@ button::after {
   color: #b91c1c;
 }
 
-.item-alert,
-.item-advice {
-  white-space: normal;
-}
-
 .item-advice {
   color: #64748b;
 }
