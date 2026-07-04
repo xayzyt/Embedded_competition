@@ -851,7 +851,7 @@ async function sendDeliveryCompleteNotice(order) {
   }
 }
 
-async function updateOrderStatus(order, status, note, extraPatch = {}) {
+async function updateOrderStatus(order, status, note, extraPatch = {}, options = {}) {
   const patch = {
     status,
     note: note || order.note || '',
@@ -875,7 +875,9 @@ async function updateOrderStatus(order, status, note, extraPatch = {}) {
     last_device_state: patch.last_device_state !== undefined ? patch.last_device_state : order.last_device_state
   });
   const updatedOrder = await getOrderById(order.order_id);
-  await sendDeliveryCompleteNotice(updatedOrder);
+  if (!options.skipDeliveryNotice) {
+    await sendDeliveryCompleteNotice(updatedOrder);
+  }
   return getOrderById(order.order_id);
 }
 
@@ -1258,7 +1260,7 @@ async function syncDeliveryPhotoForOrder(order, deviceState = null, deviceStateC
   }
 }
 
-async function syncOrderWithRealDeviceState(order, deviceStateCache = null) {
+async function syncOrderWithRealDeviceState(order, deviceStateCache = null, options = {}) {
   // 这里仅在订单已开始且未结束时尝试拉取真实设备状态，避免无意义访问 MQTT。
   if (!order || !order.started_at || isTerminalStatus(order.status)) {
     return order;
@@ -1316,22 +1318,29 @@ async function syncOrderWithRealDeviceState(order, deviceStateCache = null) {
   const updatedOrder = await updateOrderStatus(order, nextStatus, nextNote, {
     matched_tag_id: matchedTagId !== null ? matchedTagId : order.matched_tag_id,
     last_device_state: nextDeviceState
-  });
+  }, options);
   if (updatedOrder && updatedOrder.status === 'delivered') {
+    if (options.skipPhotoSync) {
+      return updatedOrder;
+    }
     return syncDeliveryPhotoForOrder(updatedOrder, deviceState, deviceStateCache);
   }
   return updatedOrder;
 }
 
 async function syncOrderProgress(order, deviceStateCache = null, options = {}) {
-  if (order && order.status === 'delivered' && order.delivery_notice_enabled && !order.delivery_notice_sent_at) {
+  if (order &&
+      order.status === 'delivered' &&
+      order.delivery_notice_enabled &&
+      !order.delivery_notice_sent_at &&
+      !options.skipDeliveryNotice) {
     await sendDeliveryCompleteNotice(order);
     order = await getOrderById(order.order_id);
   }
   if (order && order.status === 'delivered' && !order.delivery_photo_file_id && !options.skipPhotoSync) {
     return syncDeliveryPhotoForOrder(order, null, deviceStateCache);
   }
-  return syncOrderWithRealDeviceState(order, deviceStateCache);
+  return syncOrderWithRealDeviceState(order, deviceStateCache, options);
 }
 
 async function ensureCollectionsReady() {
@@ -1455,7 +1464,10 @@ async function handleListOrders(payload) {
   const deviceStateCache = new Map();
 
   for (const item of (result.data || []).slice()) {
-    const syncedOrder = await syncOrderProgress(item, deviceStateCache, { skipPhotoSync: true });
+    const syncedOrder = await syncOrderProgress(item, deviceStateCache, {
+      skipPhotoSync: true,
+      skipDeliveryNotice: true
+    });
     orders.push(stripOrderDoc(syncedOrder));
   }
 
