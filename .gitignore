@@ -32,7 +32,6 @@ CH32/obj/
 *.map
 flasher_args.json # Generated in build directory
 sdkconfig.old
-sdkconfig
 
 # ESP-IDF dependencies
 # For older versions or manual component management
