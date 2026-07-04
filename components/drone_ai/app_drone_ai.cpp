@@ -78,8 +78,10 @@ static bool s_model_ready = false;
 static esp_err_t s_model_status = ESP_ERR_INVALID_STATE;
 static bool s_busy = false;
 static bool s_confirmed = false;
+static bool s_continuous = false;
 static uint8_t s_hit_count = 0;
 static uint32_t s_last_hit_ms = 0;
+static uint32_t s_last_drone_seen_ms = 0;
 static uint32_t s_last_motion_reject_ms = 0;
 static uint32_t s_submit_seq = 0;
 static uint32_t s_infer_count = 0;
@@ -548,20 +550,21 @@ static void app_drone_ai_update_result(uint32_t frame_seq,
     latest.motion_score = motion_score;
 
     taskENTER_CRITICAL(&s_ai_mux);
-    if (!s_confirmed)
+    const bool candidate_hit = (latest.label == APP_DRONE_AI_CLASS_DRONE) &&
+                               (drone_score >= DRONE_AI_THRESHOLD);
+    // Fast camera motion can spike the classifier, so shaky frames do not count.
+    const bool high_motion = motion_score >= DRONE_AI_MOTION_REJECT_DIFF;
+    if (high_motion)
     {
-        const bool candidate_hit = (latest.label == APP_DRONE_AI_CLASS_DRONE) &&
-                                   (drone_score >= DRONE_AI_THRESHOLD);
-        // Fast camera motion can spike the classifier, so shaky frames do not count.
-        const bool high_motion = motion_score >= DRONE_AI_MOTION_REJECT_DIFF;
-        if (high_motion)
-        {
-            s_last_motion_reject_ms = tick_ms;
-        }
-        const bool motion_cooldown_done = (s_last_motion_reject_ms == 0U) ||
-                                          ((tick_ms - s_last_motion_reject_ms) >= DRONE_AI_MOTION_COOLDOWN_MS);
-        const bool stable_frame = !high_motion && motion_cooldown_done;
-        if (candidate_hit && stable_frame)
+        s_last_motion_reject_ms = tick_ms;
+    }
+    const bool motion_cooldown_done = (s_last_motion_reject_ms == 0U) ||
+                                      ((tick_ms - s_last_motion_reject_ms) >= DRONE_AI_MOTION_COOLDOWN_MS);
+    const bool stable_frame = !high_motion && motion_cooldown_done;
+    if (candidate_hit && stable_frame)
+    {
+        s_last_drone_seen_ms = tick_ms;
+        if (!s_confirmed)
         {
             // One inference frame can contribute at most one hit. Keep each
             // visible step on screen long enough for a live demonstration.
@@ -777,8 +780,13 @@ esp_err_t app_drone_ai_submit_frame(const uint8_t *rgb565,
     }
 
     taskENTER_CRITICAL(&s_ai_mux);
-    const bool gate_complete = s_confirmed;
+    const bool model_ready = s_model_ready;
+    const bool gate_complete = s_confirmed && !s_continuous;
     taskEXIT_CRITICAL(&s_ai_mux);
+    if (!model_ready)
+    {
+        return ESP_OK;
+    }
     if (gate_complete)
     {
         return ESP_OK;
@@ -901,12 +909,29 @@ void app_drone_ai_reset_gate(void)
     taskENTER_CRITICAL(&s_ai_mux);
     s_confirmed = false;
     app_drone_ai_clear_hit_window_locked();
+    s_last_drone_seen_ms = 0;
     s_last_motion_reject_ms = 0;
     s_motion_prev_valid = false;
     s_latest.confirmed = false;
     s_latest.hit_count = 0;
     s_latest.motion_score = 0;
     taskEXIT_CRITICAL(&s_ai_mux);
+}
+
+void app_drone_ai_set_continuous(bool enabled)
+{
+    taskENTER_CRITICAL(&s_ai_mux);
+    s_continuous = enabled;
+    taskEXIT_CRITICAL(&s_ai_mux);
+}
+
+uint32_t app_drone_ai_last_drone_seen_ms(void)
+{
+    uint32_t seen_ms = 0;
+    taskENTER_CRITICAL(&s_ai_mux);
+    seen_ms = s_last_drone_seen_ms;
+    taskEXIT_CRITICAL(&s_ai_mux);
+    return seen_ms;
 }
 
 void app_drone_ai_format_status(char *buf, size_t buf_len)

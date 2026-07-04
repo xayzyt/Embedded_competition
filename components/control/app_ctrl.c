@@ -11,6 +11,7 @@
 #include "app_delivery_photo.h"
 #include "app_dock_judge.h"
 #include "app_drone_ai.h"
+#include "app_safety_takeover.h"
 #include "app_task.h"
 #include "app_ui.h"
 #include "app_vision.h"
@@ -204,6 +205,7 @@ void app_ctrl_on_ch32_line(const app_ch32_line_t *msg, void *user_ctx)
 {
     (void)user_ctx;
     app_ctrl_runtime_on_ch32_line(msg);
+    app_safety_takeover_on_ch32_line(msg);
     app_ctrl_request_delivery_photo_if_needed(msg);
     if (msg != NULL && msg->type == APP_CH32_LINE_PROTO_STATUS)
     {

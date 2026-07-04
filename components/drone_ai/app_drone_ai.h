@@ -31,6 +31,8 @@ esp_err_t app_drone_ai_wait_ready(uint32_t timeout_ms);
 bool app_drone_ai_is_drone_confirmed(void);
 bool app_drone_ai_is_busy(void);
 void app_drone_ai_reset_gate(void);
+void app_drone_ai_set_continuous(bool enabled);
+uint32_t app_drone_ai_last_drone_seen_ms(void);
 // 生成调试文案和读取统计。
 void app_drone_ai_format_status(char *buf, size_t buf_len);
 void app_drone_ai_get_stats(app_drone_ai_stats_t *out);

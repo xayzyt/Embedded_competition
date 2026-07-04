@@ -112,3 +112,25 @@ void app_ui_set_exception_back_callback(app_ui_exception_back_cb_t cb);
 // 异常演示页天气模拟回调。
 typedef void (*app_ui_weather_sim_cb_t)(void);
 void app_ui_set_weather_sim_callback(app_ui_weather_sim_cb_t cb);
+
+// 安全接管预览 HUD：叠加在摄像头画面上，用于现场展示离场预警和台风接管。
+typedef enum {
+    APP_UI_SAFETY_TAKEOVER_IDLE = 0,
+    APP_UI_SAFETY_TAKEOVER_STARTING,
+    APP_UI_SAFETY_TAKEOVER_WAIT_DRONE,
+    APP_UI_SAFETY_TAKEOVER_DRONE_CONFIRMED,
+    APP_UI_SAFETY_TAKEOVER_AUTH_PASSED,
+    APP_UI_SAFETY_TAKEOVER_WINDOW_OPEN,
+    APP_UI_SAFETY_TAKEOVER_DRONE_LOST,
+    APP_UI_SAFETY_TAKEOVER_DRONE_RECOVERED,
+    APP_UI_SAFETY_TAKEOVER_TYPHOON,
+    APP_UI_SAFETY_TAKEOVER_SAFE_DONE,
+    APP_UI_SAFETY_TAKEOVER_FAILED,
+} app_ui_safety_takeover_state_t;
+
+typedef void (*app_ui_safety_typhoon_cb_t)(void);
+void app_ui_set_safety_typhoon_callback(app_ui_safety_typhoon_cb_t cb);
+void app_ui_safety_takeover_set_visible(bool visible);
+void app_ui_safety_takeover_set_state(app_ui_safety_takeover_state_t state,
+                                      int32_t countdown_s,
+                                      uint16_t target_id);

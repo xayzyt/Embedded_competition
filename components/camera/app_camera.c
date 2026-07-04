@@ -11,6 +11,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_cache.h"
+#include "esp_timer.h"
 #include "esp_private/esp_cache_private.h"
 #include "lvgl.h"
 #include "bsp/esp-bsp.h"
@@ -29,15 +30,21 @@
 // 同时按路由把抽样帧提交给 AI、AprilTag 和抓图保存。
 
 #define CAMERA_NUM_BUFS          4
-#define STAGE_NUM_BUFS           5
+#define STAGE_NUM_BUFS           3
 #define ALIGN_UP(num, align)     (((num) + ((align) - 1)) & ~((align) - 1))
 #define DISPLAY_TASK_STACK_SIZE  (6 * 1024)
 #define DISPLAY_TASK_PRIORITY    7
+#define STATS_TASK_STACK_SIZE    (4 * 1024)
+#define STATS_TASK_PRIORITY      2
 #define DISPLAY_LOCK_TIMEOUT_MS  30
 #define DISPLAY_CREATE_LOCK_TIMEOUT_MS 200
 #define PREVIEW_PREFERRED_WIDTH  1024U
 #define PREVIEW_PREFERRED_HEIGHT 600U
 #define PREVIEW_WARMUP_DROP_FRAMES      3U
+#define PREVIEW_CPU_FALLBACK_DISPLAY_DIVIDER 3U
+#define PREVIEW_CPU_FALLBACK_BAD_ANALYZE_INTERVAL 15U
+#define PREVIEW_CPU_FALLBACK_SWAP_RGB565 1U
+#define PREVIEW_STATS_LOG_INTERVAL_MS   2000U
 #define PREVIEW_BAD_SAMPLE_COLS         16U
 #define PREVIEW_BAD_SAMPLE_ROWS         12U
 #define PREVIEW_BAD_CYAN_PERCENT        88U
@@ -60,7 +67,9 @@ static uint8_t *s_stage_buf[STAGE_NUM_BUFS] = {0};
 static uint8_t *s_ui_canvas_buf = NULL;
 static uint32_t s_disp_buf_size = 0;
 static TaskHandle_t s_display_task_handle = NULL;
+static TaskHandle_t s_stats_task_handle = NULL;
 static portMUX_TYPE s_display_mux = portMUX_INITIALIZER_UNLOCKED;
+static portMUX_TYPE s_preview_stats_mux = portMUX_INITIALIZER_UNLOCKED;
 typedef enum {
     DISP_BUF_FREE = 0,
     DISP_BUF_WRITING,
@@ -70,12 +79,21 @@ typedef enum {
 static volatile int s_displayed_stage_index = -1;
 static volatile int s_pending_stage_index = -1;
 static volatile uint32_t s_display_count = 0;
-static bool s_ppa_error_logged = false;
 static disp_buf_state_t s_stage_state[STAGE_NUM_BUFS] = {0};
 static uint32_t s_stage_letterbox_w[STAGE_NUM_BUFS] = {0};
 static uint32_t s_stage_letterbox_h[STAGE_NUM_BUFS] = {0};
 static volatile int s_retained_stage_index = -1;
 static uint32_t s_warmup_drop_remaining = 0;
+static uint32_t s_bad_preview_drop_count = 0;
+static bool s_cpu_fallback_preview = false;
+static uint32_t s_cpu_fallback_frame_skip = 0;
+static uint32_t s_bad_preview_analyze_skip = 0;
+static uint32_t s_bad_preview_total_count = 0;
+static uint32_t s_cpu_fallback_display_skip_count = 0;
+static uint32_t s_route_display_skip_count = 0;
+static uint32_t s_ppa_runtime_fail_count = 0;
+static uint32_t s_frame_cb_count = 0;
+static uint32_t s_frame_cb_max_us = 0;
 #if SOC_PPA_SUPPORTED
 static ppa_client_handle_t s_ppa_srm_handle = NULL;
 #endif
@@ -199,6 +217,204 @@ typedef struct {
     uint16_t center;
     bool bad;
 } app_camera_frame_stats_t;
+static app_camera_frame_stats_t s_last_bad_preview_stats = {0};
+static app_camera_frame_stats_t s_last_preview_stats = {0};
+
+static void app_camera_note_frame_cb_done(uint32_t start_us)
+{
+    const uint32_t elapsed_us = (uint32_t)esp_timer_get_time() - start_us;
+    taskENTER_CRITICAL(&s_preview_stats_mux);
+    s_frame_cb_count++;
+    if (elapsed_us > s_frame_cb_max_us)
+    {
+        s_frame_cb_max_us = elapsed_us;
+    }
+    taskEXIT_CRITICAL(&s_preview_stats_mux);
+}
+
+static void app_camera_note_bad_preview(const app_camera_frame_stats_t *stats)
+{
+    taskENTER_CRITICAL(&s_preview_stats_mux);
+    s_bad_preview_drop_count++;
+    s_bad_preview_total_count++;
+    if (stats != NULL)
+    {
+        s_last_bad_preview_stats = *stats;
+        s_last_preview_stats = *stats;
+    }
+    taskEXIT_CRITICAL(&s_preview_stats_mux);
+}
+
+static void app_camera_note_cpu_display_skip(void)
+{
+    taskENTER_CRITICAL(&s_preview_stats_mux);
+    s_cpu_fallback_display_skip_count++;
+    taskEXIT_CRITICAL(&s_preview_stats_mux);
+}
+
+static void app_camera_note_route_display_skip(void)
+{
+    taskENTER_CRITICAL(&s_preview_stats_mux);
+    s_route_display_skip_count++;
+    taskEXIT_CRITICAL(&s_preview_stats_mux);
+}
+
+static void app_camera_note_ppa_runtime_fail(void)
+{
+    taskENTER_CRITICAL(&s_preview_stats_mux);
+    s_ppa_runtime_fail_count++;
+    taskEXIT_CRITICAL(&s_preview_stats_mux);
+}
+
+static bool app_camera_cpu_fallback_display_due(void)
+{
+    if (!s_cpu_fallback_preview || s_display_count == 0U)
+    {
+        return true;
+    }
+    s_cpu_fallback_frame_skip++;
+    if (s_cpu_fallback_frame_skip < PREVIEW_CPU_FALLBACK_DISPLAY_DIVIDER)
+    {
+        app_camera_note_cpu_display_skip();
+        return false;
+    }
+    s_cpu_fallback_frame_skip = 0;
+    return true;
+}
+
+static bool app_camera_preview_analyze_due(void)
+{
+    if (!s_cpu_fallback_preview || s_display_count == 0U)
+    {
+        return true;
+    }
+    s_bad_preview_analyze_skip++;
+    if (s_bad_preview_analyze_skip < PREVIEW_CPU_FALLBACK_BAD_ANALYZE_INTERVAL)
+    {
+        return false;
+    }
+    s_bad_preview_analyze_skip = 0;
+    return true;
+}
+
+static void app_camera_note_good_preview(const app_camera_frame_stats_t *stats)
+{
+    taskENTER_CRITICAL(&s_preview_stats_mux);
+    s_bad_preview_drop_count = 0;
+    if (stats != NULL)
+    {
+        s_last_preview_stats = *stats;
+    }
+    taskEXIT_CRITICAL(&s_preview_stats_mux);
+}
+
+static void app_camera_reset_preview_stats(void)
+{
+    taskENTER_CRITICAL(&s_preview_stats_mux);
+    s_bad_preview_drop_count = 0;
+    s_bad_preview_total_count = 0;
+    s_cpu_fallback_display_skip_count = 0;
+    s_route_display_skip_count = 0;
+    s_ppa_runtime_fail_count = 0;
+    s_frame_cb_count = 0;
+    s_frame_cb_max_us = 0;
+    s_last_bad_preview_stats = (app_camera_frame_stats_t){0};
+    s_last_preview_stats = (app_camera_frame_stats_t){0};
+    taskEXIT_CRITICAL(&s_preview_stats_mux);
+
+    s_cpu_fallback_frame_skip = 0;
+    s_bad_preview_analyze_skip = 0;
+}
+
+static void app_camera_log_preview_stats(void)
+{
+    uint32_t bad_total = 0;
+    uint32_t cpu_skip = 0;
+    uint32_t route_skip = 0;
+    uint32_t ppa_fail = 0;
+    uint32_t frame_count = 0;
+    uint32_t max_us = 0;
+    app_camera_frame_stats_t preview_stats = {0};
+
+    taskENTER_CRITICAL(&s_preview_stats_mux);
+    bad_total = s_bad_preview_total_count;
+    cpu_skip = s_cpu_fallback_display_skip_count;
+    route_skip = s_route_display_skip_count;
+    ppa_fail = s_ppa_runtime_fail_count;
+    frame_count = s_frame_cb_count;
+    max_us = s_frame_cb_max_us;
+    s_frame_cb_max_us = 0;
+    preview_stats = s_last_preview_stats;
+    taskEXIT_CRITICAL(&s_preview_stats_mux);
+
+    ESP_LOGI(TAG,
+        "preview stats: ppa=%s cpu_fallback=%u display=%lu cb=%lu max=%luus cpu_skip=%lu route_skip=%lu bad=%lu ppa_fail=%lu avg=%lu/%lu/%lu first=0x%04x center=0x%04x free_psram=%u",
+#if SOC_PPA_SUPPORTED
+        (s_ppa_srm_handle != NULL && !s_cpu_fallback_preview) ? "on" : "off",
+#else
+        "off",
+#endif
+        (unsigned)s_cpu_fallback_preview,
+        (unsigned long)s_display_count,
+        (unsigned long)frame_count,
+        (unsigned long)max_us,
+        (unsigned long)cpu_skip,
+        (unsigned long)route_skip,
+        (unsigned long)bad_total,
+        (unsigned long)ppa_fail,
+        (unsigned long)preview_stats.avg_r,
+        (unsigned long)preview_stats.avg_g,
+        (unsigned long)preview_stats.avg_b,
+        (unsigned)preview_stats.first,
+        (unsigned)preview_stats.center,
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+}
+
+static void app_camera_stats_task(void *arg)
+{
+    (void)arg;
+    uint32_t last_bad_total = 0;
+    uint32_t last_cpu_skip = 0;
+    uint32_t last_route_skip = 0;
+    uint32_t last_ppa_fail = 0;
+    uint32_t last_display_count = 0;
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(PREVIEW_STATS_LOG_INTERVAL_MS));
+        if (!s_preview_running || s_camera_paused)
+        {
+            continue;
+        }
+
+        uint32_t bad_total = 0;
+        uint32_t cpu_skip = 0;
+        uint32_t route_skip = 0;
+        uint32_t ppa_fail = 0;
+        uint32_t max_us = 0;
+        taskENTER_CRITICAL(&s_preview_stats_mux);
+        bad_total = s_bad_preview_total_count;
+        cpu_skip = s_cpu_fallback_display_skip_count;
+        route_skip = s_route_display_skip_count;
+        ppa_fail = s_ppa_runtime_fail_count;
+        max_us = s_frame_cb_max_us;
+        taskEXIT_CRITICAL(&s_preview_stats_mux);
+
+        const bool changed = bad_total != last_bad_total ||
+            cpu_skip != last_cpu_skip ||
+            route_skip != last_route_skip ||
+            ppa_fail != last_ppa_fail ||
+            s_display_count != last_display_count;
+        if (s_cpu_fallback_preview || changed || max_us > 30000U)
+        {
+            app_camera_log_preview_stats();
+            last_bad_total = bad_total;
+            last_cpu_skip = cpu_skip;
+            last_route_skip = route_skip;
+            last_ppa_fail = ppa_fail;
+            last_display_count = s_display_count;
+        }
+    }
+}
+
 static bool app_camera_rgb565_close(uint16_t a, uint16_t b)
 {
     const uint32_t ar = (uint32_t)((a >> 11) & 0x1FU);
@@ -222,6 +438,14 @@ static bool app_camera_rgb565_cyan_like(uint16_t p)
 static uint16_t app_camera_swap_rgb565(uint16_t p)
 {
     return (uint16_t)((p << 8) | (p >> 8));
+}
+static inline uint16_t app_camera_cpu_fallback_to_canvas_rgb565(uint16_t p)
+{
+#if PREVIEW_CPU_FALLBACK_SWAP_RGB565
+    return app_camera_swap_rgb565(p);
+#else
+    return p;
+#endif
 }
 static bool app_camera_analyze_rgb565_frame(const uint8_t *buf,
     size_t len,
@@ -364,7 +588,10 @@ static esp_err_t app_camera_preview_scale_rgb565_cpu(const uint8_t *in_buf,
     if (in_width == out_width && in_height == out_height &&
         x_off == 0U && y_off == 0U)
     {
-        memcpy(out_buf, in_buf, (size_t)out_width * out_height * 2U);
+        const size_t pixel_count = (size_t)out_width * out_height;
+        for (size_t i = 0; i < pixel_count; i++) {
+            dst[i] = app_camera_cpu_fallback_to_canvas_rgb565(src[i]);
+        }
         return ESP_OK;
     }
     uint32_t src_y = 0;
@@ -383,7 +610,7 @@ static esp_err_t app_camera_preview_scale_rgb565_cpu(const uint8_t *in_buf,
             {
                 src_x = in_width - 1U;
             }
-            dst_row[x] = src_row[src_x];
+            dst_row[x] = app_camera_cpu_fallback_to_canvas_rgb565(src_row[src_x]);
             src_x_acc += in_width;
             while (src_x_acc >= out_width)
             {
@@ -481,6 +708,12 @@ static esp_err_t app_camera_alloc_display_buffers(void)
         }
         s_stage_state[i] = DISP_BUF_FREE;
     }
+    ESP_LOGI(TAG,
+        "display buffers ready: canvas=%lu stage=%u each=%lu free_psram=%u",
+        (unsigned long)s_disp_buf_size,
+        (unsigned)STAGE_NUM_BUFS,
+        (unsigned long)s_disp_buf_size,
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
     return ESP_OK;
 }
 // 分配 V4L2 USERPTR 帧缓存，供摄像头驱动直接写入。
@@ -512,6 +745,11 @@ static esp_err_t app_camera_alloc_userptr_buffers(size_t frame_size)
             return ret;
         }
     }
+    ESP_LOGI(TAG,
+        "camera userptr buffers ready: count=%u each=%lu free_psram=%u",
+        (unsigned)CAMERA_NUM_BUFS,
+        (unsigned long)s_cam_buf_size,
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
     return ESP_OK;
 }
 // 创建固定尺寸 canvas；之后只切换 buffer 指针，不反复创建对象。
@@ -553,6 +791,14 @@ static void app_ppa_init(void)
     if (ret != ESP_OK)
     {
         ESP_LOGE(TAG, "ppa_register_client failed: 0x%x", ret);
+        s_cpu_fallback_preview = true;
+        ESP_LOGW(TAG,
+            "PPA unavailable, CPU fallback preview throttled, rgb565_swap=%u",
+            (unsigned)PREVIEW_CPU_FALLBACK_SWAP_RGB565);
+    }
+    else
+    {
+        s_cpu_fallback_preview = false;
     }
 }
 // 清理预览上下或左右黑边，避免上一帧残留。
@@ -860,13 +1106,15 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
         s_warmup_drop_remaining--;
         return;
     }
+    const uint32_t cb_start_us = (uint32_t)esp_timer_get_time();
     // AI and full-frame preview both saturate PSRAM. Hold the last good frame
     // while inference owns the bus instead of publishing a possibly corrupted frame.
     if (app_drone_ai_is_busy())
     {
-        return;
+        goto done;
     }
     bool camera_synced_for_cpu = false;
+    bool route_frame_submitted = false;
     app_camera_frame_route_t route = app_camera_route_select();
     // 只有识别/抓图需要 CPU 读帧时才做 M2C cache 同步。
     if (route.ai_due || route.vision_due || route.capture_due || route.delivery_due)
@@ -902,21 +1150,31 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
                     camera_buf_ves,
                     camera_buf_len);
             }
+            route_frame_submitted = true;
         }
     }
     if (app_drone_ai_is_busy())
     {
-        return;
+        goto done;
+    }
+    if (s_cpu_fallback_preview && route_frame_submitted)
+    {
+        app_camera_note_route_display_skip();
+        goto done;
+    }
+    if (!app_camera_cpu_fallback_display_due())
+    {
+        goto done;
     }
     // 显示端已有待处理帧时直接丢弃当前预览帧，保证实时性优先。
     if (app_camera_has_pending_stage())
     {
-        return;
+        goto done;
     }
     int stage_index = app_camera_pick_writable_stage_buffer();
     if (stage_index < 0)
     {
-        return;
+        goto done;
     }
     uint32_t out_w = BSP_LCD_H_RES;
     uint32_t out_h = BSP_LCD_V_RES;
@@ -924,7 +1182,7 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
     bool stage_written_by_cpu = false;
     bool stage_written_by_ppa = false;
 #if SOC_PPA_SUPPORTED
-    if (s_ppa_srm_handle)
+    if (s_ppa_srm_handle && !s_cpu_fallback_preview)
     {
         esp_err_t ppa_ret;
         ppa_srm_rotation_angle_t rotation = app_camera_ppa_rotation();
@@ -932,7 +1190,7 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
         if (app_camera_prepare_stage_background(stage_index, out_buf, out_w, out_h) != ESP_OK)
         {
             app_camera_abandon_stage_buffer(stage_index);
-            return;
+            goto done;
         }
         // 首选 PPA 硬件缩放；失败时丢弃当前帧，屏幕保持上一帧好画面。
         ppa_ret = app_image_process_scale_crop(camera_buf,
@@ -945,15 +1203,10 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
             rotation);
         if (ppa_ret != ESP_OK)
         {
-            if (!s_ppa_error_logged)
-            {
-                s_ppa_error_logged = true;
-                ESP_LOGW(TAG,
-                    "PPA preview path failed once (%s), keeping previous frame",
-                    esp_err_to_name(ppa_ret));
-            }
+            s_cpu_fallback_preview = true;
+            app_camera_note_ppa_runtime_fail();
             app_camera_abandon_stage_buffer(stage_index);
-            return;
+            goto done;
         }
         else
         {
@@ -967,12 +1220,12 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
         if (app_camera_prepare_stage_background(stage_index, out_buf, out_w, out_h) != ESP_OK)
         {
             app_camera_abandon_stage_buffer(stage_index);
-            return;
+            goto done;
         }
         if (!camera_synced_for_cpu && app_camera_msync_m2c(camera_buf, camera_buf_len) != ESP_OK)
         {
             app_camera_abandon_stage_buffer(stage_index);
-            return;
+            goto done;
         }
         if (app_camera_preview_scale_rgb565_cpu(camera_buf,
                 camera_buf_hes,
@@ -982,7 +1235,7 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
                 out_h) != ESP_OK)
         {
             app_camera_abandon_stage_buffer(stage_index);
-            return;
+            goto done;
         }
         stage_written_by_cpu = true;
     }
@@ -990,24 +1243,32 @@ static void app_camera_frame_cb(uint8_t *camera_buf,
         app_camera_msync_m2c(out_buf, s_disp_buf_size) != ESP_OK)
     {
         app_camera_abandon_stage_buffer(stage_index);
-        return;
+        goto done;
     }
-    const bool bad_preview = app_camera_analyze_rgb565_frame(out_buf,
-        s_disp_buf_size,
-        BSP_LCD_H_RES,
-        BSP_LCD_V_RES,
-        NULL);
-    if (bad_preview && s_display_count > 0U)
+    if (app_camera_preview_analyze_due())
     {
-        app_camera_abandon_stage_buffer(stage_index);
-        return;
+        app_camera_frame_stats_t preview_stats = {0};
+        const bool bad_preview = app_camera_analyze_rgb565_frame(out_buf,
+            s_disp_buf_size,
+            BSP_LCD_H_RES,
+            BSP_LCD_V_RES,
+            &preview_stats);
+        if (bad_preview)
+        {
+            app_camera_note_bad_preview(&preview_stats);
+            app_camera_abandon_stage_buffer(stage_index);
+            goto done;
+        }
+        app_camera_note_good_preview(&preview_stats);
     }
     if (stage_written_by_cpu && app_camera_msync_c2m(out_buf, s_disp_buf_size) != ESP_OK)
     {
         app_camera_abandon_stage_buffer(stage_index);
-        return;
+        goto done;
     }
     app_camera_publish_stage_buffer(stage_index);
+done:
+    app_camera_note_frame_cb_done(cb_start_us);
 }
 // 启动显示任务，PSRAM 栈失败时自动退回内部 RAM 栈。
 /* ---------- 公共生命周期 ---------- */
@@ -1049,6 +1310,27 @@ static esp_err_t app_camera_start_display_task(void)
 #endif
     return (ret == pdPASS) ? ESP_OK : ESP_FAIL;
 }
+
+static void app_camera_start_stats_task(void)
+{
+    if (s_stats_task_handle)
+    {
+        return;
+    }
+    BaseType_t ret = xTaskCreatePinnedToCore(app_camera_stats_task,
+        "cam_stats",
+        STATS_TASK_STACK_SIZE,
+        NULL,
+        STATS_TASK_PRIORITY,
+        &s_stats_task_handle,
+        1);
+    if (ret != pdPASS)
+    {
+        s_stats_task_handle = NULL;
+        ESP_LOGW(TAG, "create camera stats task failed; preview still enabled");
+    }
+}
+
 // 初始化摄像头预览链路的静态资源和回调。
 esp_err_t app_camera_init(void)
 {
@@ -1068,6 +1350,11 @@ esp_err_t app_camera_init(void)
     }
 #if SOC_PPA_SUPPORTED
     app_ppa_init();
+#else
+    s_cpu_fallback_preview = true;
+    ESP_LOGW(TAG,
+        "PPA unsupported, CPU fallback preview throttled, rgb565_swap=%u",
+        (unsigned)PREVIEW_CPU_FALLBACK_SWAP_RGB565);
 #endif
     ret = app_camera_alloc_display_buffers();
     if (ret != ESP_OK)
@@ -1086,6 +1373,7 @@ esp_err_t app_camera_init(void)
         app_camera_free_display_buffers();
         return ret;
     }
+    app_camera_start_stats_task();
     ret = app_video_register_frame_operation_cb(app_camera_frame_cb);
     if (ret != ESP_OK)
     {
@@ -1134,6 +1422,7 @@ esp_err_t app_camera_preview_start(void)
         return ret;
     }
     s_display_count = 0;
+    app_camera_reset_preview_stats();
     s_warmup_drop_remaining = PREVIEW_WARMUP_DROP_FRAMES;
     app_camera_route_reset();
     ret = app_video_stream_task_start(s_video_fd, 0);
@@ -1182,6 +1471,10 @@ void app_camera_pause(void)
 }
 void app_camera_resume(void)
 {
+    const bool was_paused = s_camera_paused;
     s_camera_paused = false;
-    s_warmup_drop_remaining = PREVIEW_WARMUP_DROP_FRAMES;
+    if (was_paused)
+    {
+        s_warmup_drop_remaining = PREVIEW_WARMUP_DROP_FRAMES;
+    }
 }

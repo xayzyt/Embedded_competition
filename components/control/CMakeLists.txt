@@ -6,6 +6,7 @@ idf_component_register(
         "private/app_ctrl_ui.c"
         "app_dock_judge.c"
         "app_task.c"
+        "app_safety_takeover.c"
         "app_cloud.c"
         "private/app_cloud_messaging.c"
         "private/app_cloud_weather.c"

@@ -8,6 +8,7 @@
 #include "esp_log.h"
 #include "app_camera.h"
 #include "app_drone_ai.h"
+#include "app_safety_takeover.h"
 #include "app_task.h"
 #include "app_ui.h"
 #include "app_vision.h"
@@ -20,9 +21,10 @@ static const char *TAG = "app_preview";
 #define APP_TASK_EVENT_TASK_STACK       (8 * 1024)
 #define APP_TASK_EVENT_TASK_PRIO        5
 #define APP_TASK_STATE_POLL_MS          250U
-#define APP_PREVIEW_INTRO_MS            1000U
+#define APP_PREVIEW_INTRO_MS            2000U
 #define APP_PREVIEW_FIRST_FRAME_WAIT_MS 12000U
 #define APP_PREVIEW_SWITCH_WAIT_MS      800U
+#define APP_DRONE_AI_READY_WAIT_MS      200U
 
 static TaskHandle_t s_task_event_task = NULL;
 static QueueHandle_t s_task_event_queue = NULL;
@@ -37,13 +39,20 @@ static bool s_have_last_handled_state = false;
 // 相机启动失败时返回主屏并显示失败状态。
 static void app_show_camera_failure(void)
 {
+    const bool safety_preview = app_safety_takeover_preview_active();
     app_camera_pause();
     app_ui_hide_task_intro();
     app_ui_set_preview_hud_visible(false);
     app_ui_hide_loading();
     app_ui_set_status("task: camera start failed");
     app_ui_main_screen_set_task_state(APP_UI_MAIN_TASK_CAMERA_FAILED);
+    s_preview_visible = false;
+    app_task_cancel("camera start failed");
     app_ui_show_main_screen();
+    if (safety_preview)
+    {
+        app_safety_takeover_mark_failed();
+    }
 }
 
 // 暂停预览并返回主屏；相机资源保留供下一次任务复用。
@@ -52,6 +61,7 @@ static bool app_leave_camera_preview(void)
     app_camera_pause();
     app_ui_hide_task_intro();
     app_ui_set_preview_hud_visible(false);
+    app_ui_safety_takeover_set_visible(false);
     if (!app_ui_show_main_screen())
     {
         ESP_LOGW(TAG, "show main screen failed, will retry");
@@ -64,6 +74,10 @@ static bool app_leave_camera_preview(void)
 // 只有活动中的识别、鉴权和机械执行阶段需要停留在相机预览。
 static bool app_task_snapshot_wants_camera_preview(const app_task_snapshot_t *snap)
 {
+    if (app_safety_takeover_preview_active())
+    {
+        return true;
+    }
     if (snap == NULL)
     {
         return true;
@@ -112,6 +126,7 @@ static bool app_enter_camera_preview_with_intro(void)
     {
         return false;
     }
+    const bool safety_preview = app_safety_takeover_preview_active();
 
     app_task_snapshot_t snap = {0};
     uint16_t target_id = 0;
@@ -120,7 +135,7 @@ static bool app_enter_camera_preview_with_intro(void)
         target_id = snap.target_id;
     }
 
-    if (app_ui_show_task_intro(target_id))
+    if (!safety_preview && app_ui_show_task_intro(target_id))
     {
         vTaskDelay(pdMS_TO_TICKS(APP_PREVIEW_INTRO_MS));
     }
@@ -129,24 +144,35 @@ static bool app_enter_camera_preview_with_intro(void)
     if (app_task_wants_camera_preview())
     {
         app_ui_hide_main_screen();
-        app_ui_set_preview_hud_visible(true);
+        if (safety_preview)
+        {
+            app_ui_set_preview_hud_visible(false);
+            app_ui_safety_takeover_set_visible(true);
+        }
+        else
+        {
+            app_ui_set_preview_hud_visible(true);
+        }
         s_preview_visible = true;
         entered = true;
     }
-    app_ui_hide_task_intro();
+    if (!safety_preview)
+    {
+        app_ui_hide_task_intro();
+    }
     app_preview_switch_finish();
     return entered;
 }
 
-// Start AI, camera, vision, and preview; an AI timeout does not block preview.
+// Request AI loading, then start camera preview without waiting for the model.
 static esp_err_t app_start_camera_pipeline(void)
 {
     app_ui_set_loading_progress(80);
-    esp_err_t ai_ready_ret = app_drone_ai_wait_ready(8000);
+    esp_err_t ai_ready_ret = app_drone_ai_wait_ready(APP_DRONE_AI_READY_WAIT_MS);
     if (ai_ready_ret != ESP_OK)
     {
         ESP_LOGW(TAG,
-            "drone AI model not ready yet (%s), start preview first",
+            "drone AI model still loading (%s), start camera preview now",
             esp_err_to_name(ai_ready_ret));
     }
 
@@ -234,10 +260,19 @@ static void app_start_camera_if_needed(void)
 // 恢复预览并等待有效画面，避免切屏后短暂显示空白。
 static void app_switch_to_camera_preview(void)
 {
+    const bool safety_preview = app_safety_takeover_preview_active();
     const bool camera_was_started = s_camera_started;
     const uint32_t display_count = app_camera_display_count();
     app_camera_resume();
     app_start_camera_if_needed();
+    if (safety_preview)
+    {
+        if (app_task_wants_camera_preview())
+        {
+            (void)app_enter_camera_preview_with_intro();
+        }
+        return;
+    }
     if (!camera_was_started)
     {
         return;

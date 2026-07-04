@@ -25,6 +25,9 @@ static const char *TAG = "audio_prompt";
 #define APP_AUDIO_PROMPT_BITS        16U
 #define APP_AUDIO_PROMPT_VOLUME      65
 #define APP_AUDIO_PROMPT_CHUNK_BYTES 2048U
+#define APP_AUDIO_PROMPT_DMA_MIN_FREE        (48U * 1024U)
+#define APP_AUDIO_PROMPT_DMA_MIN_LARGEST     (16U * 1024U)
+#define APP_AUDIO_PROMPT_CODEC_INIT_ENABLED  0
 #define APP_AUDIO_PROMPT_NVS_NS      "audio_prompt"
 #define APP_AUDIO_PROMPT_NVS_KEY     "enabled"
 
@@ -106,6 +109,9 @@ static uint32_t s_pending_mask = 0;
 static uint32_t s_played_once_mask = 0;
 static bool s_audio_enabled = true;
 static bool s_audio_enabled_loaded = false;
+static bool s_audio_hw_unavailable = false;
+static bool s_audio_startup_probe_done = false;
+static bool s_audio_hw_warned = false;
 static app_audio_prompt_id_t s_playing_prompt = APP_AUDIO_PROMPT_COUNT;
 
 static uint32_t app_audio_prompt_bit(app_audio_prompt_id_t prompt)
@@ -172,19 +178,91 @@ static esp_err_t app_audio_prompt_persist_enabled(bool enabled)
     return ret;
 }
 
+static bool app_audio_prompt_hw_available(void)
+{
+    bool available = false;
+    taskENTER_CRITICAL(&s_audio_mux);
+    available = !s_audio_hw_unavailable && s_codec_opened;
+    taskEXIT_CRITICAL(&s_audio_mux);
+    return available;
+}
+
+static void app_audio_prompt_mark_hw_unavailable(const char *reason, esp_err_t err)
+{
+    bool should_log = false;
+    taskENTER_CRITICAL(&s_audio_mux);
+    s_audio_hw_unavailable = true;
+    s_audio_enabled = false;
+    s_audio_enabled_loaded = true;
+    s_pending_mask = 0;
+    if (!s_audio_hw_warned)
+    {
+        s_audio_hw_warned = true;
+        should_log = true;
+    }
+    taskEXIT_CRITICAL(&s_audio_mux);
+
+    if (s_audio_queue != NULL)
+    {
+        (void)xQueueReset(s_audio_queue);
+    }
+    if (should_log)
+    {
+        ESP_LOGW(TAG,
+            "audio hardware disabled: %s (%s), voice prompts will be skipped",
+            reason,
+            esp_err_to_name(err));
+    }
+}
+
+static bool app_audio_prompt_dma_budget_ok(void)
+{
+    const uint32_t caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA;
+    const size_t free_dma = heap_caps_get_free_size(caps);
+    const size_t largest_dma = heap_caps_get_largest_free_block(caps);
+    if (free_dma < APP_AUDIO_PROMPT_DMA_MIN_FREE ||
+        largest_dma < APP_AUDIO_PROMPT_DMA_MIN_LARGEST)
+    {
+        ESP_LOGW(TAG,
+            "skip audio codec init: internal DMA low free=%u largest=%u need=%u/%u",
+            (unsigned)free_dma,
+            (unsigned)largest_dma,
+            (unsigned)APP_AUDIO_PROMPT_DMA_MIN_FREE,
+            (unsigned)APP_AUDIO_PROMPT_DMA_MIN_LARGEST);
+        return false;
+    }
+    return true;
+}
+
 static esp_err_t app_audio_prompt_open_codec(void)
 {
     if (s_codec_opened)
     {
         return ESP_OK;
     }
+    if (s_audio_hw_unavailable)
+    {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    if (s_audio_startup_probe_done && s_spk_codec == NULL)
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
 
     if (s_spk_codec == NULL)
     {
+        if (!app_audio_prompt_dma_budget_ok())
+        {
+            app_audio_prompt_mark_hw_unavailable("insufficient internal DMA before codec init",
+                ESP_ERR_NO_MEM);
+            return ESP_ERR_NO_MEM;
+        }
         s_spk_codec = bsp_audio_codec_speaker_init();
         if (s_spk_codec == NULL)
         {
             ESP_LOGW(TAG, "speaker codec init failed");
+            app_audio_prompt_mark_hw_unavailable("speaker codec init returned NULL",
+                ESP_FAIL);
             return ESP_FAIL;
         }
         int vol_ret = esp_codec_dev_set_out_vol(s_spk_codec, APP_AUDIO_PROMPT_VOLUME);
@@ -205,10 +283,44 @@ static esp_err_t app_audio_prompt_open_codec(void)
     if (ret != ESP_CODEC_DEV_OK)
     {
         ESP_LOGW(TAG, "speaker codec open failed: %d", ret);
+        app_audio_prompt_mark_hw_unavailable("speaker codec open failed", ESP_FAIL);
         return ESP_FAIL;
     }
     s_codec_opened = true;
     return ESP_OK;
+}
+
+static void app_audio_prompt_startup_probe(void)
+{
+    s_audio_startup_probe_done = true;
+#if !APP_AUDIO_PROMPT_CODEC_INIT_ENABLED
+    app_audio_prompt_mark_hw_unavailable("disabled for camera AI demo stability",
+        ESP_ERR_NOT_SUPPORTED);
+    return;
+#endif
+
+    bool enabled = false;
+    taskENTER_CRITICAL(&s_audio_mux);
+    enabled = s_audio_enabled;
+    taskEXIT_CRITICAL(&s_audio_mux);
+
+    if (!enabled)
+    {
+        return;
+    }
+
+    esp_err_t ret = app_audio_prompt_open_codec();
+    if (ret == ESP_OK)
+    {
+        ESP_LOGI(TAG,
+            "audio codec ready, internal_dma_free=%u largest=%u",
+            (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA),
+            (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA));
+    }
+    else
+    {
+        app_audio_prompt_mark_hw_unavailable("startup codec probe failed", ret);
+    }
 }
 
 static esp_err_t app_audio_prompt_write_pcm(const uint8_t *pcm, size_t len)
@@ -342,6 +454,7 @@ esp_err_t app_audio_prompt_init(void)
         s_audio_queue = NULL;
         return ESP_ERR_NO_MEM;
     }
+    app_audio_prompt_startup_probe();
     return ESP_OK;
 }
 
@@ -357,6 +470,12 @@ bool app_audio_prompt_is_enabled(void)
 esp_err_t app_audio_prompt_set_enabled(bool enabled, bool persist)
 {
     app_audio_prompt_load_enabled_once();
+
+    if (enabled && !app_audio_prompt_hw_available())
+    {
+        ESP_LOGW(TAG, "voice enable ignored: audio hardware is not ready");
+        return ESP_ERR_INVALID_STATE;
+    }
 
     taskENTER_CRITICAL(&s_audio_mux);
     s_audio_enabled = enabled;
@@ -393,6 +512,10 @@ esp_err_t app_audio_prompt_request(app_audio_prompt_id_t prompt)
         return ESP_ERR_INVALID_ARG;
     }
     if (!app_audio_prompt_is_enabled())
+    {
+        return ESP_OK;
+    }
+    if (!app_audio_prompt_hw_available())
     {
         return ESP_OK;
     }

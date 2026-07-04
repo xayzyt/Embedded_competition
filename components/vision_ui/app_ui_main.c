@@ -13,7 +13,9 @@ const lv_image_dsc_t *app_ui_weather_image_src(int weather_code);
 
 LV_FONT_DECLARE(font_loading_cn)
 LV_FONT_DECLARE(font_main_title_cn)
+LV_FONT_DECLARE(font_button_cn)
 LV_FONT_DECLARE(font_title_en)
+LV_FONT_DECLARE(lv_font_source_han_sans_sc_16_cjk)
 LV_IMAGE_DECLARE(logo);
 #define UI_LOCK_SHORT_MS        30
 #define UI_LOCK_BOOT_MS         300
@@ -436,7 +438,8 @@ static void app_ui_update_main_exception_button_unlocked(void)
     }
     if (s_main_exception_label != NULL)
     {
-        lv_label_set_text(s_main_exception_label, "异常演示");
+        lv_obj_set_style_text_font(s_main_exception_label, &font_button_cn, 0);
+        lv_label_set_text(s_main_exception_label, "安全接管");
         lv_obj_center(s_main_exception_label);
     }
     if (s_main_exception_btn != NULL)
@@ -448,6 +451,7 @@ static void app_ui_update_main_voice_button_unlocked(void)
 {
     if (s_main_voice_label != NULL)
     {
+        lv_obj_set_style_text_font(s_main_voice_label, &font_button_cn, 0);
         lv_label_set_text(s_main_voice_label, s_main_voice_enabled ? "语音打开" : "语音关闭");
         lv_obj_center(s_main_voice_label);
     }
@@ -1348,39 +1352,39 @@ bool app_ui_show_main_screen(void)
         lv_obj_t *action_title = lv_label_create(link_bar);
         lv_obj_set_style_text_color(action_title, lv_color_hex(0x64748B), 0);
         lv_obj_set_style_text_font(action_title, &font_main_title_cn, 0);
-        lv_label_set_text(action_title, "演示 / 语音");
+        lv_label_set_text(action_title, "安全 / 语音");
         lv_obj_align(action_title, LV_ALIGN_TOP_LEFT, 654, 14);
         s_main_exception_btn = app_ui_button_create(link_bar);
-        lv_obj_set_size(s_main_exception_btn, 116, 42);
+        lv_obj_set_size(s_main_exception_btn, 122, 42);
         lv_obj_set_style_bg_color(s_main_exception_btn, lv_color_hex(0x0F766E), 0);
         lv_obj_set_style_bg_opa(s_main_exception_btn, LV_OPA_COVER, 0);
         lv_obj_set_style_border_width(s_main_exception_btn, 0, 0);
-        lv_obj_set_style_radius(s_main_exception_btn, 6, 0);
+        lv_obj_set_style_radius(s_main_exception_btn, 8, 0);
         lv_obj_set_style_pad_all(s_main_exception_btn, 0, 0);
         lv_obj_clear_flag(s_main_exception_btn, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_align(s_main_exception_btn, LV_ALIGN_TOP_LEFT, 654, 42);
+        lv_obj_align(s_main_exception_btn, LV_ALIGN_TOP_LEFT, 646, 44);
         lv_obj_add_event_cb(s_main_exception_btn, app_ui_exception_demo_event_cb, LV_EVENT_CLICKED, NULL);
         s_main_exception_label = lv_label_create(s_main_exception_btn);
-        lv_obj_set_width(s_main_exception_label, 108);
+        lv_obj_set_width(s_main_exception_label, 114);
         lv_obj_set_style_text_color(s_main_exception_label, lv_color_hex(0xFFFFFF), 0);
-        lv_obj_set_style_text_font(s_main_exception_label, &font_main_title_cn, 0);
+        lv_obj_set_style_text_font(s_main_exception_label, &font_button_cn, 0);
         lv_obj_set_style_text_align(s_main_exception_label, LV_TEXT_ALIGN_CENTER, 0);
-        lv_label_set_text(s_main_exception_label, "异常演示");
+        lv_label_set_text(s_main_exception_label, "安全接管");
         lv_obj_center(s_main_exception_label);
         s_main_voice_btn = app_ui_button_create(link_bar);
-        lv_obj_set_size(s_main_voice_btn, 116, 42);
+        lv_obj_set_size(s_main_voice_btn, 132, 42);
         lv_obj_set_style_bg_color(s_main_voice_btn, lv_color_hex(0x0F766E), 0);
         lv_obj_set_style_bg_opa(s_main_voice_btn, LV_OPA_COVER, 0);
         lv_obj_set_style_border_width(s_main_voice_btn, 0, 0);
-        lv_obj_set_style_radius(s_main_voice_btn, 6, 0);
+        lv_obj_set_style_radius(s_main_voice_btn, 8, 0);
         lv_obj_set_style_pad_all(s_main_voice_btn, 0, 0);
         lv_obj_clear_flag(s_main_voice_btn, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_align(s_main_voice_btn, LV_ALIGN_TOP_LEFT, 790, 42);
+        lv_obj_align(s_main_voice_btn, LV_ALIGN_TOP_LEFT, 780, 44);
         lv_obj_add_event_cb(s_main_voice_btn, app_ui_voice_toggle_event_cb, LV_EVENT_CLICKED, NULL);
         s_main_voice_label = lv_label_create(s_main_voice_btn);
-        lv_obj_set_width(s_main_voice_label, 108);
+        lv_obj_set_width(s_main_voice_label, 124);
         lv_obj_set_style_text_color(s_main_voice_label, lv_color_hex(0xFFFFFF), 0);
-        lv_obj_set_style_text_font(s_main_voice_label, &font_main_title_cn, 0);
+        lv_obj_set_style_text_font(s_main_voice_label, &font_button_cn, 0);
         lv_obj_set_style_text_align(s_main_voice_label, LV_TEXT_ALIGN_CENTER, 0);
         app_ui_update_main_voice_button_unlocked();
         app_ui_apply_weather_unlocked();

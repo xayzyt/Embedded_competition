@@ -3,6 +3,7 @@
 #include "app_ai_capture.h"
 #include "app_delivery_photo.h"
 #include "app_drone_ai.h"
+#include "app_safety_takeover.h"
 #include "app_task.h"
 
 // 视觉检测频率高于无人机分类频率，避免两个重任务每帧同时运行。
@@ -37,6 +38,11 @@ static bool app_camera_route_apriltag_gate_open(void)
 // 无人机分类只负责打开视觉门控；确认后立即停止继续消耗推理算力。
 static bool app_camera_route_ai_gate_active(void)
 {
+    if (app_safety_takeover_ai_monitor_enabled())
+    {
+        return true;
+    }
+
     app_task_snapshot_t task = {0};
     if (!app_task_peek_snapshot(&task))
     {
