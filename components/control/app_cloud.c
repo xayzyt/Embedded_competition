@@ -314,8 +314,18 @@ static void app_cloud_task(void *arg)
                 xEventGroupSetBits(s_cloud.event_group, APP_CLOUD_START_MQTT_BIT);
             }
         }
+        if (bits == 0 &&
+            (xEventGroupGetBits(s_cloud.event_group) & APP_CLOUD_WIFI_CONNECTED_BIT) != 0 &&
+            !s_cloud.mqtt_connected)
+        {
+            xEventGroupSetBits(s_cloud.event_group, APP_CLOUD_START_MQTT_BIT);
+        }
         if ((bits & APP_CLOUD_PHOTO_UPLOAD_BIT) != 0 || bits == 0)
         {
+            if (s_cloud.mqtt_connected)
+            {
+                app_cloud_publish_current_state();
+            }
             app_cloud_publish_pending_photo();
         }
     }
@@ -390,7 +400,6 @@ static void app_cloud_mqtt_event_handler(void *handler_args,
         ESP_LOGW(TAG, "EMQX mqtt disconnected");
         s_cloud.mqtt_connected = false;
         xEventGroupClearBits(s_cloud.event_group, APP_CLOUD_MQTT_CONNECTED_BIT);
-        xEventGroupSetBits(s_cloud.event_group, APP_CLOUD_START_MQTT_BIT);
         break;
     case MQTT_EVENT_DATA:
         app_cloud_handle_mqtt_data_event(event);

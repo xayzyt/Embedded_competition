@@ -2,6 +2,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -79,6 +80,40 @@ static void app_safety_copy_ctx(app_safety_takeover_ctx_t *out)
     taskENTER_CRITICAL(&s_safety_mux);
     *out = s_safety;
     taskEXIT_CRITICAL(&s_safety_mux);
+}
+
+static bool app_safety_task_is_owned(const app_task_snapshot_t *snap)
+{
+    return snap != NULL && strcmp(snap->source, "safety") == 0;
+}
+
+static bool app_safety_current_task_is_owned(bool require_active)
+{
+    app_task_snapshot_t snap = {0};
+    if (!app_task_peek_snapshot(&snap) || !app_safety_task_is_owned(&snap))
+    {
+        return false;
+    }
+    return !require_active || snap.active;
+}
+
+static uint16_t app_safety_force_idle(void)
+{
+    taskENTER_CRITICAL(&s_safety_mux);
+    s_safety.active = false;
+    s_safety.ai_monitor_enabled = false;
+    s_safety.typhoon_task_running = false;
+    s_safety.phase = SAFETY_PHASE_IDLE;
+    s_safety.monitor_start_tick = 0;
+    s_safety.countdown_deadline_tick = 0;
+    s_safety.done_tick = 0;
+    s_safety.monitor_start_ms = 0;
+    s_safety.countdown_start_ms = 0;
+    s_safety.presence_seen = false;
+    s_safety.last_countdown_s = -1;
+    const uint16_t target_id = s_safety.target_id;
+    taskEXIT_CRITICAL(&s_safety_mux);
+    return target_id;
 }
 
 static void app_safety_set_ui(app_ui_safety_takeover_state_t state,
@@ -250,6 +285,7 @@ static void app_safety_task(void *arg)
             const uint16_t target_id = s_safety.target_id;
             taskEXIT_CRITICAL(&s_safety_mux);
             app_drone_ai_reset_gate();
+            app_drone_ai_set_continuous(true);
             app_safety_set_ui(APP_UI_SAFETY_TAKEOVER_DRONE_LOST, 10, target_id);
             vTaskDelay(pdMS_TO_TICKS(SAFETY_TASK_POLL_MS));
             continue;
@@ -340,6 +376,13 @@ static void app_safety_on_task_event(app_task_event_t event,
     {
         return;
     }
+    if (!app_safety_task_is_owned(snap))
+    {
+        (void)app_safety_force_idle();
+        app_drone_ai_set_continuous(false);
+        app_ui_safety_takeover_set_visible(false);
+        return;
+    }
 
     switch (snap->state) {
     case APP_TASK_STATE_WAIT_APPROACH:
@@ -367,6 +410,19 @@ static void app_safety_on_task_event(app_task_event_t event,
         {
             app_safety_set_ui(APP_UI_SAFETY_TAKEOVER_AUTH_PASSED, 0, ctx.target_id);
         }
+        break;
+    case APP_TASK_STATE_COMPLETED:
+        taskENTER_CRITICAL(&s_safety_mux);
+        s_safety.phase = SAFETY_PHASE_SAFE_DONE;
+        s_safety.ai_monitor_enabled = false;
+        s_safety.countdown_deadline_tick = 0;
+        s_safety.countdown_start_ms = 0;
+        s_safety.last_countdown_s = -1;
+        s_safety.done_tick = xTaskGetTickCount();
+        taskEXIT_CRITICAL(&s_safety_mux);
+        app_drone_ai_set_continuous(false);
+        app_ui_safety_takeover_set_visible(true);
+        app_safety_set_ui(APP_UI_SAFETY_TAKEOVER_SAFE_DONE, 0, ctx.target_id);
         break;
     case APP_TASK_STATE_FAULT:
     case APP_TASK_STATE_CANCELLED:
@@ -475,6 +531,13 @@ esp_err_t app_safety_takeover_trigger_typhoon(void)
     {
         return ESP_ERR_INVALID_STATE;
     }
+    if (!app_safety_current_task_is_owned(true))
+    {
+        (void)app_safety_force_idle();
+        app_drone_ai_set_continuous(false);
+        app_ui_safety_takeover_set_visible(false);
+        return ESP_ERR_INVALID_STATE;
+    }
     if (ctx.typhoon_task_running)
     {
         return ESP_OK;
@@ -550,6 +613,13 @@ void app_safety_takeover_on_ch32_line(const app_ch32_line_t *msg)
     {
         return;
     }
+    if (!app_safety_current_task_is_owned(true))
+    {
+        (void)app_safety_force_idle();
+        app_drone_ai_set_continuous(false);
+        app_ui_safety_takeover_set_visible(false);
+        return;
+    }
 
     if (app_safety_stage_safe_done(msg) &&
         (ctx.phase == SAFETY_PHASE_TYPHOON || ctx.phase == SAFETY_PHASE_SAFE_DONE))
@@ -561,6 +631,7 @@ void app_safety_takeover_on_ch32_line(const app_ch32_line_t *msg)
         const uint16_t target_id = s_safety.target_id;
         taskEXIT_CRITICAL(&s_safety_mux);
         app_drone_ai_set_continuous(false);
+        app_ui_safety_takeover_set_visible(true);
         app_safety_set_ui(APP_UI_SAFETY_TAKEOVER_SAFE_DONE, 0, target_id);
         return;
     }
@@ -591,7 +662,7 @@ bool app_safety_takeover_ai_monitor_enabled(void)
     taskENTER_CRITICAL(&s_safety_mux);
     enabled = s_safety.active && s_safety.ai_monitor_enabled;
     taskEXIT_CRITICAL(&s_safety_mux);
-    return enabled;
+    return enabled && app_safety_current_task_is_owned(true);
 }
 
 bool app_safety_takeover_preview_active(void)
@@ -600,5 +671,5 @@ bool app_safety_takeover_preview_active(void)
     taskENTER_CRITICAL(&s_safety_mux);
     active = s_safety.active && s_safety.phase != SAFETY_PHASE_FAILED;
     taskEXIT_CRITICAL(&s_safety_mux);
-    return active;
+    return active && app_safety_current_task_is_owned(false);
 }

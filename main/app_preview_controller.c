@@ -120,7 +120,7 @@ static void app_preview_switch_finish(void)
     taskEXIT_CRITICAL(&s_preview_switch_mux);
 }
 
-static bool app_enter_camera_preview_with_intro(void)
+static bool app_enter_camera_preview(bool show_intro)
 {
     if (!app_preview_switch_try_begin())
     {
@@ -135,7 +135,7 @@ static bool app_enter_camera_preview_with_intro(void)
         target_id = snap.target_id;
     }
 
-    if (!safety_preview && app_ui_show_task_intro(target_id))
+    if (show_intro && !safety_preview && app_ui_show_task_intro(target_id))
     {
         vTaskDelay(pdMS_TO_TICKS(APP_PREVIEW_INTRO_MS));
     }
@@ -162,6 +162,16 @@ static bool app_enter_camera_preview_with_intro(void)
     }
     app_preview_switch_finish();
     return entered;
+}
+
+static bool app_enter_camera_preview_with_intro(void)
+{
+    return app_enter_camera_preview(true);
+}
+
+static bool app_enter_camera_preview_without_intro(void)
+{
+    return app_enter_camera_preview(false);
 }
 
 // Request AI loading, then start camera preview without waiting for the model.
@@ -258,7 +268,7 @@ static void app_start_camera_if_needed(void)
 }
 
 // 恢复预览并等待有效画面，避免切屏后短暂显示空白。
-static void app_switch_to_camera_preview(void)
+static void app_switch_to_camera_preview(bool show_intro)
 {
     const bool safety_preview = app_safety_takeover_preview_active();
     const bool camera_was_started = s_camera_started;
@@ -269,7 +279,7 @@ static void app_switch_to_camera_preview(void)
     {
         if (app_task_wants_camera_preview())
         {
-            (void)app_enter_camera_preview_with_intro();
+            (void)app_enter_camera_preview_without_intro();
         }
         return;
     }
@@ -283,7 +293,14 @@ static void app_switch_to_camera_preview(void)
     {
         if (app_task_wants_camera_preview())
         {
-            (void)app_enter_camera_preview_with_intro();
+            if (show_intro)
+            {
+                (void)app_enter_camera_preview_with_intro();
+            }
+            else
+            {
+                (void)app_enter_camera_preview_without_intro();
+            }
         }
         return;
     }
@@ -313,7 +330,10 @@ static void app_handle_task_state_changed(const app_task_snapshot_t *snap)
     // 任务开始进入预览，任务结束或异常时返回主屏；周期轮询负责补救丢失的事件。
     if (wants_preview)
     {
-        app_switch_to_camera_preview();
+        if (needs_visibility_fix)
+        {
+            app_switch_to_camera_preview(snap->state == APP_TASK_STATE_WAIT_APPROACH);
+        }
     }
     else
     {

@@ -908,6 +908,7 @@ void app_drone_ai_reset_gate(void)
 {
     taskENTER_CRITICAL(&s_ai_mux);
     s_confirmed = false;
+    s_continuous = false;
     app_drone_ai_clear_hit_window_locked();
     s_last_drone_seen_ms = 0;
     s_last_motion_reject_ms = 0;

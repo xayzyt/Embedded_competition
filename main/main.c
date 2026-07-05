@@ -253,10 +253,14 @@ void app_main(void)
     app_ui_show_main_screen();
     app_ui_hide_loading();
     app_show_runtime_status(&runtime);
-    if (!runtime.core_ready || !runtime.services_ready)
+    if (!runtime.core_ready)
     {
-        ESP_LOGW(TAG, "startup degraded, background services not started");
+        ESP_LOGW(TAG, "startup core failed, background services not started");
         return;
+    }
+    if (!runtime.services_ready)
+    {
+        ESP_LOGW(TAG, "startup degraded, keep cloud/status services online");
     }
 
     app_main_services_bind_ui_callbacks();

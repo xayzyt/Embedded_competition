@@ -133,7 +133,11 @@ static void app_main_screen_status_task(void *arg)
     {
         app_cloud_status_t cloud = {0};
         app_cloud_get_status(&cloud);
-        const bool ch32_ready = app_ch32_link_is_ready();
+        bool ch32_ready = app_ch32_link_is_ready();
+        if (!ch32_ready)
+        {
+            ch32_ready = app_ch32_link_probe_ready(120) == ESP_OK;
+        }
         app_ui_main_screen_update_status(
             cloud.wifi_connected,
             cloud.mqtt_connected,

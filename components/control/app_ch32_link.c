@@ -555,7 +555,10 @@ esp_err_t app_ch32_link_send_proto_cmd_and_wait_ack(app_ch32_proto_cmd_t proto_c
 // 主动探测 CH32 ready；若缓存仍新鲜则不再打扰总线。
 esp_err_t app_ch32_link_probe_ready(uint32_t timeout_ms)
 {
-    ESP_RETURN_ON_FALSE(s_ctx.inited, ESP_ERR_INVALID_STATE, TAG, "not initialized");
+    if (!s_ctx.inited)
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
     if (app_ch32_ready_is_fresh())
     {
         return ESP_OK;
@@ -578,5 +581,9 @@ esp_err_t app_ch32_link_probe_ready(uint32_t timeout_ms)
 }
 bool app_ch32_link_is_ready(void)
 {
+    if (!s_ctx.inited)
+    {
+        return false;
+    }
     return app_ch32_ready_is_fresh();
 }
