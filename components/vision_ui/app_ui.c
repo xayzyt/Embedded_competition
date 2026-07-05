@@ -17,6 +17,7 @@ LV_FONT_DECLARE(font_loading_cn)
 LV_FONT_DECLARE(font_main_title_cn)
 LV_FONT_DECLARE(font_button_cn)
 LV_FONT_DECLARE(font_safety_title_cn)
+LV_FONT_DECLARE(font_hud_cn)
 LV_FONT_DECLARE(font_title_en)
 LV_FONT_DECLARE(lv_font_source_han_sans_sc_16_cjk)
 LV_IMAGE_DECLARE(logo);
@@ -73,14 +74,15 @@ LV_IMAGE_DECLARE(logo);
 #define UI_SAFETY_MARGIN        24
 #define UI_SAFETY_TOP_Y         16
 #define UI_SAFETY_TOP_W         (BSP_LCD_H_RES - (UI_SAFETY_MARGIN * 2))
-#define UI_SAFETY_TOP_H         68
+#define UI_SAFETY_TOP_H         54
 #define UI_SAFETY_BOTTOM_W      (BSP_LCD_H_RES - (UI_SAFETY_MARGIN * 2))
-#define UI_SAFETY_BOTTOM_H      86
+#define UI_SAFETY_BOTTOM_H      76
 #define UI_SAFETY_BOTTOM_Y      (BSP_LCD_V_RES - UI_SAFETY_BOTTOM_H - 18)
-#define UI_SAFETY_ALERT_W       640
-#define UI_SAFETY_ALERT_H       238
-#define UI_SAFETY_BUTTON_W      178
-#define UI_SAFETY_BUTTON_H      62
+#define UI_SAFETY_ALERT_W       540
+#define UI_SAFETY_ALERT_H       178
+#define UI_SAFETY_BUTTON_W      148
+#define UI_SAFETY_BUTTON_H      44
+#define UI_SAFETY_ALERT_FLASH_MS 1500U
 
 static const char *TAG = "app_ui";
 
@@ -120,6 +122,7 @@ static lv_obj_t *s_task_intro_layer = NULL;
 static lv_obj_t *s_task_intro_target = NULL;
 static lv_obj_t *s_safety_layer = NULL;
 static lv_obj_t *s_safety_banner = NULL;
+static lv_obj_t *s_safety_top_line = NULL;
 static lv_obj_t *s_safety_title = NULL;
 static lv_obj_t *s_safety_phase = NULL;
 static lv_obj_t *s_safety_target = NULL;
@@ -128,11 +131,15 @@ static lv_obj_t *s_safety_alert_title = NULL;
 static lv_obj_t *s_safety_alert_detail = NULL;
 static lv_obj_t *s_safety_count = NULL;
 static lv_obj_t *s_safety_status = NULL;
+static lv_obj_t *s_safety_status_dot = NULL;
 static lv_obj_t *s_safety_status_title = NULL;
 static lv_obj_t *s_safety_status_detail = NULL;
 static lv_obj_t *s_safety_typhoon_btn = NULL;
 static lv_obj_t *s_safety_typhoon_label = NULL;
 static app_ui_safety_typhoon_cb_t s_safety_typhoon_cb = NULL;
+static lv_timer_t *s_safety_alert_timer = NULL;
+static app_ui_safety_takeover_state_t s_safety_alert_state = APP_UI_SAFETY_TAKEOVER_IDLE;
+static bool s_safety_alert_flash_done = false;
 
 static void app_ui_safety_typhoon_event_cb(lv_event_t *e);
 
@@ -147,8 +154,9 @@ static uint32_t s_auth_deadline_ms = 0;
 
 // 控制器快照缓存，用于跳过内容未变化的 LVGL 刷新。
 static bool s_control_cache_valid = false;
-static char s_control_status_text[32] = {0};
-static char s_control_vision_text[32] = {0};
+static char s_control_status_text[64] = {0};
+static char s_control_vision_text[64] = {0};
+static char s_control_dock_text[160] = {0};
 static app_dock_state_t s_control_dock_state = APP_DOCK_STATE_SEARCHING;
 static bool s_control_vision_valid = false;
 static uint32_t s_control_vision_seq = 0;
@@ -571,15 +579,15 @@ static void app_ui_style_safety_panel(lv_obj_t *obj,
 {
     lv_obj_set_style_bg_color(obj, bg, 0);
     lv_obj_set_style_bg_opa(obj, opa, 0);
-    lv_obj_set_style_border_width(obj, 2, 0);
+    lv_obj_set_style_border_width(obj, 1, 0);
     lv_obj_set_style_border_color(obj, border, 0);
     lv_obj_set_style_border_opa(obj, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(obj, radius, 0);
     lv_obj_set_style_pad_all(obj, 0, 0);
-    lv_obj_set_style_shadow_width(obj, 8, 0);
-    lv_obj_set_style_shadow_offset_y(obj, 2, 0);
-    lv_obj_set_style_shadow_color(obj, lv_color_hex(0x020617), 0);
-    lv_obj_set_style_shadow_opa(obj, (lv_opa_t)72, 0);
+    lv_obj_set_style_shadow_width(obj, 10, 0);
+    lv_obj_set_style_shadow_offset_y(obj, 3, 0);
+    lv_obj_set_style_shadow_color(obj, lv_color_hex(0x64748B), 0);
+    lv_obj_set_style_shadow_opa(obj, (lv_opa_t)42, 0);
     lv_obj_clear_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
 }
 
@@ -591,9 +599,96 @@ static void app_ui_safety_set_label(lv_obj_t *label, const char *text)
     }
 }
 
+static void app_ui_safety_set_label_clip(lv_obj_t *label)
+{
+    if (label == NULL)
+    {
+        return;
+    }
+#if LVGL_VERSION_MAJOR >= 9
+    lv_label_set_long_mode(label, LV_LABEL_LONG_MODE_CLIP);
+#else
+    lv_label_set_long_mode(label, LV_LABEL_LONG_CLIP);
+#endif
+}
+
 static void app_ui_safety_set_hidden(lv_obj_t *obj, bool hidden)
 {
     app_ui_set_hidden(obj, hidden);
+}
+
+static bool app_ui_safety_alert_should_flash(app_ui_safety_takeover_state_t state)
+{
+    return state == APP_UI_SAFETY_TAKEOVER_DRONE_RECOVERED ||
+           state == APP_UI_SAFETY_TAKEOVER_TYPHOON ||
+           state == APP_UI_SAFETY_TAKEOVER_SAFE_DONE;
+}
+
+static void app_ui_safety_alert_timer_stop_unlocked(void)
+{
+    if (s_safety_alert_timer != NULL)
+    {
+        lv_timer_del(s_safety_alert_timer);
+        s_safety_alert_timer = NULL;
+    }
+}
+
+static void app_ui_safety_alert_timer_cb(lv_timer_t *timer)
+{
+    if (timer == s_safety_alert_timer)
+    {
+        s_safety_alert_timer = NULL;
+    }
+    s_safety_alert_flash_done = true;
+    app_ui_safety_set_hidden(s_safety_alert, true);
+}
+
+static void app_ui_safety_reset_alert_flash_unlocked(app_ui_safety_takeover_state_t state)
+{
+    if (s_safety_alert_state == state)
+    {
+        return;
+    }
+    app_ui_safety_alert_timer_stop_unlocked();
+    s_safety_alert_state = state;
+    s_safety_alert_flash_done = false;
+}
+
+static void app_ui_safety_apply_alert_visibility_unlocked(bool show_alert,
+    app_ui_safety_takeover_state_t state)
+{
+    app_ui_safety_reset_alert_flash_unlocked(state);
+    if (!show_alert)
+    {
+        app_ui_safety_alert_timer_stop_unlocked();
+        app_ui_safety_set_hidden(s_safety_alert, true);
+        return;
+    }
+
+    if (!app_ui_safety_alert_should_flash(state))
+    {
+        app_ui_safety_alert_timer_stop_unlocked();
+        app_ui_safety_set_hidden(s_safety_alert, false);
+        return;
+    }
+
+    if (s_safety_alert_flash_done)
+    {
+        app_ui_safety_set_hidden(s_safety_alert, true);
+        return;
+    }
+
+    app_ui_safety_set_hidden(s_safety_alert, false);
+    if (s_safety_alert_timer == NULL)
+    {
+        s_safety_alert_timer = lv_timer_create(app_ui_safety_alert_timer_cb,
+            UI_SAFETY_ALERT_FLASH_MS,
+            NULL);
+        if (s_safety_alert_timer != NULL)
+        {
+            lv_timer_set_repeat_count(s_safety_alert_timer, 1);
+        }
+    }
 }
 
 static void app_ui_safety_format_target(char *buf, size_t buf_size, uint16_t target_id)
@@ -634,64 +729,99 @@ static void app_ui_create_safety_takeover_unlocked(lv_obj_t *scr)
 
     s_safety_banner = lv_obj_create(s_safety_layer);
     app_ui_style_safety_panel(s_safety_banner,
-        lv_color_hex(0x071A1F),
-        lv_color_hex(0x22D3EE),
-        LV_OPA_COVER,
+        lv_color_hex(0xFFFFFF),
+        lv_color_hex(0x7DD3FC),
+        (lv_opa_t)232,
         8);
     lv_obj_set_size(s_safety_banner, UI_SAFETY_TOP_W, UI_SAFETY_TOP_H);
     lv_obj_set_pos(s_safety_banner, UI_SAFETY_MARGIN, UI_SAFETY_TOP_Y);
 
+    s_safety_top_line = lv_obj_create(s_safety_banner);
+    lv_obj_set_size(s_safety_top_line, UI_SAFETY_TOP_W - 32, 2);
+    lv_obj_set_style_bg_color(s_safety_top_line, lv_color_hex(0x0EA5E9), 0);
+    lv_obj_set_style_bg_opa(s_safety_top_line, (lv_opa_t)210, 0);
+    lv_obj_set_style_border_width(s_safety_top_line, 0, 0);
+    lv_obj_set_style_radius(s_safety_top_line, 1, 0);
+    lv_obj_set_style_pad_all(s_safety_top_line, 0, 0);
+    lv_obj_clear_flag(s_safety_top_line, LV_OBJ_FLAG_SCROLLABLE);
+#if LVGL_VERSION_MAJOR >= 9
+    lv_obj_remove_flag(s_safety_top_line, LV_OBJ_FLAG_CLICKABLE);
+#else
+    lv_obj_clear_flag(s_safety_top_line, LV_OBJ_FLAG_CLICKABLE);
+#endif
+    lv_obj_align(s_safety_top_line, LV_ALIGN_TOP_MID, 0, 0);
+
     s_safety_title = lv_label_create(s_safety_banner);
-    lv_obj_set_width(s_safety_title, 240);
-    lv_obj_set_style_text_color(s_safety_title, lv_color_hex(0xF8FAFC), 0);
-    lv_obj_set_style_text_font(s_safety_title, &font_button_cn, 0);
+    lv_obj_set_width(s_safety_title, 220);
+    app_ui_safety_set_label_clip(s_safety_title);
+    lv_obj_set_style_text_color(s_safety_title, lv_color_hex(0x0F172A), 0);
+    lv_obj_set_style_text_font(s_safety_title, &font_hud_cn, 0);
     lv_label_set_text(s_safety_title, "安全接管");
-    lv_obj_align(s_safety_title, LV_ALIGN_LEFT_MID, 28, 0);
+    lv_obj_align(s_safety_title, LV_ALIGN_LEFT_MID, 24, 1);
 
     s_safety_phase = lv_label_create(s_safety_banner);
-    lv_obj_set_width(s_safety_phase, 460);
-    lv_obj_set_style_text_color(s_safety_phase, lv_color_hex(0xA7F3D0), 0);
-    lv_obj_set_style_text_font(s_safety_phase, &font_safety_title_cn, 0);
+    lv_obj_set_width(s_safety_phase, 420);
+    app_ui_safety_set_label_clip(s_safety_phase);
+    lv_obj_set_style_text_color(s_safety_phase, lv_color_hex(0x0369A1), 0);
+    lv_obj_set_style_text_font(s_safety_phase, &font_loading_cn, 0);
     lv_obj_set_style_text_align(s_safety_phase, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(s_safety_phase, "任务就绪");
-    lv_obj_align(s_safety_phase, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_align(s_safety_phase, LV_ALIGN_CENTER, 0, 1);
 
     s_safety_target = lv_label_create(s_safety_banner);
-    lv_obj_set_width(s_safety_target, 240);
-    lv_obj_set_style_text_color(s_safety_target, lv_color_hex(0xF8FAFC), 0);
-    lv_obj_set_style_text_font(s_safety_target, &font_button_cn, 0);
+    lv_obj_set_width(s_safety_target, 150);
+    app_ui_safety_set_label_clip(s_safety_target);
+    lv_obj_set_style_text_color(s_safety_target, lv_color_hex(0x0F172A), 0);
+    lv_obj_set_style_text_font(s_safety_target, &font_hud_cn, 0);
     lv_obj_set_style_text_align(s_safety_target, LV_TEXT_ALIGN_RIGHT, 0);
     lv_label_set_text(s_safety_target, "TAG --");
-    lv_obj_align(s_safety_target, LV_ALIGN_RIGHT_MID, -28, 0);
+    lv_obj_align(s_safety_target, LV_ALIGN_RIGHT_MID, -24, 1);
 
     s_safety_status = lv_obj_create(s_safety_layer);
     app_ui_style_safety_panel(s_safety_status,
-        lv_color_hex(0x08111F),
-        lv_color_hex(0x38BDF8),
-        LV_OPA_COVER,
+        lv_color_hex(0xFFFFFF),
+        lv_color_hex(0xBAE6FD),
+        (lv_opa_t)232,
         8);
     lv_obj_set_size(s_safety_status, UI_SAFETY_BOTTOM_W, UI_SAFETY_BOTTOM_H);
     lv_obj_set_pos(s_safety_status, UI_SAFETY_MARGIN, UI_SAFETY_BOTTOM_Y);
 
+    s_safety_status_dot = lv_obj_create(s_safety_status);
+    lv_obj_set_size(s_safety_status_dot, 10, 10);
+    lv_obj_set_style_bg_color(s_safety_status_dot, lv_color_hex(0x0EA5E9), 0);
+    lv_obj_set_style_bg_opa(s_safety_status_dot, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_safety_status_dot, 0, 0);
+    lv_obj_set_style_radius(s_safety_status_dot, 5, 0);
+    lv_obj_set_style_pad_all(s_safety_status_dot, 0, 0);
+    lv_obj_clear_flag(s_safety_status_dot, LV_OBJ_FLAG_SCROLLABLE);
+#if LVGL_VERSION_MAJOR >= 9
+    lv_obj_remove_flag(s_safety_status_dot, LV_OBJ_FLAG_CLICKABLE);
+#else
+    lv_obj_clear_flag(s_safety_status_dot, LV_OBJ_FLAG_CLICKABLE);
+#endif
+    lv_obj_align(s_safety_status_dot, LV_ALIGN_LEFT_MID, 24, 0);
+
     s_safety_status_title = lv_label_create(s_safety_status);
-    lv_obj_set_width(s_safety_status_title, 700);
-    lv_obj_set_style_text_color(s_safety_status_title, lv_color_hex(0xF8FAFC), 0);
-    lv_obj_set_style_text_font(s_safety_status_title, &font_safety_title_cn, 0);
+    lv_obj_set_width(s_safety_status_title, UI_SAFETY_BOTTOM_W - UI_SAFETY_BUTTON_W - 112);
+    app_ui_safety_set_label_clip(s_safety_status_title);
+    lv_obj_set_style_text_color(s_safety_status_title, lv_color_hex(0x0F172A), 0);
+    lv_obj_set_style_text_font(s_safety_status_title, &font_loading_cn, 0);
     lv_label_set_text(s_safety_status_title, "正在识别无人机");
-    lv_obj_align(s_safety_status_title, LV_ALIGN_LEFT_MID, 28, -18);
+    lv_obj_align(s_safety_status_title, LV_ALIGN_TOP_LEFT, 46, 10);
 
     s_safety_status_detail = lv_label_create(s_safety_status);
-    lv_obj_set_width(s_safety_status_detail, 720);
-    lv_obj_set_style_text_color(s_safety_status_detail, lv_color_hex(0xBAE6FD), 0);
-    lv_obj_set_style_text_font(s_safety_status_detail, &font_button_cn, 0);
+    lv_obj_set_width(s_safety_status_detail, UI_SAFETY_BOTTOM_W - UI_SAFETY_BUTTON_W - 112);
+    app_ui_safety_set_label_clip(s_safety_status_detail);
+    lv_obj_set_style_text_color(s_safety_status_detail, lv_color_hex(0x475569), 0);
+    lv_obj_set_style_text_font(s_safety_status_detail, &font_hud_cn, 0);
     lv_label_set_text(s_safety_status_detail, "请将目标无人机移入画面");
-    lv_obj_align(s_safety_status_detail, LV_ALIGN_LEFT_MID, 28, 22);
+    lv_obj_align(s_safety_status_detail, LV_ALIGN_TOP_LEFT, 46, 43);
 
     s_safety_typhoon_btn = app_ui_button_create(s_safety_status);
     lv_obj_set_size(s_safety_typhoon_btn, UI_SAFETY_BUTTON_W, UI_SAFETY_BUTTON_H);
     lv_obj_set_style_bg_color(s_safety_typhoon_btn, lv_color_hex(0xDC2626), 0);
     lv_obj_set_style_bg_opa(s_safety_typhoon_btn, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(s_safety_typhoon_btn, 2, 0);
+    lv_obj_set_style_border_width(s_safety_typhoon_btn, 1, 0);
     lv_obj_set_style_border_color(s_safety_typhoon_btn, lv_color_hex(0xFEE2E2), 0);
     lv_obj_set_style_radius(s_safety_typhoon_btn, 8, 0);
     lv_obj_set_style_pad_all(s_safety_typhoon_btn, 0, 0);
@@ -702,43 +832,46 @@ static void app_ui_create_safety_takeover_unlocked(lv_obj_t *scr)
     s_safety_typhoon_label = lv_label_create(s_safety_typhoon_btn);
     lv_obj_set_width(s_safety_typhoon_label, UI_SAFETY_BUTTON_W - 16);
     lv_obj_set_style_text_color(s_safety_typhoon_label, lv_color_hex(0xFFFFFF), 0);
-    lv_obj_set_style_text_font(s_safety_typhoon_label, &font_button_cn, 0);
+    lv_obj_set_style_text_font(s_safety_typhoon_label, &font_hud_cn, 0);
     lv_obj_set_style_text_align(s_safety_typhoon_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(s_safety_typhoon_label, "台风预警");
     lv_obj_center(s_safety_typhoon_label);
 
     s_safety_alert = lv_obj_create(s_safety_layer);
     app_ui_style_safety_panel(s_safety_alert,
-        lv_color_hex(0x0F172A),
-        lv_color_hex(0x38BDF8),
-        LV_OPA_COVER,
+        lv_color_hex(0xFFFFFF),
+        lv_color_hex(0xBAE6FD),
+        (lv_opa_t)242,
         8);
     lv_obj_set_size(s_safety_alert, UI_SAFETY_ALERT_W, UI_SAFETY_ALERT_H);
-    lv_obj_align(s_safety_alert, LV_ALIGN_CENTER, 0, -10);
+    lv_obj_align(s_safety_alert, LV_ALIGN_CENTER, 0, -4);
 
     s_safety_alert_title = lv_label_create(s_safety_alert);
-    lv_obj_set_width(s_safety_alert_title, UI_SAFETY_ALERT_W - 72);
-    lv_obj_set_style_text_color(s_safety_alert_title, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_width(s_safety_alert_title, UI_SAFETY_ALERT_W - 64);
+    app_ui_safety_set_label_clip(s_safety_alert_title);
+    lv_obj_set_style_text_color(s_safety_alert_title, lv_color_hex(0x0F172A), 0);
     lv_obj_set_style_text_font(s_safety_alert_title, &font_safety_title_cn, 0);
     lv_obj_set_style_text_align(s_safety_alert_title, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(s_safety_alert_title, "未检测到无人机");
-    lv_obj_align(s_safety_alert_title, LV_ALIGN_TOP_MID, 0, 28);
+    lv_obj_align(s_safety_alert_title, LV_ALIGN_TOP_MID, 0, 44);
 
     s_safety_alert_detail = lv_label_create(s_safety_alert);
-    lv_obj_set_width(s_safety_alert_detail, UI_SAFETY_ALERT_W - 88);
-    lv_obj_set_style_text_color(s_safety_alert_detail, lv_color_hex(0xCFFAFE), 0);
-    lv_obj_set_style_text_font(s_safety_alert_detail, &font_button_cn, 0);
+    lv_obj_set_width(s_safety_alert_detail, UI_SAFETY_ALERT_W - 72);
+    app_ui_safety_set_label_clip(s_safety_alert_detail);
+    lv_obj_set_style_text_color(s_safety_alert_detail, lv_color_hex(0x475569), 0);
+    lv_obj_set_style_text_font(s_safety_alert_detail, &font_loading_cn, 0);
     lv_obj_set_style_text_align(s_safety_alert_detail, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(s_safety_alert_detail, "接驳保持开启");
-    lv_obj_align(s_safety_alert_detail, LV_ALIGN_TOP_MID, 0, 78);
+    lv_obj_align(s_safety_alert_detail, LV_ALIGN_TOP_MID, 0, 94);
 
     s_safety_count = lv_label_create(s_safety_alert);
     lv_obj_set_width(s_safety_count, UI_SAFETY_ALERT_W - 80);
-    lv_obj_set_style_text_color(s_safety_count, lv_color_hex(0xFDE68A), 0);
-    lv_obj_set_style_text_font(s_safety_count, &font_title_en, 0);
+    app_ui_safety_set_label_clip(s_safety_count);
+    lv_obj_set_style_text_color(s_safety_count, lv_color_hex(0xD97706), 0);
+    lv_obj_set_style_text_font(s_safety_count, &font_loading_cn, 0);
     lv_obj_set_style_text_align(s_safety_count, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(s_safety_count, "");
-    lv_obj_align(s_safety_count, LV_ALIGN_BOTTOM_MID, 0, -20);
+    lv_obj_align(s_safety_count, LV_ALIGN_BOTTOM_MID, 0, -22);
 
     lv_obj_add_flag(s_safety_alert, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_safety_layer, LV_OBJ_FLAG_HIDDEN);
@@ -1151,6 +1284,20 @@ static bool app_ui_text_has(const char *text, const char *needle)
     return (text != NULL) && (needle != NULL) && (strstr(text, needle) != NULL);
 }
 
+static bool app_ui_text_is_display_ready(const char *text)
+{
+    if (text == NULL || text[0] == '\0')
+    {
+        return false;
+    }
+    return !app_ui_text_has(text, "task:") &&
+           !app_ui_text_has(text, "dock:") &&
+           !app_ui_text_has(text, "dock dbg:") &&
+           !app_ui_text_has(text, "ai:") &&
+           !app_ui_text_has(text, "wait_approach") &&
+           !app_ui_text_has(text, "target=");
+}
+
 // 控制器保持稳定的英文状态字符串，显示层在这里集中转换为现场文案。
 static const char *app_ui_task_text_from_dock(const app_dock_judge_result_t *dock)
 {
@@ -1198,8 +1345,7 @@ static const char *app_ui_status_display_text(const char *text,
         return "系统就绪";
     }
     if (app_ui_text_has(text, "booting") ||
-        app_ui_text_has(text, "init") ||
-        app_ui_text_has(text, "启动"))
+        app_ui_text_has(text, "init"))
     {
         return "系统启动";
     }
@@ -1241,6 +1387,10 @@ static const char *app_ui_status_display_text(const char *text,
     {
         return "接驳等待";
     }
+    if (app_ui_text_has(text, "weather"))
+    {
+        return "\u5929\u6C14\u4FDD\u62A4";
+    }
     if (app_ui_text_has(text, "wait id") ||
         app_ui_text_has(text, "wait_approach") ||
         app_ui_text_has(text, "searching target") ||
@@ -1251,11 +1401,19 @@ static const char *app_ui_status_display_text(const char *text,
     {
         return app_ui_task_text_from_dock(dock);
     }
+    if (app_ui_text_is_display_ready(text))
+    {
+        return text;
+    }
     return "云端接驳";
 }
 static const char *app_ui_vision_display_text(const char *text,
     const app_dock_judge_result_t *dock)
 {
+    if (app_ui_text_is_display_ready(text))
+    {
+        return text;
+    }
     if (dock != NULL)
     {
         return app_ui_vision_text_from_dock(dock);
@@ -1282,6 +1440,45 @@ static void app_ui_format_header_dock(const char *dock_text,
     if (out == NULL || out_size == 0)
     {
         return;
+    }
+    if (app_ui_text_is_display_ready(dock_text))
+    {
+        if (app_ui_text_has(dock_text, "\u63A5\u9A73\u6267\u884C"))
+        {
+            snprintf(out, out_size, "\u6267\u884C\u4E2D");
+            return;
+        }
+        if (app_ui_text_has(dock_text, "\u65E0\u4EBA\u673A\u8BC6\u522B"))
+        {
+            snprintf(out, out_size, "\u7B49\u5F85Tag");
+            return;
+        }
+        if (app_ui_text_has(dock_text, "\u8EAB\u4EFD\u901A\u8FC7"))
+        {
+            snprintf(out, out_size, "\u5DF2\u901A\u8FC7");
+            return;
+        }
+        if (app_ui_text_has(dock_text, "\u641C\u7D22"))
+        {
+            snprintf(out, out_size, "\u641C\u7D22Tag");
+            return;
+        }
+        if (app_ui_text_has(dock_text, "\u504F\u79FB") ||
+            app_ui_text_has(dock_text, "\u5BF9\u51C6"))
+        {
+            snprintf(out, out_size, "\u5BF9\u51C6\u4E2D");
+            return;
+        }
+        if (app_ui_text_has(dock_text, "\u7A33\u5B9A\u5E27"))
+        {
+            snprintf(out, out_size, "\u7A33\u5B9A\u4E2D");
+            return;
+        }
+        if (strlen(dock_text) <= 36U)
+        {
+            snprintf(out, out_size, "%s", dock_text);
+            return;
+        }
     }
     if (dock != NULL)
     {
@@ -1389,12 +1586,18 @@ static void app_ui_format_track_label(const app_dock_judge_result_t *dock,
         break;
     }
 }
-static void app_ui_format_telemetry(const app_dock_judge_result_t *dock,
+static void app_ui_format_telemetry(const char *dock_text,
+    const app_dock_judge_result_t *dock,
     char *out,
     size_t out_size)
 {
     if (out == NULL || out_size == 0)
     {
+        return;
+    }
+    if (app_ui_text_is_display_ready(dock_text))
+    {
+        snprintf(out, out_size, "%s", dock_text);
         return;
     }
     if (dock == NULL)
@@ -1426,32 +1629,31 @@ static void app_ui_format_telemetry(const app_dock_judge_result_t *dock,
     {
         snprintf(out,
             out_size,
-            "%s 标签%u 偏移%+ld,%+ld 距离%ldcm 稳定%u/%u",
+            "%s 标签%u 偏移%+ld,%+ld 距离%ldcm 稳定帧%u",
             phase,
             (unsigned)dock->tag_id,
             (long)dock->dx,
             (long)dock->dy,
             (long)distance_cm,
-            (unsigned)dock->stable_count,
-            (unsigned)HUD_LOCK_SEG_COUNT);
+            (unsigned)dock->stable_count);
     }
     else
     {
         snprintf(out,
             out_size,
-            "%s 标签%u 偏移%+ld,%+ld 距离-- 稳定%u/%u",
+            "%s 标签%u 偏移%+ld,%+ld 距离-- 稳定帧%u",
             phase,
             (unsigned)dock->tag_id,
             (long)dock->dx,
             (long)dock->dy,
-            (unsigned)dock->stable_count,
-            (unsigned)HUD_LOCK_SEG_COUNT);
+            (unsigned)dock->stable_count);
     }
 }
-static void app_ui_update_telemetry_unlocked(const app_dock_judge_result_t *dock)
+static void app_ui_update_telemetry_unlocked(const char *dock_text,
+    const app_dock_judge_result_t *dock)
 {
     char text[112] = {0};
-    app_ui_format_telemetry(dock, text, sizeof(text));
+    app_ui_format_telemetry(dock_text, dock, text, sizeof(text));
     app_ui_set_label_text_unlocked(s_dock, text);
 }
 static void app_ui_set_vision_text_unlocked(const char *text)
@@ -1462,6 +1664,7 @@ static void app_ui_set_vision_text_unlocked(const char *text)
 }
 static bool app_ui_control_needs_update(const char *status_text,
     const char *vision_text,
+    const char *dock_text,
     const app_vision_result_t *vision,
     const app_dock_judge_result_t *dock,
     const app_ui_flow_snapshot_t *flow)
@@ -1479,6 +1682,10 @@ static bool app_ui_control_needs_update(const char *status_text,
         return true;
     }
     if ((vision_text != NULL) && (strcmp(s_control_vision_text, vision_text) != 0))
+    {
+        return true;
+    }
+    if ((dock_text != NULL) && (strcmp(s_control_dock_text, dock_text) != 0))
     {
         return true;
     }
@@ -1513,6 +1720,7 @@ static bool app_ui_control_needs_update(const char *status_text,
 }
 static void app_ui_store_control_cache(const char *status_text,
     const char *vision_text,
+    const char *dock_text,
     const app_vision_result_t *vision,
     const app_dock_judge_result_t *dock,
     const app_ui_flow_snapshot_t *flow)
@@ -1525,6 +1733,10 @@ static void app_ui_store_control_cache(const char *status_text,
         sizeof(s_control_vision_text),
         "%s",
         vision_text != NULL ? vision_text : "");
+    snprintf(s_control_dock_text,
+        sizeof(s_control_dock_text),
+        "%s",
+        dock_text != NULL ? dock_text : "");
     if (dock != NULL)
     {
         s_control_dock_state = dock->state;
@@ -2507,143 +2719,178 @@ static void app_ui_safety_set_button_enabled_unlocked(bool enabled)
     }
 }
 
-static void app_ui_safety_apply_state_unlocked(app_ui_safety_takeover_state_t state,
-    int32_t countdown_s,
-    uint16_t target_id)
+static const char *app_ui_safety_text_or(const char *text, const char *fallback)
 {
+    return (text != NULL && text[0] != '\0') ? text : fallback;
+}
+
+static void app_ui_safety_make_default_view(app_ui_safety_takeover_state_t state,
+    int32_t countdown_s,
+    uint16_t target_id,
+    app_ui_safety_takeover_view_t *out)
+{
+    if (out == NULL)
+    {
+        return;
+    }
+    memset(out, 0, sizeof(*out));
+    out->state = state;
+    out->countdown_s = countdown_s;
+    out->target_id = target_id;
+    out->phase_text = "识别无人机";
+    out->status_title = "等待无人机进入画面";
+    out->status_detail = "AI推理等待首帧";
+
+    switch (state) {
+    case APP_UI_SAFETY_TAKEOVER_STARTING:
+        out->phase_text = "摄像头启动";
+        out->status_title = "安全接管准备";
+        out->status_detail = "打开摄像头，准备识别目标";
+        break;
+    case APP_UI_SAFETY_TAKEOVER_WAIT_DRONE:
+        out->phase_text = "识别无人机";
+        out->status_title = "等待无人机进入画面";
+        out->status_detail = "AI推理等待首帧";
+        break;
+    case APP_UI_SAFETY_TAKEOVER_DRONE_CONFIRMED:
+        out->phase_text = "校验TAG身份";
+        out->status_title = "无人机已识别";
+        out->status_detail = "目标TAG身份校验中";
+        break;
+    case APP_UI_SAFETY_TAKEOVER_AUTH_PASSED:
+        out->phase_text = "身份通过";
+        out->status_title = "身份通过";
+        out->status_detail = "外门打开，托盘准备伸出";
+        break;
+    case APP_UI_SAFETY_TAKEOVER_WINDOW_OPEN:
+        out->phase_text = "接驳窗口开启";
+        out->status_title = "接驳窗口开启";
+        out->status_detail = "监测无人机离场，等待天气指令";
+        break;
+    case APP_UI_SAFETY_TAKEOVER_DRONE_LOST:
+        out->phase_text = "离场倒计时";
+        out->status_title = "未检测到无人机";
+        out->status_detail = "保持接驳窗口，等待目标返回";
+        break;
+    case APP_UI_SAFETY_TAKEOVER_DRONE_RECOVERED:
+        out->phase_text = "目标返回";
+        out->status_title = "无人机已返回";
+        out->status_detail = "继续保持接驳窗口";
+        break;
+    case APP_UI_SAFETY_TAKEOVER_TYPHOON:
+        out->phase_text = "天气保护";
+        out->status_title = "安全回收中";
+        out->status_detail = "托盘回收，外门关闭";
+        break;
+    case APP_UI_SAFETY_TAKEOVER_SAFE_DONE:
+        out->phase_text = "安全闭环完成";
+        out->status_title = "安全闭环完成";
+        out->status_detail = "托盘已回收，外门已关闭";
+        break;
+    case APP_UI_SAFETY_TAKEOVER_FAILED:
+        out->phase_text = "保护异常";
+        out->status_title = "安全保护异常";
+        out->status_detail = "请检查摄像头或从控通信";
+        break;
+    case APP_UI_SAFETY_TAKEOVER_IDLE:
+    default:
+        break;
+    }
+}
+
+static void app_ui_safety_apply_view_unlocked(const app_ui_safety_takeover_view_t *view)
+{
+    app_ui_safety_takeover_view_t empty = {0};
+    app_ui_safety_takeover_view_t fallback = {0};
+    if (view == NULL)
+    {
+        app_ui_safety_make_default_view(APP_UI_SAFETY_TAKEOVER_IDLE, 0, 0, &empty);
+        view = &empty;
+    }
+    app_ui_safety_make_default_view(view->state, view->countdown_s, view->target_id, &fallback);
+
     char target_buf[48] = {0};
-    char count_buf[24] = {0};
-    app_ui_safety_format_target(target_buf, sizeof(target_buf), target_id);
+    char count_buf[32] = {0};
+    app_ui_safety_format_target(target_buf, sizeof(target_buf), view->target_id);
     app_ui_safety_set_label(s_safety_target, target_buf);
 
-    const char *phase_text = "视觉等待";
-    const char *status_title = "正在识别无人机";
-    const char *status_detail = "请将目标无人机移入画面";
-    const char *alert_title = "";
-    const char *alert_detail = "";
-    lv_color_t banner_bg = lv_color_hex(0x071A1F);
-    lv_color_t banner_border = lv_color_hex(0x22D3EE);
-    lv_color_t bottom_bg = lv_color_hex(0x08111F);
-    lv_color_t bottom_border = lv_color_hex(0x38BDF8);
-    lv_color_t alert_bg = lv_color_hex(0x111827);
-    lv_color_t alert_border = lv_color_hex(0x38BDF8);
-    lv_color_t alert_text = lv_color_hex(0xFFFFFF);
-    lv_color_t detail_text = lv_color_hex(0xBAE6FD);
-    lv_color_t status_text = lv_color_hex(0xF8FAFC);
-    lv_color_t status_detail_text = lv_color_hex(0xBAE6FD);
-    lv_opa_t layer_bg_opa = LV_OPA_TRANSP;
+    const char *phase_text = app_ui_safety_text_or(view->phase_text, fallback.phase_text);
+    const char *status_title = app_ui_safety_text_or(view->status_title, fallback.status_title);
+    const char *status_detail = app_ui_safety_text_or(view->status_detail, fallback.status_detail);
+    const char *alert_title = status_title;
+    const char *alert_detail = status_detail;
+
+    lv_color_t panel_bg = lv_color_hex(0xFFFFFF);
+    lv_color_t banner_border = lv_color_hex(0x7DD3FC);
+    lv_color_t bottom_border = lv_color_hex(0xBAE6FD);
+    lv_color_t alert_border = lv_color_hex(0xBAE6FD);
+    lv_color_t accent = lv_color_hex(0x0EA5E9);
+    lv_color_t phase_color = lv_color_hex(0x0369A1);
+    lv_color_t title_text = lv_color_hex(0x0F172A);
+    lv_color_t detail_text = lv_color_hex(0x475569);
     lv_color_t layer_bg = lv_color_hex(0x000000);
+    lv_opa_t layer_bg_opa = LV_OPA_TRANSP;
     bool show_alert = false;
     bool show_count = false;
     bool typhoon_enabled = true;
 
-    switch (state) {
+    switch (view->state) {
     case APP_UI_SAFETY_TAKEOVER_STARTING:
-        phase_text = "摄像头启动";
-        status_title = "安全保护启动";
-        status_detail = "正在打开摄像头，准备识别目标";
-        break;
     case APP_UI_SAFETY_TAKEOVER_WAIT_DRONE:
-        phase_text = "视觉等待";
-        status_title = "正在识别无人机";
-        status_detail = "请将目标无人机移入画面";
-        break;
     case APP_UI_SAFETY_TAKEOVER_DRONE_CONFIRMED:
-        phase_text = "AI已确认";
-        status_title = "无人机已识别";
-        status_detail = "正在校验TAG身份";
+    case APP_UI_SAFETY_TAKEOVER_WINDOW_OPEN:
         break;
     case APP_UI_SAFETY_TAKEOVER_AUTH_PASSED:
-        phase_text = "TAG校验通过";
-        status_title = "外门打开";
-        status_detail = "托盘准备伸出";
-        break;
-    case APP_UI_SAFETY_TAKEOVER_WINDOW_OPEN:
-        phase_text = "接驳保持开启";
-        status_title = "接驳保持开启";
-        status_detail = "托盘已伸出 等待天气指令";
+        accent = lv_color_hex(0x0F766E);
+        phase_color = lv_color_hex(0x0F766E);
+        banner_border = lv_color_hex(0x99F6E4);
+        bottom_border = lv_color_hex(0x99F6E4);
+        alert_border = lv_color_hex(0x99F6E4);
         break;
     case APP_UI_SAFETY_TAKEOVER_DRONE_LOST:
-        phase_text = "视觉离场";
-        status_title = "视觉未检测到无人机";
-        status_detail = "接驳保持开启，等待目标返回";
-        alert_title = "未检测到无人机";
-        alert_detail = "10s后保持接驳开启";
-        banner_bg = lv_color_hex(0x3B2508);
-        banner_border = lv_color_hex(0xF59E0B);
-        bottom_bg = lv_color_hex(0x2A1807);
-        bottom_border = lv_color_hex(0xF59E0B);
-        alert_bg = lv_color_hex(0x4A2507);
-        alert_border = lv_color_hex(0xFDBA74);
-        detail_text = lv_color_hex(0xFFEDD5);
-        status_detail_text = lv_color_hex(0xFFEDD5);
+        accent = lv_color_hex(0xD97706);
+        phase_color = lv_color_hex(0xB45309);
+        banner_border = lv_color_hex(0xFBBF24);
+        bottom_border = lv_color_hex(0xFDE68A);
+        alert_border = lv_color_hex(0xF59E0B);
         show_alert = true;
         show_count = true;
         break;
     case APP_UI_SAFETY_TAKEOVER_DRONE_RECOVERED:
-        phase_text = "目标返回";
-        status_title = "无人机已返回";
-        status_detail = "接驳保持开启";
-        alert_title = "无人机已返回";
-        alert_detail = "接驳保持开启";
+        accent = lv_color_hex(0x0F766E);
+        phase_color = lv_color_hex(0x0F766E);
+        banner_border = lv_color_hex(0x99F6E4);
+        bottom_border = lv_color_hex(0x99F6E4);
+        alert_border = lv_color_hex(0x5EEAD4);
         show_alert = true;
-        banner_bg = lv_color_hex(0x064E3B);
-        banner_border = lv_color_hex(0x6EE7B7);
-        bottom_bg = lv_color_hex(0x052E2B);
-        bottom_border = lv_color_hex(0x5EEAD4);
-        alert_bg = lv_color_hex(0x065F46);
-        alert_border = lv_color_hex(0xA7F3D0);
-        detail_text = lv_color_hex(0xD1FAE5);
         break;
     case APP_UI_SAFETY_TAKEOVER_TYPHOON:
-        phase_text = "天气保护";
-        status_title = "正在安全回收";
-        status_detail = "禁止接驳 托盘回收外门关闭";
-        alert_title = "台风预警";
-        alert_detail = "禁止接驳 正在安全回收";
-        layer_bg = lv_color_hex(0x450A0A);
-        layer_bg_opa = (lv_opa_t)116;
-        banner_bg = lv_color_hex(0x7F1D1D);
+        accent = lv_color_hex(0xDC2626);
+        phase_color = lv_color_hex(0xB91C1C);
         banner_border = lv_color_hex(0xFCA5A5);
-        bottom_bg = lv_color_hex(0x7F1D1D);
         bottom_border = lv_color_hex(0xFCA5A5);
-        alert_bg = lv_color_hex(0x991B1B);
-        alert_border = lv_color_hex(0xFEE2E2);
-        detail_text = lv_color_hex(0xFEE2E2);
-        status_detail_text = lv_color_hex(0xFEE2E2);
+        alert_border = lv_color_hex(0xF87171);
+        layer_bg = lv_color_hex(0x7F1D1D);
+        layer_bg_opa = (lv_opa_t)46;
         show_alert = true;
         typhoon_enabled = false;
         break;
     case APP_UI_SAFETY_TAKEOVER_SAFE_DONE:
-        phase_text = "安全完成";
-        status_title = "安全保护完成";
-        status_detail = "托盘已回收 外门已关闭";
-        alert_title = "安全闭环完成";
-        alert_detail = "托盘已回收 外门已关闭";
+        accent = lv_color_hex(0x16A34A);
+        phase_color = lv_color_hex(0x15803D);
+        banner_border = lv_color_hex(0x86EFAC);
+        bottom_border = lv_color_hex(0xBBF7D0);
+        alert_border = lv_color_hex(0x86EFAC);
         show_alert = true;
-        banner_bg = lv_color_hex(0x064E3B);
-        banner_border = lv_color_hex(0x6EE7B7);
-        bottom_bg = lv_color_hex(0x052E2B);
-        bottom_border = lv_color_hex(0x6EE7B7);
-        alert_bg = lv_color_hex(0x065F46);
-        alert_border = lv_color_hex(0xA7F3D0);
-        detail_text = lv_color_hex(0xD1FAE5);
         typhoon_enabled = false;
         break;
     case APP_UI_SAFETY_TAKEOVER_FAILED:
-        phase_text = "保护异常";
-        status_title = "安全保护异常";
-        status_detail = "请检查摄像头或从控通信";
-        alert_title = "安全保护异常";
-        alert_detail = "请检查摄像头或从控通信";
-        show_alert = true;
-        banner_bg = lv_color_hex(0x7F1D1D);
+        accent = lv_color_hex(0xDC2626);
+        phase_color = lv_color_hex(0xB91C1C);
         banner_border = lv_color_hex(0xFCA5A5);
-        bottom_bg = lv_color_hex(0x7F1D1D);
         bottom_border = lv_color_hex(0xFCA5A5);
-        alert_bg = lv_color_hex(0x7F1D1D);
-        alert_border = lv_color_hex(0xFCA5A5);
-        detail_text = lv_color_hex(0xFEE2E2);
+        alert_border = lv_color_hex(0xF87171);
+        show_alert = true;
         typhoon_enabled = false;
         break;
     case APP_UI_SAFETY_TAKEOVER_IDLE:
@@ -2653,29 +2900,35 @@ static void app_ui_safety_apply_state_unlocked(app_ui_safety_takeover_state_t st
 
     lv_obj_set_style_bg_color(s_safety_layer, layer_bg, 0);
     lv_obj_set_style_bg_opa(s_safety_layer, layer_bg_opa, 0);
-    lv_obj_set_style_bg_color(s_safety_banner, banner_bg, 0);
+    lv_obj_set_style_bg_color(s_safety_banner, panel_bg, 0);
     lv_obj_set_style_border_color(s_safety_banner, banner_border, 0);
-    lv_obj_set_style_bg_color(s_safety_status, bottom_bg, 0);
+    lv_obj_set_style_bg_color(s_safety_status, panel_bg, 0);
     lv_obj_set_style_border_color(s_safety_status, bottom_border, 0);
-    lv_obj_set_style_bg_color(s_safety_alert, alert_bg, 0);
+    lv_obj_set_style_bg_color(s_safety_alert, panel_bg, 0);
     lv_obj_set_style_border_color(s_safety_alert, alert_border, 0);
-    lv_obj_set_style_text_color(s_safety_alert_title, alert_text, 0);
+    lv_obj_set_style_bg_color(s_safety_top_line, accent, 0);
+    lv_obj_set_style_bg_color(s_safety_status_dot, accent, 0);
+    lv_obj_set_style_text_color(s_safety_title, title_text, 0);
+    lv_obj_set_style_text_color(s_safety_phase, phase_color, 0);
+    lv_obj_set_style_text_color(s_safety_target, title_text, 0);
+    lv_obj_set_style_text_color(s_safety_alert_title, title_text, 0);
     lv_obj_set_style_text_color(s_safety_alert_detail, detail_text, 0);
-    lv_obj_set_style_text_color(s_safety_status_title, status_text, 0);
-    lv_obj_set_style_text_color(s_safety_status_detail, status_detail_text, 0);
+    lv_obj_set_style_text_color(s_safety_count, accent, 0);
+    lv_obj_set_style_text_color(s_safety_status_title, title_text, 0);
+    lv_obj_set_style_text_color(s_safety_status_detail, detail_text, 0);
 
     app_ui_safety_set_label(s_safety_phase, phase_text);
     app_ui_safety_set_label(s_safety_alert_title, alert_title);
     app_ui_safety_set_label(s_safety_alert_detail, alert_detail);
     app_ui_safety_set_label(s_safety_status_title, status_title);
     app_ui_safety_set_label(s_safety_status_detail, status_detail);
-    app_ui_safety_set_hidden(s_safety_alert, !show_alert);
+    app_ui_safety_apply_alert_visibility_unlocked(show_alert, view->state);
     if (show_count)
     {
         snprintf(count_buf,
             sizeof(count_buf),
-            "%ld",
-            (long)((countdown_s > 0) ? countdown_s : 1));
+            "剩余 %lds",
+            (long)((view->countdown_s > 0) ? view->countdown_s : 1));
         app_ui_safety_set_label(s_safety_count, count_buf);
         app_ui_safety_set_hidden(s_safety_count, false);
     }
@@ -2700,6 +2953,13 @@ void app_ui_safety_takeover_set_visible(bool visible)
     }
     lv_obj_t *scr = app_ui_get_active_screen();
     app_ui_create_safety_takeover_unlocked(scr);
+    if (!visible)
+    {
+        app_ui_safety_alert_timer_stop_unlocked();
+        s_safety_alert_state = APP_UI_SAFETY_TAKEOVER_IDLE;
+        s_safety_alert_flash_done = false;
+        app_ui_safety_set_hidden(s_safety_alert, true);
+    }
     app_ui_safety_set_hidden(s_safety_layer, !visible);
     if (visible)
     {
@@ -2708,20 +2968,31 @@ void app_ui_safety_takeover_set_visible(bool visible)
     bsp_display_unlock();
 }
 
-void app_ui_safety_takeover_set_state(app_ui_safety_takeover_state_t state,
-    int32_t countdown_s,
-    uint16_t target_id)
+void app_ui_safety_takeover_set_view(const app_ui_safety_takeover_view_t *view)
 {
+    if (view == NULL)
+    {
+        return;
+    }
     if (!bsp_display_lock(UI_LOCK_SHORT_MS))
     {
         return;
     }
     lv_obj_t *scr = app_ui_get_active_screen();
     app_ui_create_safety_takeover_unlocked(scr);
-    app_ui_safety_apply_state_unlocked(state, countdown_s, target_id);
+    app_ui_safety_apply_view_unlocked(view);
     app_ui_safety_set_hidden(s_safety_layer, false);
     app_ui_move_foreground(s_safety_layer);
     bsp_display_unlock();
+}
+
+void app_ui_safety_takeover_set_state(app_ui_safety_takeover_state_t state,
+    int32_t countdown_s,
+    uint16_t target_id)
+{
+    app_ui_safety_takeover_view_t view = {0};
+    app_ui_safety_make_default_view(state, countdown_s, target_id, &view);
+    app_ui_safety_takeover_set_view(&view);
 }
 
 void app_ui_set_status(const char *text)
@@ -2744,7 +3015,8 @@ void app_ui_set_status(const char *text)
     bsp_display_unlock();
 }
 // 更新视觉框、准星颜色、锁定条和认证提示；调用者需持有 LVGL 锁。
-static void app_ui_update_hud_unlocked(const app_vision_result_t *vision,
+static void app_ui_update_hud_unlocked(const char *dock_text,
+    const app_vision_result_t *vision,
     const app_dock_judge_result_t *dock)
 {
     if ((dock == NULL) || (s_hud_layer == NULL) || (s_track_box == NULL))
@@ -2807,7 +3079,7 @@ static void app_ui_update_hud_unlocked(const app_vision_result_t *vision,
             0);
     }
     app_ui_update_lock_bar(dock);
-    app_ui_update_telemetry_unlocked(dock);
+    app_ui_update_telemetry_unlocked(dock_text, dock);
     app_ui_update_auth_banner(dock->state);
 }
 // 控制器一次性刷新状态栏、任务行、调试行和 HUD，减少多次抢 LVGL 锁。
@@ -2826,7 +3098,7 @@ void app_ui_update_control_state(const char *status,
         app_ui_flow_snapshot_default(status_display, &fallback_flow);
         flow = &fallback_flow;
     }
-    if (!app_ui_control_needs_update(status_display, vision_display, vision, dock, flow))
+    if (!app_ui_control_needs_update(status_display, vision_display, dock_text, vision, dock, flow))
     {
         return;
     }
@@ -2836,7 +3108,7 @@ void app_ui_update_control_state(const char *status,
     }
     app_ui_set_header_unlocked(status_display, vision_display, dock_text, dock);
     app_ui_update_flow_unlocked(flow);
-    app_ui_update_hud_unlocked(vision, dock);
-    app_ui_store_control_cache(status_display, vision_display, vision, dock, flow);
+    app_ui_update_hud_unlocked(dock_text, vision, dock);
+    app_ui_store_control_cache(status_display, vision_display, dock_text, vision, dock, flow);
     bsp_display_unlock();
 }

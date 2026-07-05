@@ -2,6 +2,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -21,7 +22,8 @@ static const char *TAG = "safety_takeover";
 #define SAFETY_REACQUIRE_GRACE_MS      2400U
 #define SAFETY_LOST_AFTER_MS           2400U
 #define SAFETY_LOST_COUNTDOWN_MS       10000U
-#define SAFETY_DONE_HOLD_MS            3000U
+#define SAFETY_DONE_HOLD_MS            1500U
+#define SAFETY_FAILED_HOLD_MS          3000U
 
 typedef enum {
     SAFETY_PHASE_IDLE = 0,
@@ -47,6 +49,7 @@ typedef struct {
     uint32_t monitor_start_ms;
     uint32_t countdown_start_ms;
     bool presence_seen;
+    bool loss_countdown_consumed;
     int32_t last_countdown_s;
 } app_safety_takeover_ctx_t;
 
@@ -110,17 +113,139 @@ static uint16_t app_safety_force_idle(void)
     s_safety.monitor_start_ms = 0;
     s_safety.countdown_start_ms = 0;
     s_safety.presence_seen = false;
+    s_safety.loss_countdown_consumed = false;
     s_safety.last_countdown_s = -1;
     const uint16_t target_id = s_safety.target_id;
     taskEXIT_CRITICAL(&s_safety_mux);
     return target_id;
 }
 
+static unsigned app_safety_ai_confirm_total(const app_drone_ai_stats_t *ai)
+{
+    return (unsigned)((ai != NULL && ai->confirm_hits != 0U) ? ai->confirm_hits : 1U);
+}
+
+static unsigned app_safety_ai_hit_count(const app_drone_ai_stats_t *ai)
+{
+    const unsigned total = app_safety_ai_confirm_total(ai);
+    unsigned hits = (unsigned)(ai != NULL ? ai->hit_count : 0U);
+    return hits > total ? total : hits;
+}
+
+static void app_safety_format_ai_detail(char *buf, size_t buf_len)
+{
+    if (buf == NULL || buf_len == 0)
+    {
+        return;
+    }
+
+    app_drone_ai_stats_t ai = {0};
+    app_drone_ai_get_stats(&ai);
+    const unsigned total = app_safety_ai_confirm_total(&ai);
+    const unsigned hits = app_safety_ai_hit_count(&ai);
+
+    if (ai.confirmed)
+    {
+        snprintf(buf, buf_len, "AI已确认 命中%u/%u", hits, total);
+    }
+    else if (ai.inferred == 0U)
+    {
+        snprintf(buf, buf_len, "AI推理等待首帧");
+    }
+    else
+    {
+        snprintf(buf,
+            buf_len,
+            "AI推理%lu帧 命中%u/%u",
+            (unsigned long)ai.inferred,
+            hits,
+            total);
+    }
+}
+
 static void app_safety_set_ui(app_ui_safety_takeover_state_t state,
     int32_t countdown_s,
     uint16_t target_id)
 {
-    app_ui_safety_takeover_set_state(state, countdown_s, target_id);
+    char detail_buf[96] = {0};
+    const char *phase_text = "识别无人机";
+    const char *status_title = "等待无人机进入画面";
+    const char *status_detail = "AI推理等待首帧";
+
+    switch (state) {
+    case APP_UI_SAFETY_TAKEOVER_STARTING:
+        phase_text = "摄像头启动";
+        status_title = "安全接管准备";
+        status_detail = "打开摄像头，准备识别目标";
+        break;
+    case APP_UI_SAFETY_TAKEOVER_WAIT_DRONE:
+        phase_text = "识别无人机";
+        status_title = "等待无人机进入画面";
+        app_safety_format_ai_detail(detail_buf, sizeof(detail_buf));
+        status_detail = detail_buf;
+        break;
+    case APP_UI_SAFETY_TAKEOVER_DRONE_CONFIRMED:
+        phase_text = "校验TAG身份";
+        status_title = "无人机已识别";
+        snprintf(detail_buf,
+            sizeof(detail_buf),
+            "目标TAG %u，等待视觉确认",
+            (unsigned)target_id);
+        status_detail = detail_buf;
+        break;
+    case APP_UI_SAFETY_TAKEOVER_AUTH_PASSED:
+        phase_text = "身份通过";
+        status_title = "身份通过";
+        status_detail = "外门打开，托盘准备伸出";
+        break;
+    case APP_UI_SAFETY_TAKEOVER_WINDOW_OPEN:
+        phase_text = "接驳窗口开启";
+        status_title = "接驳窗口开启";
+        status_detail = "监测无人机离场，等待天气指令";
+        break;
+    case APP_UI_SAFETY_TAKEOVER_DRONE_LOST:
+        phase_text = "离场倒计时";
+        status_title = "未检测到无人机";
+        snprintf(detail_buf,
+            sizeof(detail_buf),
+            "剩余%lds，保持接驳窗口",
+            (long)((countdown_s > 0) ? countdown_s : 1));
+        status_detail = detail_buf;
+        break;
+    case APP_UI_SAFETY_TAKEOVER_DRONE_RECOVERED:
+        phase_text = "目标返回";
+        status_title = "无人机已返回";
+        status_detail = "继续保持接驳窗口";
+        break;
+    case APP_UI_SAFETY_TAKEOVER_TYPHOON:
+        phase_text = "天气保护";
+        status_title = "安全回收中";
+        status_detail = "托盘回收，外门关闭";
+        break;
+    case APP_UI_SAFETY_TAKEOVER_SAFE_DONE:
+        phase_text = "安全闭环完成";
+        status_title = "安全闭环完成";
+        status_detail = "托盘已回收，外门已关闭";
+        break;
+    case APP_UI_SAFETY_TAKEOVER_FAILED:
+        phase_text = "保护异常";
+        status_title = "安全保护异常";
+        status_detail = "请检查摄像头或从控通信";
+        break;
+    case APP_UI_SAFETY_TAKEOVER_IDLE:
+    default:
+        break;
+    }
+
+    app_ui_safety_takeover_view_t view = {
+        .state = state,
+        .countdown_s = countdown_s,
+        .target_id = target_id,
+        .phase_text = phase_text,
+        .status_title = status_title,
+        .status_detail = status_detail,
+    };
+    app_ui_safety_takeover_set_view(&view);
 }
 
 static void app_safety_mark_window_open_locked(TickType_t now)
@@ -132,7 +257,20 @@ static void app_safety_mark_window_open_locked(TickType_t now)
     s_safety.monitor_start_ms = app_safety_now_ms();
     s_safety.countdown_start_ms = 0;
     s_safety.presence_seen = false;
+    s_safety.loss_countdown_consumed = false;
     s_safety.last_countdown_s = -1;
+}
+
+static uint16_t app_safety_mark_recovered_locked(void)
+{
+    s_safety.ai_monitor_enabled = false;
+    s_safety.phase = SAFETY_PHASE_RECOVERED;
+    s_safety.countdown_deadline_tick = 0;
+    s_safety.countdown_start_ms = 0;
+    s_safety.presence_seen = true;
+    s_safety.loss_countdown_consumed = true;
+    s_safety.last_countdown_s = -1;
+    return s_safety.target_id;
 }
 
 static bool app_safety_stage_tray_out(const app_ch32_line_t *msg)
@@ -205,8 +343,11 @@ static void app_safety_task(void *arg)
 
         if (ctx.phase == SAFETY_PHASE_SAFE_DONE || ctx.phase == SAFETY_PHASE_FAILED)
         {
+            const uint32_t hold_ms = ctx.phase == SAFETY_PHASE_SAFE_DONE ?
+                                     SAFETY_DONE_HOLD_MS :
+                                     SAFETY_FAILED_HOLD_MS;
             if (ctx.done_tick != 0 &&
-                (now - ctx.done_tick) >= app_safety_ms_to_ticks(SAFETY_DONE_HOLD_MS))
+                (now - ctx.done_tick) >= app_safety_ms_to_ticks(hold_ms))
             {
                 taskENTER_CRITICAL(&s_safety_mux);
                 s_safety.active = false;
@@ -234,6 +375,13 @@ static void app_safety_task(void *arg)
             continue;
         }
 
+        if (ctx.phase == SAFETY_PHASE_STARTING)
+        {
+            app_safety_set_ui(APP_UI_SAFETY_TAKEOVER_WAIT_DRONE, 0, ctx.target_id);
+            vTaskDelay(pdMS_TO_TICKS(SAFETY_TASK_POLL_MS));
+            continue;
+        }
+
         if (!ctx.ai_monitor_enabled ||
             (ctx.phase != SAFETY_PHASE_WINDOW_OPEN &&
              ctx.phase != SAFETY_PHASE_LOST_COUNTDOWN))
@@ -256,7 +404,7 @@ static void app_safety_task(void *arg)
         }
 
         bool should_start_countdown = false;
-        if (ctx.phase == SAFETY_PHASE_WINDOW_OPEN)
+        if (ctx.phase == SAFETY_PHASE_WINDOW_OPEN && !ctx.loss_countdown_consumed)
         {
             if (!ctx.presence_seen)
             {
@@ -281,6 +429,7 @@ static void app_safety_task(void *arg)
             s_safety.phase = SAFETY_PHASE_LOST_COUNTDOWN;
             s_safety.countdown_deadline_tick = deadline;
             s_safety.countdown_start_ms = now_ms;
+            s_safety.loss_countdown_consumed = true;
             s_safety.last_countdown_s = 10;
             const uint16_t target_id = s_safety.target_id;
             taskEXIT_CRITICAL(&s_safety_mux);
@@ -296,12 +445,7 @@ static void app_safety_task(void *arg)
             if (app_drone_ai_is_drone_confirmed())
             {
                 taskENTER_CRITICAL(&s_safety_mux);
-                s_safety.ai_monitor_enabled = false;
-                s_safety.phase = SAFETY_PHASE_RECOVERED;
-                s_safety.countdown_deadline_tick = 0;
-                s_safety.countdown_start_ms = 0;
-                s_safety.last_countdown_s = -1;
-                const uint16_t target_id = s_safety.target_id;
+                const uint16_t target_id = app_safety_mark_recovered_locked();
                 taskEXIT_CRITICAL(&s_safety_mux);
                 app_drone_ai_set_continuous(false);
                 app_safety_set_ui(APP_UI_SAFETY_TAKEOVER_DRONE_RECOVERED, 0, target_id);
@@ -313,15 +457,10 @@ static void app_safety_task(void *arg)
             if (remain_s <= 1)
             {
                 taskENTER_CRITICAL(&s_safety_mux);
-                s_safety.ai_monitor_enabled = false;
-                s_safety.phase = SAFETY_PHASE_WINDOW_OPEN;
-                s_safety.countdown_deadline_tick = 0;
-                s_safety.countdown_start_ms = 0;
-                s_safety.last_countdown_s = -1;
-                const uint16_t target_id = s_safety.target_id;
+                const uint16_t target_id = app_safety_mark_recovered_locked();
                 taskEXIT_CRITICAL(&s_safety_mux);
                 app_drone_ai_set_continuous(false);
-                app_safety_set_ui(APP_UI_SAFETY_TAKEOVER_WINDOW_OPEN, 0, target_id);
+                app_safety_set_ui(APP_UI_SAFETY_TAKEOVER_DRONE_RECOVERED, 0, target_id);
                 vTaskDelay(pdMS_TO_TICKS(SAFETY_TASK_POLL_MS));
                 continue;
             }
@@ -412,17 +551,30 @@ static void app_safety_on_task_event(app_task_event_t event,
         }
         break;
     case APP_TASK_STATE_COMPLETED:
-        taskENTER_CRITICAL(&s_safety_mux);
-        s_safety.phase = SAFETY_PHASE_SAFE_DONE;
-        s_safety.ai_monitor_enabled = false;
-        s_safety.countdown_deadline_tick = 0;
-        s_safety.countdown_start_ms = 0;
-        s_safety.last_countdown_s = -1;
-        s_safety.done_tick = xTaskGetTickCount();
-        taskEXIT_CRITICAL(&s_safety_mux);
-        app_drone_ai_set_continuous(false);
-        app_ui_safety_takeover_set_visible(true);
-        app_safety_set_ui(APP_UI_SAFETY_TAKEOVER_SAFE_DONE, 0, ctx.target_id);
+        if (ctx.phase == SAFETY_PHASE_TYPHOON ||
+            ctx.phase == SAFETY_PHASE_SAFE_DONE)
+        {
+            taskENTER_CRITICAL(&s_safety_mux);
+            s_safety.phase = SAFETY_PHASE_SAFE_DONE;
+            s_safety.ai_monitor_enabled = false;
+            s_safety.countdown_deadline_tick = 0;
+            s_safety.countdown_start_ms = 0;
+            s_safety.last_countdown_s = -1;
+            s_safety.done_tick = xTaskGetTickCount();
+            taskEXIT_CRITICAL(&s_safety_mux);
+            app_drone_ai_set_continuous(false);
+            app_ui_safety_takeover_set_visible(true);
+            app_safety_set_ui(APP_UI_SAFETY_TAKEOVER_SAFE_DONE, 0, ctx.target_id);
+        }
+        else
+        {
+            taskENTER_CRITICAL(&s_safety_mux);
+            const uint16_t target_id = app_safety_mark_recovered_locked();
+            taskEXIT_CRITICAL(&s_safety_mux);
+            app_drone_ai_set_continuous(false);
+            app_ui_safety_takeover_set_visible(true);
+            app_safety_set_ui(APP_UI_SAFETY_TAKEOVER_DRONE_RECOVERED, 0, target_id);
+        }
         break;
     case APP_TASK_STATE_FAULT:
     case APP_TASK_STATE_CANCELLED:
@@ -499,6 +651,7 @@ esp_err_t app_safety_takeover_start(void)
     s_safety.monitor_start_ms = 0;
     s_safety.countdown_start_ms = 0;
     s_safety.presence_seen = false;
+    s_safety.loss_countdown_consumed = false;
     s_safety.last_countdown_s = -1;
     taskEXIT_CRITICAL(&s_safety_mux);
 
@@ -613,7 +766,10 @@ void app_safety_takeover_on_ch32_line(const app_ch32_line_t *msg)
     {
         return;
     }
-    if (!app_safety_current_task_is_owned(true))
+    const bool require_active_owner =
+        ctx.phase != SAFETY_PHASE_TYPHOON &&
+        ctx.phase != SAFETY_PHASE_SAFE_DONE;
+    if (!app_safety_current_task_is_owned(require_active_owner))
     {
         (void)app_safety_force_idle();
         app_drone_ai_set_continuous(false);
@@ -640,6 +796,8 @@ void app_safety_takeover_on_ch32_line(const app_ch32_line_t *msg)
         ctx.phase == SAFETY_PHASE_TYPHOON ||
         ctx.phase == SAFETY_PHASE_SAFE_DONE ||
         ctx.phase == SAFETY_PHASE_FAILED ||
+        ctx.phase == SAFETY_PHASE_RECOVERED ||
+        ctx.loss_countdown_consumed ||
         ctx.ai_monitor_enabled)
     {
         return;

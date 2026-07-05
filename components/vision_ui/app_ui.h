@@ -128,9 +128,19 @@ typedef enum {
     APP_UI_SAFETY_TAKEOVER_FAILED,
 } app_ui_safety_takeover_state_t;
 
+typedef struct {
+    app_ui_safety_takeover_state_t state;
+    int32_t countdown_s;
+    uint16_t target_id;
+    const char *phase_text;
+    const char *status_title;
+    const char *status_detail;
+} app_ui_safety_takeover_view_t;
+
 typedef void (*app_ui_safety_typhoon_cb_t)(void);
 void app_ui_set_safety_typhoon_callback(app_ui_safety_typhoon_cb_t cb);
 void app_ui_safety_takeover_set_visible(bool visible);
+void app_ui_safety_takeover_set_view(const app_ui_safety_takeover_view_t *view);
 void app_ui_safety_takeover_set_state(app_ui_safety_takeover_state_t state,
                                       int32_t countdown_s,
                                       uint16_t target_id);

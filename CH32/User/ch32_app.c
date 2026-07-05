@@ -463,12 +463,12 @@ static uint8_t ch32_app_retract_tray(void)
 
 static uint8_t ch32_app_wait_for_cargo(uint32_t timeout_ms)
 {
-    uint32_t elapsed = 0U;
+    (void)timeout_ms;
     uint8_t hit_count = 0U;
 
     ch32_app_publish_stage(ESP32_COMM_STAGE_WAITING_CARGO, ESP32_COMM_ERR_NONE);
 
-    while(elapsed < timeout_ms)
+    for(;;)
     {
         if(ch32_app_pump_runtime_commands() != 0U)
             return 2U;
@@ -484,9 +484,7 @@ static uint8_t ch32_app_wait_for_cargo(uint32_t timeout_ms)
             hit_count++;
             if(hit_count >= WEIGHT_CONFIRM_COUNT)
             {
-                ch32_app_publish_stage(ESP32_COMM_STAGE_CARGO_DETECTED,
-                                       ESP32_COMM_ERR_NONE);
-                return 1U;
+                hit_count = WEIGHT_CONFIRM_COUNT;
             }
         }
         else
@@ -496,16 +494,12 @@ static uint8_t ch32_app_wait_for_cargo(uint32_t timeout_ms)
 
         if(ch32_app_delay_ms_interruptible(WEIGHT_CHECK_INTERVAL_MS) != 0U)
             return 2U;
-
-        elapsed += WEIGHT_CHECK_INTERVAL_MS;
     }
-
-    return 0U;
 }
 
-/* ---------- 安全回收与完整配送流程 ---------- */
+/* ---------- 安全回收与接驳窗口流程 ---------- */
 
-// 无论正常完成还是中止，托盘都应先收回，再关闭外门并进入锁止阶段。
+// 只有 SAFE_CLOSE/天气保护会调用此流程：托盘先收回，再关闭外门并进入锁止阶段。
 static uint8_t ch32_app_close_to_safe_locked(uint8_t emit_safe_event)
 {
     if(ch32_app_retract_tray() == 0U)
@@ -541,22 +535,13 @@ static uint8_t ch32_app_run_delivery_flow(void)
     if(ch32_app_extend_tray() == 0U)
         return 0U;
 
+    // 演示剧本要求托盘伸出后保持接驳窗口，不能因称重或等待超时自动回收。
+    // 后续仅由 SAFE_CLOSE（天气保护/手动安全关闭）打断等待并执行回收关门。
     wait_ret = ch32_app_wait_for_cargo(WEIGHT_WAIT_TIMEOUT_MS);
     if(wait_ret == 2U)
         return 0U;
 
-    if(wait_ret == 0U)
-    {
-        (void)ch32_app_close_to_safe_locked(0U);
-        ch32_app_publish_fault(ESP32_COMM_ERR_TIMEOUT);
-        return 0U;
-    }
-
-    if(ch32_app_close_to_safe_locked(1U) == 0U)
-        return 0U;
-
-    ch32_app_publish_stage(ESP32_COMM_STAGE_COMPLETE, ESP32_COMM_ERR_NONE);
-    return 1U;
+    return 0U;
 }
 
 /* ---------- 命令分发 ---------- */

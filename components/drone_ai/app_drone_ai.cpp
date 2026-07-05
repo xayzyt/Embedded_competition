@@ -912,6 +912,9 @@ void app_drone_ai_reset_gate(void)
     app_drone_ai_clear_hit_window_locked();
     s_last_drone_seen_ms = 0;
     s_last_motion_reject_ms = 0;
+    s_submit_seq = 0;
+    s_infer_count = 0;
+    s_drop_count = 0;
     s_motion_prev_valid = false;
     s_latest.confirmed = false;
     s_latest.hit_count = 0;

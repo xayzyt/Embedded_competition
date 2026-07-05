@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "app_vision.c" "app_apriltag.c" "app_ai_capture.c" "app_ui.c" "app_ui_main.c" "app_ui_assets.c" "assets/font_loading_cn.c" "assets/font_main_title_cn.c" "assets/font_title_en.c" "assets/font_button_cn.c" "assets/font_safety_title_cn.c"
+    SRCS "app_vision.c" "app_apriltag.c" "app_ai_capture.c" "app_ui.c" "app_ui_main.c" "app_ui_assets.c" "assets/font_loading_cn.c" "assets/font_main_title_cn.c" "assets/font_title_en.c" "assets/font_button_cn.c" "assets/font_safety_title_cn.c" "assets/font_hud_cn.c"
     INCLUDE_DIRS "."
     REQUIRES app_types lvgl esp32_p4_function_ev_board esp_timer heap esp_lvgl_port
 )

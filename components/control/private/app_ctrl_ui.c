@@ -2,121 +2,349 @@
 
 #include <stdio.h>
 #include <string.h>
+
 #include "app_ch32_link.h"
-#include "app_ctrl_proto.h"
 #include "app_drone_ai.h"
 #include "app_ui.h"
 
-// 根据控制结果生成状态栏、调试信息和四阶段流程条。
-// 中文常量使用 Unicode 转义，避免源码编码变化造成乱码。
+// UI text is kept as escaped UTF-8 literals so this file remains ASCII-safe.
 #define UI_TEXT_WAIT          "\u7B49\u5F85"
 #define UI_TEXT_WAIT_CLOUD    "\u7B49\u5F85\u4E91\u7AEF"
 #define UI_TEXT_WAIT_TAG      "\u7B49\u5F85Tag"
 #define UI_TEXT_WAIT_DOCK     "\u7B49\u5F85\u63A5\u9A73"
 #define UI_TEXT_NOT_DONE      "\u672A\u5B8C\u6210"
-#define UI_TEXT_DOCK          "\u63A5\u9A73"
 #define UI_TEXT_DOCK_DONE     "\u63A5\u9A73\u5B8C\u6210"
 #define UI_TEXT_DOCK_ERROR    "\u63A5\u9A73ERR"
 #define UI_TEXT_DOCK_WAIT     "\u63A5\u9A73\u7B49\u5F85"
-#define UI_TEXT_PICKUP        "\u53D6\u8D27"
 #define UI_TEXT_DONE          "\u5B8C\u6210"
+#define UI_TEXT_SYSTEM_READY  "\u7CFB\u7EDF\u5C31\u7EEA"
+#define UI_TEXT_WAIT_DRONE    "\u7B49\u5F85\u65E0\u4EBA\u673A"
+#define UI_TEXT_WAIT_CH32     "\u7B49\u5F85CH32"
+#define UI_TEXT_IDENT_DRONE   "\u8BC6\u522B\u65E0\u4EBA\u673A"
+#define UI_TEXT_DRONE_OK      "\u65E0\u4EBA\u673A\u5DF2\u8BC6\u522B"
+#define UI_TEXT_IDENT_TAG     "\u8BC6\u522B\u8EAB\u4EFD"
+#define UI_TEXT_SEARCH_TAG    "\u641C\u7D22\u6807\u7B7E"
+#define UI_TEXT_ALIGN_TAG     "\u5BF9\u51C6\u6807\u7B7E"
+#define UI_TEXT_STABLE_TAG    "\u7A33\u5B9A\u6807\u7B7E"
+#define UI_TEXT_TAG_PASSED    "\u8EAB\u4EFD\u901A\u8FC7"
+#define UI_TEXT_READY_DOCK    "\u51C6\u5907\u63A5\u9A73"
+#define UI_TEXT_DOCK_START    "\u63A5\u9A73\u542F\u52A8"
+#define UI_TEXT_FAULT         "\u7CFB\u7EDF\u5F02\u5E38"
+#define UI_TEXT_STOPPED       "\u4EFB\u52A1\u505C\u6B62"
+#define UI_TEXT_WEATHER       "\u5929\u6C14\u4FDD\u62A4"
+#define UI_TEXT_VISION_OK     "\u89C6\u89C9\u5DF2\u901A\u8FC7"
+#define UI_TEXT_WAIT_FRAME    "\u7B49\u5F85\u63A8\u7406\u5E27"
+#define UI_TEXT_STAGE_IDLE    "\u673A\u68B0\u5F85\u673A"
+#define UI_TEXT_DOOR_OPENING  "\u5916\u95E8\u6253\u5F00\u4E2D"
+#define UI_TEXT_DOOR_OPENED   "\u5916\u95E8\u5DF2\u6253\u5F00"
+#define UI_TEXT_TRAY_EXT      "\u6258\u76D8\u4F38\u51FA\u4E2D"
+#define UI_TEXT_TRAY_EXTED    "\u6258\u76D8\u5DF2\u4F38\u51FA"
+#define UI_TEXT_WAIT_CARGO    "\u7B49\u5F85\u653E\u8D27"
+#define UI_TEXT_CARGO_OK      "\u8D27\u7269\u5DF2\u68C0\u6D4B"
+#define UI_TEXT_TRAY_RET      "\u6258\u76D8\u56DE\u6536\u4E2D"
+#define UI_TEXT_TRAY_RETED    "\u6258\u76D8\u5DF2\u56DE\u6536"
+#define UI_TEXT_DOOR_CLOSING  "\u5916\u95E8\u5173\u95ED\u4E2D"
+#define UI_TEXT_SAFE_LOCKED   "\u5B89\u5168\u9501\u6B62"
+#define UI_TEXT_STAGE_FAULT   "\u673A\u68B0\u6545\u969C"
 
-/* ---------- 状态文案 ---------- */
+static unsigned app_ctrl_ai_confirm_total(const app_drone_ai_stats_t *ai)
+{
+    return (unsigned)((ai != NULL && ai->confirm_hits != 0U) ? ai->confirm_hits : 1U);
+}
 
-// 生成视觉、距离、稳定度、机械阶段和重量调试信息。
-static void app_ctrl_compose_detail(const app_ctrl_cycle_t *cycle,
+static unsigned app_ctrl_ai_hit_count(const app_drone_ai_stats_t *ai)
+{
+    const unsigned total = app_ctrl_ai_confirm_total(ai);
+    unsigned hits = (unsigned)(ai != NULL ? ai->hit_count : 0U);
+    return hits > total ? total : hits;
+}
+
+static int32_t app_ctrl_distance_cm(const app_dock_judge_result_t *dock)
+{
+    if (dock == NULL || dock->est_distance_mm <= 0)
+    {
+        return -1;
+    }
+    return (dock->est_distance_mm + 5) / 10;
+}
+
+static const char *app_ctrl_proto_stage_action_text(app_ch32_proto_stage_t stage)
+{
+    switch (stage) {
+    case APP_CH32_STAGE_IDLE:            return UI_TEXT_STAGE_IDLE;
+    case APP_CH32_STAGE_READY:           return UI_TEXT_DOCK_START;
+    case APP_CH32_STAGE_DOOR_OPENING:    return UI_TEXT_DOOR_OPENING;
+    case APP_CH32_STAGE_DOOR_OPENED:     return UI_TEXT_DOOR_OPENED;
+    case APP_CH32_STAGE_TRAY_EXTENDING:  return UI_TEXT_TRAY_EXT;
+    case APP_CH32_STAGE_TRAY_EXTENDED:   return UI_TEXT_TRAY_EXTED;
+    case APP_CH32_STAGE_WAITING_CARGO:   return UI_TEXT_WAIT_CARGO;
+    case APP_CH32_STAGE_CARGO_DETECTED:  return UI_TEXT_CARGO_OK;
+    case APP_CH32_STAGE_TRAY_RETRACTING: return UI_TEXT_TRAY_RET;
+    case APP_CH32_STAGE_TRAY_RETRACTED:  return UI_TEXT_TRAY_RETED;
+    case APP_CH32_STAGE_DOOR_CLOSING:    return UI_TEXT_DOOR_CLOSING;
+    case APP_CH32_STAGE_SAFE_LOCKED:     return UI_TEXT_SAFE_LOCKED;
+    case APP_CH32_STAGE_COMPLETE:        return UI_TEXT_DOCK_DONE;
+    case APP_CH32_STAGE_FAULT:           return UI_TEXT_STAGE_FAULT;
+    case APP_CH32_STAGE_UNKNOWN:
+    default:                             return UI_TEXT_DOCK_START;
+    }
+}
+
+static const char *app_ctrl_proto_stage_short_text(app_ch32_proto_stage_t stage)
+{
+    switch (stage) {
+    case APP_CH32_STAGE_DOOR_OPENING:    return "\u5F00\u95E8\u4E2D";
+    case APP_CH32_STAGE_DOOR_OPENED:     return "\u95E8\u5DF2\u5F00";
+    case APP_CH32_STAGE_TRAY_EXTENDING:  return "\u4F38\u51FA\u4E2D";
+    case APP_CH32_STAGE_TRAY_EXTENDED:   return "\u5DF2\u4F38\u51FA";
+    case APP_CH32_STAGE_WAITING_CARGO:   return "\u7B49\u653E\u8D27";
+    case APP_CH32_STAGE_CARGO_DETECTED:  return "\u8D27\u5DF2\u68C0";
+    case APP_CH32_STAGE_TRAY_RETRACTING: return "\u56DE\u6536\u4E2D";
+    case APP_CH32_STAGE_TRAY_RETRACTED:  return "\u5DF2\u56DE\u6536";
+    case APP_CH32_STAGE_DOOR_CLOSING:    return "\u5173\u95E8\u4E2D";
+    case APP_CH32_STAGE_SAFE_LOCKED:     return "\u5DF2\u9501\u6B62";
+    case APP_CH32_STAGE_COMPLETE:        return "\u5DF2\u5B8C\u6210";
+    case APP_CH32_STAGE_FAULT:           return "\u6545\u969C";
+    case APP_CH32_STAGE_IDLE:            return "\u5F85\u673A";
+    case APP_CH32_STAGE_READY:           return "\u542F\u52A8";
+    case APP_CH32_STAGE_UNKNOWN:
+    default:                             return "\u542F\u52A8";
+    }
+}
+
+static void app_ctrl_format_ai_vision(char *buf, size_t buf_len)
+{
+    app_drone_ai_stats_t ai = {0};
+    app_drone_ai_get_stats(&ai);
+    const unsigned total = app_ctrl_ai_confirm_total(&ai);
+    const unsigned hits = app_ctrl_ai_hit_count(&ai);
+
+    if (ai.confirmed)
+    {
+        strlcpy(buf, UI_TEXT_DRONE_OK, buf_len);
+    }
+    else if (ai.inferred == 0U)
+    {
+        strlcpy(buf, UI_TEXT_WAIT_FRAME, buf_len);
+    }
+    else
+    {
+        snprintf(buf,
+            buf_len,
+            "\u63A8\u7406%lu \u547D\u4E2D%u/%u",
+            (unsigned long)ai.inferred,
+            hits,
+            total);
+    }
+}
+
+static void app_ctrl_format_ai_detail(char *buf, size_t buf_len)
+{
+    app_drone_ai_stats_t ai = {0};
+    app_drone_ai_get_stats(&ai);
+    const unsigned total = app_ctrl_ai_confirm_total(&ai);
+    const unsigned hits = app_ctrl_ai_hit_count(&ai);
+
+    if (ai.confirmed)
+    {
+        strlcpy(buf,
+            UI_TEXT_DRONE_OK ": \u51C6\u5907\u8BC6\u522B\u6807\u7B7E",
+            buf_len);
+    }
+    else if (ai.inferred == 0U)
+    {
+        strlcpy(buf,
+            UI_TEXT_IDENT_DRONE ": " UI_TEXT_WAIT_FRAME,
+            buf_len);
+    }
+    else
+    {
+        snprintf(buf,
+            buf_len,
+            UI_TEXT_IDENT_DRONE ": \u63A8\u7406%lu\u5E27 \u547D\u4E2D%u/%u",
+            (unsigned long)ai.inferred,
+            hits,
+            total);
+    }
+}
+
+static void app_ctrl_format_tag_vision(const app_ctrl_cycle_t *cycle,
     char *buf,
     size_t buf_len)
 {
     const app_dock_judge_result_t *dock = &cycle->dock;
-    const app_ctrl_runtime_view_t *runtime = &cycle->runtime;
     if (!dock->vision_valid)
     {
-        if (dock->state == APP_DOCK_STATE_SEARCHING)
-        {
-            strlcpy(buf, "dock dbg: wait valid tag", buf_len);
-            return;
-        }
-
-        snprintf(buf,
-            buf_len,
-            "dock dbg: hold:%u lost:%u dx:%ld dy:%ld z:%ldmm e:%.1f stage:%s",
-            (unsigned)dock->invalid_hold_count,
-            (unsigned)dock->lost_count,
-            (long)dock->dx,
-            (long)dock->dy,
-            (long)dock->est_distance_mm,
-            (double)dock->filtered_edge_px,
-            app_ch32_link_proto_stage_name(runtime->proto_stage));
-        return;
-    }
-
-    snprintf(buf,
-        buf_len,
-        "dock dbg: id:%u c:%ld,%ld b:%ldx%ld dx:%ld dy:%ld z:%ldmm e:%.1f ang:%d st:%u score:%u wt:%s%ldg",
-        (unsigned)dock->tag_id,
-        (long)dock->filtered_center_x,
-        (long)dock->filtered_center_y,
-        (long)dock->bbox_w,
-        (long)dock->bbox_h,
-        (long)dock->dx,
-        (long)dock->dy,
-        (long)dock->est_distance_mm,
-        (double)dock->filtered_edge_px,
-        (int)dock->angle_deg,
-        (unsigned)dock->stable_count,
-        (unsigned)dock->hover_score,
-        runtime->has_weight ? "" : "-",
-        runtime->has_weight ? (long)runtime->weight_g : 0L);
-}
-
-// 根据第一个未满足的对接条件生成操作提示。
-static void app_ctrl_compose_guidance(const app_dock_judge_result_t *dock,
-    char *buf,
-    size_t buf_len)
-{
-    if (!dock->vision_valid)
-    {
-        strlcpy(buf, "dock: searching target", buf_len);
+        strlcpy(buf, UI_TEXT_SEARCH_TAG, buf_len);
     }
     else if (!dock->target_id_ok)
     {
-        strlcpy(buf, "dock: wrong tag id", buf_len);
+        snprintf(buf, buf_len, "Tag%u ID\u9519", (unsigned)dock->tag_id);
     }
-    else if (!dock->centered_ok)
+    else if (dock->state == APP_DOCK_STATE_READY_TO_DOCK)
     {
-        strlcpy(buf, "dock: align target center", buf_len);
+        snprintf(buf, buf_len, "Tag%u \u5DF2\u901A\u8FC7", (unsigned)dock->tag_id);
     }
-    else if (!dock->near_ok)
+    else if (!dock->centered_ok || !dock->near_ok)
     {
-        strlcpy(buf, "dock: move target closer", buf_len);
+        snprintf(buf, buf_len, "Tag%u \u5BF9\u51C6\u4E2D", (unsigned)dock->tag_id);
     }
     else if (!dock->stable_ok)
     {
-        strlcpy(buf, "dock: hold hover stable", buf_len);
+        snprintf(buf, buf_len, "\u7A33\u5B9A\u5E27%u", (unsigned)dock->stable_count);
+    }
+    else
+    {
+        snprintf(buf, buf_len, "Tag%u \u53EF\u63A5\u9A73", (unsigned)dock->tag_id);
+    }
+}
+
+static void app_ctrl_format_tag_detail(const app_ctrl_cycle_t *cycle,
+    char *buf,
+    size_t buf_len)
+{
+    const app_dock_judge_result_t *dock = &cycle->dock;
+    const uint16_t target_id = cycle->task.target_id;
+    const int32_t distance_cm = app_ctrl_distance_cm(dock);
+
+    if (!dock->vision_valid)
+    {
+        snprintf(buf,
+            buf_len,
+            UI_TEXT_IDENT_TAG ": \u641C\u7D22\u76EE\u6807Tag%u",
+            (unsigned)target_id);
+    }
+    else if (!dock->target_id_ok)
+    {
+        snprintf(buf,
+            buf_len,
+            UI_TEXT_IDENT_TAG ": \u770B\u5230Tag%u \u7B49\u5F85Tag%u",
+            (unsigned)dock->tag_id,
+            (unsigned)target_id);
+    }
+    else if (!dock->centered_ok)
+    {
+        snprintf(buf,
+            buf_len,
+            UI_TEXT_ALIGN_TAG ": Tag%u \u504F\u79FB%+ld,%+ld",
+            (unsigned)dock->tag_id,
+            (long)dock->dx,
+            (long)dock->dy);
+    }
+    else if (!dock->near_ok)
+    {
+        snprintf(buf,
+            buf_len,
+            UI_TEXT_ALIGN_TAG ": Tag%u \u9760\u8FD1\u4E2D \u504F\u79FB%+ld,%+ld",
+            (unsigned)dock->tag_id,
+            (long)dock->dx,
+            (long)dock->dy);
+    }
+    else if (!dock->stable_ok)
+    {
+        snprintf(buf,
+            buf_len,
+            UI_TEXT_STABLE_TAG ": Tag%u \u7A33\u5B9A\u5E27%u",
+            (unsigned)dock->tag_id,
+            (unsigned)dock->stable_count);
     }
     else if (!dock->distance_ok)
     {
-        if (dock->est_distance_mm <= 0)
+        if (distance_cm > 0)
         {
-            strlcpy(buf, "dock: wait valid distance", buf_len);
+            snprintf(buf,
+                buf_len,
+                "\u8DDD\u79BB\u6821\u9A8C: Tag%u %ldcm",
+                (unsigned)dock->tag_id,
+                (long)distance_cm);
         }
         else
         {
             strlcpy(buf,
-                dock->est_distance_mm < 260 ?
-                    "dock: target too near" :
-                    "dock: target too far",
+                "\u8DDD\u79BB\u6821\u9A8C: \u7B49\u5F85\u6709\u6548\u8DDD\u79BB",
                 buf_len);
         }
     }
     else
     {
-        app_dock_judge_format_status(dock, buf, buf_len);
+        snprintf(buf,
+            buf_len,
+            UI_TEXT_TAG_PASSED ": Tag%u \u53EF\u63A5\u9A73",
+            (unsigned)dock->tag_id);
     }
 }
 
-// 根据高层任务状态生成基础状态文案。
+static void app_ctrl_format_stage_detail(const app_ctrl_cycle_t *cycle,
+    char *buf,
+    size_t buf_len)
+{
+    const char *stage = app_ctrl_proto_stage_action_text(cycle->runtime.proto_stage);
+    if (cycle->runtime.has_weight)
+    {
+        snprintf(buf,
+            buf_len,
+            "\u63A5\u9A73\u6267\u884C: %s \u91CD\u91CF%ldg",
+            stage,
+            (long)cycle->runtime.weight_g);
+    }
+    else
+    {
+        snprintf(buf, buf_len, "\u63A5\u9A73\u6267\u884C: %s", stage);
+    }
+}
+
+static void app_ctrl_compose_detail(const app_ctrl_cycle_t *cycle,
+    char *buf,
+    size_t buf_len)
+{
+    const app_task_snapshot_t *task = &cycle->task;
+    if (cycle->runtime.weather_blocked)
+    {
+        strlcpy(buf, UI_TEXT_WEATHER ": \u6682\u505C\u63A5\u9A73", buf_len);
+    }
+    else if (!task->active &&
+        (task->state == APP_TASK_STATE_IDLE || task->state == APP_TASK_STATE_CONFIGURED))
+    {
+        snprintf(buf,
+            buf_len,
+            UI_TEXT_WAIT_DRONE ": \u76EE\u6807Tag%u",
+            (unsigned)task->target_id);
+    }
+    else if (task->state == APP_TASK_STATE_WAIT_APPROACH && !cycle->apriltag_enabled)
+    {
+        app_ctrl_format_ai_detail(buf, buf_len);
+    }
+    else if (task->state == APP_TASK_STATE_WAIT_APPROACH)
+    {
+        app_ctrl_format_tag_detail(cycle, buf, buf_len);
+    }
+    else if (task->state == APP_TASK_STATE_AUTH_PASSED ||
+        task->state == APP_TASK_STATE_DOCKING ||
+        cycle->runtime.dock_busy)
+    {
+        app_ctrl_format_stage_detail(cycle, buf, buf_len);
+    }
+    else if (task->state == APP_TASK_STATE_COMPLETED)
+    {
+        strlcpy(buf, UI_TEXT_DOCK_DONE ": \u5B89\u5168\u5F52\u4F4D", buf_len);
+    }
+    else if (task->state == APP_TASK_STATE_FAULT)
+    {
+        snprintf(buf,
+            buf_len,
+            UI_TEXT_FAULT ": %s",
+            task->note[0] != '\0' ? task->note : "CH32");
+    }
+    else if (task->state == APP_TASK_STATE_CANCELLED)
+    {
+        strlcpy(buf, UI_TEXT_STOPPED, buf_len);
+    }
+    else
+    {
+        strlcpy(buf, UI_TEXT_SYSTEM_READY, buf_len);
+    }
+}
+
 static void app_ctrl_compose_task_status(const app_ctrl_cycle_t *cycle,
     char *buf,
     size_t buf_len)
@@ -124,62 +352,72 @@ static void app_ctrl_compose_task_status(const app_ctrl_cycle_t *cycle,
     const app_task_snapshot_t *task = &cycle->task;
     switch (task->state) {
     case APP_TASK_STATE_CONFIGURED:
-        snprintf(buf,
-            buf_len,
-            cycle->runtime.ch32_ready ?
-                "task: target=%u / remote ready" :
-                "task: target=%u / wait CH32",
-            (unsigned)task->target_id);
+        strlcpy(buf,
+            cycle->runtime.ch32_ready ? UI_TEXT_WAIT_DRONE : UI_TEXT_WAIT_CH32,
+            buf_len);
         break;
 
-    case APP_TASK_STATE_WAIT_APPROACH: {
-        char guide[72] = {0};
-        if (cycle->apriltag_enabled)
-        {
-            app_ctrl_compose_guidance(&cycle->dock, guide, sizeof(guide));
-        }
-        else
-        {
-            app_drone_ai_format_status(guide, sizeof(guide));
-        }
-        snprintf(buf, buf_len, "task: wait id=%u / %s",
-            (unsigned)task->target_id,
-            guide);
+    case APP_TASK_STATE_WAIT_APPROACH:
+        strlcpy(buf,
+            cycle->apriltag_enabled ? UI_TEXT_IDENT_TAG : UI_TEXT_IDENT_DRONE,
+            buf_len);
         break;
-    }
 
     case APP_TASK_STATE_AUTH_PASSED:
-        snprintf(buf,
-            buf_len,
-            "task: auth passed / matched id=%u",
-            (unsigned)(task->matched_tag_id != 0U ?
-                task->matched_tag_id :
-                task->target_id));
+        strlcpy(buf, UI_TEXT_READY_DOCK, buf_len);
         break;
 
     case APP_TASK_STATE_DOCKING:
-        strlcpy(buf, "task: docking in progress", buf_len);
+        strlcpy(buf,
+            app_ctrl_proto_stage_action_text(cycle->runtime.proto_stage),
+            buf_len);
         break;
 
     case APP_TASK_STATE_COMPLETED:
-        snprintf(buf, buf_len, "task: completed / target=%u",
-            (unsigned)task->target_id);
+        strlcpy(buf, UI_TEXT_DOCK_DONE, buf_len);
         break;
 
     case APP_TASK_STATE_FAULT:
-        snprintf(buf, buf_len, "task: fault / %s",
-            task->note[0] != '\0' ? task->note : "check CH32");
+        strlcpy(buf, UI_TEXT_FAULT, buf_len);
         break;
 
     case APP_TASK_STATE_CANCELLED:
-        snprintf(buf, buf_len, "task: cancelled / target=%u",
-            (unsigned)task->target_id);
+        strlcpy(buf, UI_TEXT_STOPPED, buf_len);
         break;
 
     case APP_TASK_STATE_IDLE:
     default:
-        strlcpy(buf, "task: idle", buf_len);
+        strlcpy(buf, UI_TEXT_SYSTEM_READY, buf_len);
         break;
+    }
+}
+
+static void app_ctrl_compose_vision_status(const app_ctrl_cycle_t *cycle,
+    char *buf,
+    size_t buf_len)
+{
+    const app_task_snapshot_t *task = &cycle->task;
+    if (task->state == APP_TASK_STATE_WAIT_APPROACH && !cycle->apriltag_enabled)
+    {
+        app_ctrl_format_ai_vision(buf, buf_len);
+    }
+    else if (task->state == APP_TASK_STATE_WAIT_APPROACH)
+    {
+        app_ctrl_format_tag_vision(cycle, buf, buf_len);
+    }
+    else if (task->state == APP_TASK_STATE_AUTH_PASSED ||
+        task->state == APP_TASK_STATE_DOCKING ||
+        task->state == APP_TASK_STATE_COMPLETED)
+    {
+        strlcpy(buf, UI_TEXT_VISION_OK, buf_len);
+    }
+    else if (task->state == APP_TASK_STATE_FAULT)
+    {
+        strlcpy(buf, UI_TEXT_FAULT, buf_len);
+    }
+    else
+    {
+        strlcpy(buf, UI_TEXT_WAIT, buf_len);
     }
 }
 
@@ -189,8 +427,6 @@ static void app_ctrl_flow_set_detail(app_ui_flow_snapshot_t *flow,
 {
     strlcpy(flow->step_detail[step], text, sizeof(flow->step_detail[0]));
 }
-
-/* ---------- 四阶段流程条 ---------- */
 
 static void app_ctrl_flow_complete(app_ui_flow_snapshot_t *flow,
     app_ui_flow_step_t step,
@@ -207,7 +443,10 @@ static void app_ctrl_flow_activate(app_ui_flow_snapshot_t *flow,
 {
     flow->active_step = step;
     flow->step_state[step] = APP_UI_FLOW_STATE_ACTIVE;
-    strlcpy(flow->headline, headline, sizeof(flow->headline));
+    snprintf(flow->headline,
+        sizeof(flow->headline),
+        "\u5F53\u524D\uFF1A%s",
+        headline);
     app_ctrl_flow_set_detail(flow, step, detail);
 }
 
@@ -231,7 +470,6 @@ static void app_ctrl_flow_init(app_ui_flow_snapshot_t *flow)
         UI_TEXT_NOT_DONE,
     };
 
-    // 每次从默认状态重新生成流程条。
     memset(flow, 0, sizeof(*flow));
     flow->active_step = APP_UI_FLOW_STEP_DRONE;
     strlcpy(flow->headline, UI_TEXT_WAIT_CLOUD, sizeof(flow->headline));
@@ -242,33 +480,9 @@ static void app_ctrl_flow_init(app_ui_flow_snapshot_t *flow)
     }
 }
 
-// 将 CH32 机械阶段转换为流程条使用的短文案。
-static const char *app_ctrl_proto_stage_action_text(app_ch32_proto_stage_t stage)
-{
-    switch (stage) {
-    case APP_CH32_STAGE_DOOR_OPENING:    return "\u5F00";
-    case APP_CH32_STAGE_DOOR_OPENED:     return "\u5DF2\u5F00";
-    case APP_CH32_STAGE_TRAY_EXTENDING:  return UI_TEXT_DOCK;
-    case APP_CH32_STAGE_TRAY_EXTENDED:   return UI_TEXT_DOCK;
-    case APP_CH32_STAGE_WAITING_CARGO:   return UI_TEXT_PICKUP;
-    case APP_CH32_STAGE_CARGO_DETECTED:  return UI_TEXT_PICKUP "OK";
-    case APP_CH32_STAGE_TRAY_RETRACTING: return UI_TEXT_DOCK;
-    case APP_CH32_STAGE_TRAY_RETRACTED:  return UI_TEXT_DOCK "OK";
-    case APP_CH32_STAGE_DOOR_CLOSING:    return "\u95ED";
-    case APP_CH32_STAGE_SAFE_LOCKED:     return UI_TEXT_DONE;
-    case APP_CH32_STAGE_COMPLETE:        return UI_TEXT_DOCK_DONE;
-    case APP_CH32_STAGE_FAULT:           return UI_TEXT_DOCK_ERROR;
-    case APP_CH32_STAGE_READY:           return "READY";
-    case APP_CH32_STAGE_IDLE:            return UI_TEXT_WAIT_DOCK;
-    case APP_CH32_STAGE_UNKNOWN:
-    default:                             return UI_TEXT_DOCK_WAIT;
-    }
-}
-
 static void app_ctrl_fill_tag_flow(const app_ctrl_cycle_t *cycle,
     app_ui_flow_snapshot_t *flow)
 {
-    // 进入标签阶段说明无人机 AI 已确认。
     app_ctrl_flow_complete(flow, APP_UI_FLOW_STEP_DRONE, "AI OK");
 
     const app_dock_judge_result_t *dock = &cycle->dock;
@@ -276,25 +490,50 @@ static void app_ctrl_fill_tag_flow(const app_ctrl_cycle_t *cycle,
     {
         app_ctrl_flow_activate(flow,
             APP_UI_FLOW_STEP_TAG,
-            UI_TEXT_WAIT_TAG,
-            UI_TEXT_WAIT_TAG);
+            UI_TEXT_SEARCH_TAG,
+            UI_TEXT_WAIT);
+        return;
+    }
+    if (!dock->target_id_ok)
+    {
+        app_ctrl_flow_activate(flow,
+            APP_UI_FLOW_STEP_TAG,
+            UI_TEXT_IDENT_TAG,
+            "ID\u9519");
+        return;
+    }
+    if (!dock->centered_ok || !dock->near_ok)
+    {
+        app_ctrl_flow_activate(flow,
+            APP_UI_FLOW_STEP_TAG,
+            UI_TEXT_ALIGN_TAG,
+            "\u5BF9\u51C6\u4E2D");
+        return;
+    }
+    if (!dock->stable_ok)
+    {
+        app_ctrl_flow_activate(flow,
+            APP_UI_FLOW_STEP_TAG,
+            UI_TEXT_STABLE_TAG,
+            "\u7A33\u5B9A\u4E2D");
+        return;
+    }
+    if (dock->state == APP_DOCK_STATE_READY_TO_DOCK)
+    {
+        app_ctrl_flow_complete(flow, APP_UI_FLOW_STEP_TAG, "Tag OK");
+        flow->active_step = APP_UI_FLOW_STEP_TAG;
+        snprintf(flow->headline,
+            sizeof(flow->headline),
+            "\u5F53\u524D\uFF1A%s",
+            UI_TEXT_TAG_PASSED);
         return;
     }
 
-    const int32_t distance_cm =
-        dock->est_distance_mm > 0 ? (dock->est_distance_mm + 5) / 10 : -1;
     char tag_status[32] = {0};
-    if (distance_cm > 0)
-    {
-        snprintf(tag_status, sizeof(tag_status), "Tag %ldcm", (long)distance_cm);
-    }
-    else
-    {
-        snprintf(tag_status, sizeof(tag_status), "Tag %u", (unsigned)dock->tag_id);
-    }
+    snprintf(tag_status, sizeof(tag_status), "Tag%u", (unsigned)dock->tag_id);
     app_ctrl_flow_activate(flow,
         APP_UI_FLOW_STEP_TAG,
-        distance_cm > 0 ? tag_status : UI_TEXT_WAIT_TAG,
+        UI_TEXT_IDENT_TAG,
         tag_status);
 }
 
@@ -312,9 +551,13 @@ static void app_ctrl_fill_flow_snapshot(const app_ctrl_cycle_t *cycle,
     if (task->state == APP_TASK_STATE_IDLE ||
         task->state == APP_TASK_STATE_CONFIGURED)
     {
+        snprintf(flow->headline,
+            sizeof(flow->headline),
+            "\u5F53\u524D\uFF1A%s",
+            UI_TEXT_WAIT_DRONE);
         snprintf(flow->step_detail[APP_UI_FLOW_STEP_DRONE],
             sizeof(flow->step_detail[0]),
-            "Tag %u",
+            "\u76EE\u6807%u",
             (unsigned)task->target_id);
         return;
     }
@@ -328,7 +571,6 @@ static void app_ctrl_fill_flow_snapshot(const app_ctrl_cycle_t *cycle,
         return;
     }
 
-    // 故障优先显示，避免被普通机械阶段覆盖。
     if (task->state == APP_TASK_STATE_FAULT ||
         runtime->proto_error != APP_CH32_ERR_NONE)
     {
@@ -352,15 +594,15 @@ static void app_ctrl_fill_flow_snapshot(const app_ctrl_cycle_t *cycle,
         return;
     }
 
-    // 鉴权通过后立即显示执行阶段，不等待首个 CH32 busy 状态。
     if (runtime->dock_busy ||
         task->state == APP_TASK_STATE_DOCKING ||
         task->state == APP_TASK_STATE_AUTH_PASSED)
     {
         const char *action = app_ctrl_proto_stage_action_text(runtime->proto_stage);
+        const char *short_action = app_ctrl_proto_stage_short_text(runtime->proto_stage);
         app_ctrl_flow_complete(flow, APP_UI_FLOW_STEP_DRONE, "AI OK");
         app_ctrl_flow_complete(flow, APP_UI_FLOW_STEP_TAG, "Tag OK");
-        app_ctrl_flow_activate(flow, APP_UI_FLOW_STEP_EXEC, action, action);
+        app_ctrl_flow_activate(flow, APP_UI_FLOW_STEP_EXEC, action, short_action);
         return;
     }
 
@@ -376,17 +618,16 @@ static void app_ctrl_fill_flow_snapshot(const app_ctrl_cycle_t *cycle,
 
     app_drone_ai_stats_t ai = {0};
     app_drone_ai_get_stats(&ai);
-    const unsigned confirm_hits =
-        (unsigned)(ai.confirm_hits != 0U ? ai.confirm_hits : 1U);
+    const unsigned confirm_hits = app_ctrl_ai_confirm_total(&ai);
     char ai_status[32] = {0};
     snprintf(ai_status,
         sizeof(ai_status),
-        "AI %u/%u",
-        (unsigned)ai.hit_count,
+        "\u547D\u4E2D%u/%u",
+        app_ctrl_ai_hit_count(&ai),
         confirm_hits);
     app_ctrl_flow_activate(flow,
         APP_UI_FLOW_STEP_DRONE,
-        ai_status,
+        UI_TEXT_IDENT_DRONE,
         ai_status);
 }
 
@@ -405,31 +646,22 @@ void app_ctrl_ui_publish(const app_ctrl_cycle_t *cycle)
 
     char status[128] = {0};
     char detail[224] = {0};
-    char task_brief[96] = {0};
-    app_task_format_brief(&cycle->task, task_brief, sizeof(task_brief));
+    char vision_status[96] = {0};
     app_ctrl_compose_task_status(cycle, status, sizeof(status));
+    app_ctrl_compose_vision_status(cycle, vision_status, sizeof(vision_status));
     app_ctrl_compose_detail(cycle, detail, sizeof(detail));
 
-    if (cycle->task.active &&
-        cycle->task.state == APP_TASK_STATE_WAIT_APPROACH &&
-        !cycle->apriltag_enabled)
-    {
-        char ai_status[64] = {0};
-        app_drone_ai_format_status(ai_status, sizeof(ai_status));
-        snprintf(detail, sizeof(detail), "dock dbg: apriltag gated / %s", ai_status);
-    }
-    // 文案优先级：任务状态 < 机械状态 < 错误/冷却 < 临时提示。
     if (runtime->dock_busy)
     {
         strlcpy(status,
-            app_ctrl_proto_stage_status_text(runtime->proto_stage),
+            app_ctrl_proto_stage_action_text(runtime->proto_stage),
             sizeof(status));
     }
     if (runtime->proto_error != APP_CH32_ERR_NONE && !runtime->dock_busy)
     {
         snprintf(status,
             sizeof(status),
-            "dock: CH32 err %s",
+            UI_TEXT_STAGE_FAULT " %s",
             app_ch32_link_proto_error_name(runtime->proto_error));
     }
     if (runtime->retrigger_blocked &&
@@ -437,18 +669,32 @@ void app_ctrl_ui_publish(const app_ctrl_cycle_t *cycle)
         runtime->proto_error == APP_CH32_ERR_NONE &&
         runtime->notice[0] == '\0')
     {
-        strlcpy(status, "dock: cooldown / wait next approach", sizeof(status));
+        strlcpy(status, UI_TEXT_DOCK_WAIT, sizeof(status));
     }
-    if (runtime->notice_active && runtime->notice[0] != '\0')
+    if (runtime->notice_active && runtime->notice[0] != '\0' && !runtime->dock_busy)
     {
-        strlcpy(status, runtime->notice, sizeof(status));
+        if (strstr(runtime->notice, "weather") != NULL)
+        {
+            strlcpy(status, UI_TEXT_WEATHER, sizeof(status));
+        }
+        else if (strstr(runtime->notice, "auth passed") != NULL)
+        {
+            strlcpy(status, UI_TEXT_READY_DOCK, sizeof(status));
+        }
+        else if (strstr(runtime->notice, "accepted start dock") != NULL)
+        {
+            strlcpy(status, UI_TEXT_DOCK_START, sizeof(status));
+        }
+        else
+        {
+            strlcpy(status, runtime->notice, sizeof(status));
+        }
     }
 
-    // 一次提交所有内容，减少重复获取 LVGL 锁。
     app_ui_flow_snapshot_t flow = {0};
     app_ctrl_fill_flow_snapshot(cycle, &flow);
     app_ui_update_control_state(status,
-        task_brief,
+        vision_status,
         detail,
         &cycle->vision,
         &cycle->dock,
