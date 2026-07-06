@@ -195,22 +195,26 @@ static esp_err_t app_cloud_apply_weather_docking_policy(bool simulated)
     esp_err_t ret = ESP_OK;
     app_task_snapshot_t snap = {0};
     const bool active_task = app_task_peek_snapshot(&snap) && app_cloud_snapshot_is_active_task(&snap);
-    if (active_task)
+    const bool safety_task = active_task && strcmp(snap.source, "safety") == 0;
+    bool task_policy_applied = false;
+    if (active_task && !safety_task)
     {
         if (s_cloud.weather_mode == APP_CLOUD_WEATHER_MODE_EMERGENCY)
         {
-            app_task_mark_fault("恶劣天气，已终止接驳保护");
+            task_policy_applied =
+                app_task_mark_fault_if_current(&snap, "恶劣天气，已终止接驳保护");
         }
         else
         {
-            app_task_cancel("blocked by simulated severe weather");
+            task_policy_applied =
+                app_task_cancel_if_current(&snap, "blocked by simulated severe weather");
         }
     }
     if (s_cloud.weather_mode == APP_CLOUD_WEATHER_MODE_EMERGENCY)
     {
         ret = app_cloud_send_weather_protection();
     }
-    else if (active_task && app_ch32_link_is_ready())
+    else if (task_policy_applied && app_ch32_link_is_ready())
     {
         ret = app_ch32_link_send_proto_cmd_and_wait_ack(APP_CH32_PROTO_CMD_ABORT, APP_CLOUD_ABORT_WAIT_MS);
         if (ret != ESP_OK)

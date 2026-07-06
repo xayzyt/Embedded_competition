@@ -994,6 +994,7 @@ void app_drone_ai_get_stats(app_drone_ai_stats_t *out)
     out->submitted = s_submit_seq;
     out->inferred = s_infer_count;
     out->dropped = s_drop_count;
+    out->last_drone_seen_ms = s_last_drone_seen_ms;
     out->hit_count = s_hit_count;
     out->confirm_hits = DRONE_AI_CONFIRM_HITS;
     out->confirmed = s_confirmed;

@@ -58,7 +58,6 @@ static void app_show_camera_failure(void)
 // 暂停预览并返回主屏；相机资源保留供下一次任务复用。
 static bool app_leave_camera_preview(void)
 {
-    app_camera_pause();
     app_ui_hide_task_intro();
     app_ui_set_preview_hud_visible(false);
     app_ui_safety_takeover_set_visible(false);
@@ -67,6 +66,7 @@ static bool app_leave_camera_preview(void)
         ESP_LOGW(TAG, "show main screen failed, will retry");
         return false;
     }
+    app_camera_pause();
     s_preview_visible = false;
     return true;
 }

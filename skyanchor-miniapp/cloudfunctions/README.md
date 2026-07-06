@@ -7,4 +7,4 @@
   - 使用微信云开发数据库保存 `orders` 与 `order_events`。
   - 通过 EMQX MQTT 向 ESP32-P4 下发 `start_task` / `manual_retract` / `cancel`，并读取 retained state 更新订单状态。
 
-演示前请在微信开发者工具中右键 `cloudfunctions/skyanchorService`，选择“上传并部署：云端安装依赖”。
+演示前请在微信开发者工具中右键 `cloudfunctions/skyanchorService`，先选择“上传并部署：云端安装依赖”，再选择“上传触发器”，使送达状态与订阅通知能在小程序关闭后继续同步。

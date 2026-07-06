@@ -4,5 +4,12 @@
     "openapi": [
       "subscribeMessage.send"
     ]
-  }
+  },
+  "triggers": [
+    {
+      "name": "deliveryOrderSync",
+      "type": "timer",
+      "config": "*/30 * * * * * *"
+    }
+  ]
 }

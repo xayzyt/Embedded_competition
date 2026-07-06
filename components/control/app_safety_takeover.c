@@ -19,9 +19,9 @@ static const char *TAG = "safety_takeover";
 #define SAFETY_TASK_STACK              (5 * 1024)
 #define SAFETY_TASK_PRIO               5
 #define SAFETY_TASK_POLL_MS            200U
-#define SAFETY_REACQUIRE_GRACE_MS      2400U
 #define SAFETY_LOST_AFTER_MS           2400U
 #define SAFETY_LOST_COUNTDOWN_MS       10000U
+#define SAFETY_RETURN_ARM_MS           1000U
 #define SAFETY_DONE_HOLD_MS            1500U
 #define SAFETY_FAILED_HOLD_MS          3000U
 
@@ -42,14 +42,15 @@ typedef struct {
     bool ai_monitor_enabled;
     bool typhoon_task_running;
     uint16_t target_id;
+    uint32_t task_generation;
     app_safety_phase_t phase;
-    TickType_t monitor_start_tick;
     TickType_t countdown_deadline_tick;
     TickType_t done_tick;
     uint32_t monitor_start_ms;
     uint32_t countdown_start_ms;
     bool presence_seen;
     bool loss_countdown_consumed;
+    bool recovered_ui_synced;
     int32_t last_countdown_s;
 } app_safety_takeover_ctx_t;
 
@@ -87,7 +88,25 @@ static void app_safety_copy_ctx(app_safety_takeover_ctx_t *out)
 
 static bool app_safety_task_is_owned(const app_task_snapshot_t *snap)
 {
-    return snap != NULL && strcmp(snap->source, "safety") == 0;
+    if (snap == NULL ||
+        snap->generation == 0U ||
+        strcmp(snap->source, "safety") != 0)
+    {
+        return false;
+    }
+
+    bool owned = false;
+    taskENTER_CRITICAL(&s_safety_mux);
+    if (s_safety.active && snap->target_id == s_safety.target_id)
+    {
+        if (s_safety.task_generation == 0U && snap->active)
+        {
+            s_safety.task_generation = snap->generation;
+        }
+        owned = s_safety.task_generation == snap->generation;
+    }
+    taskEXIT_CRITICAL(&s_safety_mux);
+    return owned;
 }
 
 static bool app_safety_current_task_is_owned(bool require_active)
@@ -106,18 +125,29 @@ static uint16_t app_safety_force_idle(void)
     s_safety.active = false;
     s_safety.ai_monitor_enabled = false;
     s_safety.typhoon_task_running = false;
+    s_safety.task_generation = 0U;
     s_safety.phase = SAFETY_PHASE_IDLE;
-    s_safety.monitor_start_tick = 0;
     s_safety.countdown_deadline_tick = 0;
     s_safety.done_tick = 0;
     s_safety.monitor_start_ms = 0;
     s_safety.countdown_start_ms = 0;
     s_safety.presence_seen = false;
     s_safety.loss_countdown_consumed = false;
+    s_safety.recovered_ui_synced = false;
     s_safety.last_countdown_s = -1;
     const uint16_t target_id = s_safety.target_id;
     taskEXIT_CRITICAL(&s_safety_mux);
     return target_id;
+}
+
+static void app_safety_return_failed_to_main(void)
+{
+    app_ui_set_preview_hud_visible(false);
+    app_ui_safety_takeover_set_visible(false);
+    if (!app_ui_show_main_screen())
+    {
+        ESP_LOGW(TAG, "return to main screen failed, preview worker will retry");
+    }
 }
 
 static unsigned app_safety_ai_confirm_total(const app_drone_ai_stats_t *ai)
@@ -163,7 +193,7 @@ static void app_safety_format_ai_detail(char *buf, size_t buf_len)
     }
 }
 
-static void app_safety_set_ui(app_ui_safety_takeover_state_t state,
+static bool app_safety_set_ui(app_ui_safety_takeover_state_t state,
     int32_t countdown_s,
     uint16_t target_id)
 {
@@ -201,7 +231,7 @@ static void app_safety_set_ui(app_ui_safety_takeover_state_t state,
     case APP_UI_SAFETY_TAKEOVER_WINDOW_OPEN:
         phase_text = "接驳窗口开启";
         status_title = "接驳窗口开启";
-        status_detail = "监测无人机离场，等待天气指令";
+        status_detail = "重新识别无人机，离场后开始倒计时";
         break;
     case APP_UI_SAFETY_TAKEOVER_DRONE_LOST:
         phase_text = "离场倒计时";
@@ -245,19 +275,19 @@ static void app_safety_set_ui(app_ui_safety_takeover_state_t state,
         .status_title = status_title,
         .status_detail = status_detail,
     };
-    app_ui_safety_takeover_set_view(&view);
+    return app_ui_safety_takeover_set_view(&view);
 }
 
-static void app_safety_mark_window_open_locked(TickType_t now)
+static void app_safety_mark_window_open_locked(void)
 {
     s_safety.phase = SAFETY_PHASE_WINDOW_OPEN;
     s_safety.ai_monitor_enabled = true;
-    s_safety.monitor_start_tick = now;
     s_safety.countdown_deadline_tick = 0;
     s_safety.monitor_start_ms = app_safety_now_ms();
     s_safety.countdown_start_ms = 0;
     s_safety.presence_seen = false;
     s_safety.loss_countdown_consumed = false;
+    s_safety.recovered_ui_synced = false;
     s_safety.last_countdown_s = -1;
 }
 
@@ -269,8 +299,19 @@ static uint16_t app_safety_mark_recovered_locked(void)
     s_safety.countdown_start_ms = 0;
     s_safety.presence_seen = true;
     s_safety.loss_countdown_consumed = true;
+    s_safety.recovered_ui_synced = false;
     s_safety.last_countdown_s = -1;
     return s_safety.target_id;
+}
+
+static void app_safety_mark_recovered_ui_synced(void)
+{
+    taskENTER_CRITICAL(&s_safety_mux);
+    if (s_safety.phase == SAFETY_PHASE_RECOVERED)
+    {
+        s_safety.recovered_ui_synced = true;
+    }
+    taskEXIT_CRITICAL(&s_safety_mux);
 }
 
 static bool app_safety_stage_tray_out(const app_ch32_line_t *msg)
@@ -355,7 +396,10 @@ static void app_safety_task(void *arg)
                 s_safety.phase = SAFETY_PHASE_IDLE;
                 taskEXIT_CRITICAL(&s_safety_mux);
                 app_drone_ai_set_continuous(false);
-                app_ui_safety_takeover_set_visible(false);
+                if (ctx.phase == SAFETY_PHASE_FAILED)
+                {
+                    app_safety_return_failed_to_main();
+                }
             }
             vTaskDelay(pdMS_TO_TICKS(SAFETY_TASK_POLL_MS));
             continue;
@@ -382,6 +426,17 @@ static void app_safety_task(void *arg)
             continue;
         }
 
+        if (ctx.phase == SAFETY_PHASE_RECOVERED)
+        {
+            if (!ctx.recovered_ui_synced &&
+                app_safety_set_ui(APP_UI_SAFETY_TAKEOVER_DRONE_RECOVERED, 0, ctx.target_id))
+            {
+                app_safety_mark_recovered_ui_synced();
+            }
+            vTaskDelay(pdMS_TO_TICKS(SAFETY_TASK_POLL_MS));
+            continue;
+        }
+
         if (!ctx.ai_monitor_enabled ||
             (ctx.phase != SAFETY_PHASE_WINDOW_OPEN &&
              ctx.phase != SAFETY_PHASE_LOST_COUNTDOWN))
@@ -391,7 +446,9 @@ static void app_safety_task(void *arg)
         }
 
         const uint32_t now_ms = app_safety_now_ms();
-        const uint32_t seen_ms = app_drone_ai_last_drone_seen_ms();
+        app_drone_ai_stats_t monitor_ai = {0};
+        app_drone_ai_get_stats(&monitor_ai);
+        const uint32_t seen_ms = monitor_ai.last_drone_seen_ms;
         const bool seen_after_monitor = seen_ms != 0U &&
                                         (int32_t)(seen_ms - ctx.monitor_start_ms) >= 0;
 
@@ -403,24 +460,16 @@ static void app_safety_task(void *arg)
             ctx.presence_seen = true;
         }
 
-        bool should_start_countdown = false;
-        if (ctx.phase == SAFETY_PHASE_WINDOW_OPEN && !ctx.loss_countdown_consumed)
-        {
-            if (!ctx.presence_seen)
-            {
-                should_start_countdown =
-                    (now - ctx.monitor_start_tick) >= app_safety_ms_to_ticks(SAFETY_REACQUIRE_GRACE_MS);
-            }
-            else if (seen_after_monitor)
-            {
-                should_start_countdown = (uint32_t)(now_ms - seen_ms) >= SAFETY_LOST_AFTER_MS;
-            }
-            else
-            {
-                should_start_countdown =
-                    (now - ctx.monitor_start_tick) >= app_safety_ms_to_ticks(SAFETY_REACQUIRE_GRACE_MS);
-            }
-        }
+        const bool no_drone_after_first_inference =
+            !ctx.presence_seen && monitor_ai.inferred > 0U;
+        const bool drone_left_after_seen =
+            ctx.presence_seen &&
+            seen_after_monitor &&
+            (uint32_t)(now_ms - seen_ms) >= SAFETY_LOST_AFTER_MS;
+        const bool should_start_countdown =
+            ctx.phase == SAFETY_PHASE_WINDOW_OPEN &&
+            !ctx.loss_countdown_consumed &&
+            (no_drone_after_first_inference || drone_left_after_seen);
 
         if (should_start_countdown)
         {
@@ -430,47 +479,74 @@ static void app_safety_task(void *arg)
             s_safety.countdown_deadline_tick = deadline;
             s_safety.countdown_start_ms = now_ms;
             s_safety.loss_countdown_consumed = true;
-            s_safety.last_countdown_s = 10;
+            s_safety.last_countdown_s = -1;
             const uint16_t target_id = s_safety.target_id;
             taskEXIT_CRITICAL(&s_safety_mux);
             app_drone_ai_reset_gate();
             app_drone_ai_set_continuous(true);
-            app_safety_set_ui(APP_UI_SAFETY_TAKEOVER_DRONE_LOST, 10, target_id);
+            if (app_safety_set_ui(APP_UI_SAFETY_TAKEOVER_DRONE_LOST, 10, target_id))
+            {
+                taskENTER_CRITICAL(&s_safety_mux);
+                if (s_safety.phase == SAFETY_PHASE_LOST_COUNTDOWN)
+                {
+                    s_safety.last_countdown_s = 10;
+                }
+                taskEXIT_CRITICAL(&s_safety_mux);
+            }
             vTaskDelay(pdMS_TO_TICKS(SAFETY_TASK_POLL_MS));
             continue;
         }
 
         if (ctx.phase == SAFETY_PHASE_LOST_COUNTDOWN)
         {
-            if (app_drone_ai_is_drone_confirmed())
+            const bool return_detection_armed =
+                (uint32_t)(now_ms - ctx.countdown_start_ms) >= SAFETY_RETURN_ARM_MS;
+            const bool seen_during_countdown =
+                return_detection_armed &&
+                seen_ms != 0U &&
+                (int32_t)(seen_ms - (ctx.countdown_start_ms + SAFETY_RETURN_ARM_MS)) >= 0;
+            if (app_drone_ai_is_drone_confirmed() || seen_during_countdown)
             {
                 taskENTER_CRITICAL(&s_safety_mux);
                 const uint16_t target_id = app_safety_mark_recovered_locked();
                 taskEXIT_CRITICAL(&s_safety_mux);
                 app_drone_ai_set_continuous(false);
-                app_safety_set_ui(APP_UI_SAFETY_TAKEOVER_DRONE_RECOVERED, 0, target_id);
+                if (app_safety_set_ui(APP_UI_SAFETY_TAKEOVER_DRONE_RECOVERED, 0, target_id))
+                {
+                    app_safety_mark_recovered_ui_synced();
+                }
                 vTaskDelay(pdMS_TO_TICKS(SAFETY_TASK_POLL_MS));
                 continue;
             }
 
             int32_t remain_s = app_safety_remaining_seconds(now, ctx.countdown_deadline_tick);
-            if (remain_s <= 1)
+            if (remain_s <= 2)
             {
                 taskENTER_CRITICAL(&s_safety_mux);
                 const uint16_t target_id = app_safety_mark_recovered_locked();
                 taskEXIT_CRITICAL(&s_safety_mux);
                 app_drone_ai_set_continuous(false);
-                app_safety_set_ui(APP_UI_SAFETY_TAKEOVER_DRONE_RECOVERED, 0, target_id);
+                if (app_safety_set_ui(APP_UI_SAFETY_TAKEOVER_DRONE_RECOVERED, 0, target_id))
+                {
+                    app_safety_mark_recovered_ui_synced();
+                }
                 vTaskDelay(pdMS_TO_TICKS(SAFETY_TASK_POLL_MS));
                 continue;
             }
             if (remain_s != ctx.last_countdown_s)
             {
                 taskENTER_CRITICAL(&s_safety_mux);
-                s_safety.last_countdown_s = remain_s;
                 const uint16_t target_id = s_safety.target_id;
                 taskEXIT_CRITICAL(&s_safety_mux);
-                app_safety_set_ui(APP_UI_SAFETY_TAKEOVER_DRONE_LOST, remain_s, target_id);
+                if (app_safety_set_ui(APP_UI_SAFETY_TAKEOVER_DRONE_LOST, remain_s, target_id))
+                {
+                    taskENTER_CRITICAL(&s_safety_mux);
+                    if (s_safety.phase == SAFETY_PHASE_LOST_COUNTDOWN)
+                    {
+                        s_safety.last_countdown_s = remain_s;
+                    }
+                    taskEXIT_CRITICAL(&s_safety_mux);
+                }
             }
         }
 
@@ -563,8 +639,6 @@ static void app_safety_on_task_event(app_task_event_t event,
             s_safety.done_tick = xTaskGetTickCount();
             taskEXIT_CRITICAL(&s_safety_mux);
             app_drone_ai_set_continuous(false);
-            app_ui_safety_takeover_set_visible(true);
-            app_safety_set_ui(APP_UI_SAFETY_TAKEOVER_SAFE_DONE, 0, ctx.target_id);
         }
         else
         {
@@ -573,7 +647,10 @@ static void app_safety_on_task_event(app_task_event_t event,
             taskEXIT_CRITICAL(&s_safety_mux);
             app_drone_ai_set_continuous(false);
             app_ui_safety_takeover_set_visible(true);
-            app_safety_set_ui(APP_UI_SAFETY_TAKEOVER_DRONE_RECOVERED, 0, target_id);
+            if (app_safety_set_ui(APP_UI_SAFETY_TAKEOVER_DRONE_RECOVERED, 0, target_id))
+            {
+                app_safety_mark_recovered_ui_synced();
+            }
         }
         break;
     case APP_TASK_STATE_FAULT:
@@ -632,7 +709,7 @@ esp_err_t app_safety_takeover_start(void)
         return ESP_ERR_INVALID_STATE;
     }
 
-    const uint16_t target_id = snap.target_id != 0U ? snap.target_id : 1U;
+    const uint16_t target_id = snap.target_id;
     if (!app_safety_start_task_once())
     {
         return ESP_ERR_NO_MEM;
@@ -640,18 +717,24 @@ esp_err_t app_safety_takeover_start(void)
     app_safety_register_task_callback_once();
 
     taskENTER_CRITICAL(&s_safety_mux);
+    if (s_safety.active)
+    {
+        taskEXIT_CRITICAL(&s_safety_mux);
+        return ESP_ERR_INVALID_STATE;
+    }
     s_safety.active = true;
     s_safety.ai_monitor_enabled = false;
     s_safety.typhoon_task_running = false;
     s_safety.target_id = target_id;
+    s_safety.task_generation = 0U;
     s_safety.phase = SAFETY_PHASE_STARTING;
-    s_safety.monitor_start_tick = 0;
     s_safety.countdown_deadline_tick = 0;
     s_safety.done_tick = 0;
     s_safety.monitor_start_ms = 0;
     s_safety.countdown_start_ms = 0;
     s_safety.presence_seen = false;
     s_safety.loss_countdown_consumed = false;
+    s_safety.recovered_ui_synced = false;
     s_safety.last_countdown_s = -1;
     taskEXIT_CRITICAL(&s_safety_mux);
 
@@ -663,13 +746,9 @@ esp_err_t app_safety_takeover_start(void)
     esp_err_t ret = app_task_start_with_target(target_id, "safety");
     if (ret != ESP_OK)
     {
-        taskENTER_CRITICAL(&s_safety_mux);
-        s_safety.phase = SAFETY_PHASE_FAILED;
-        s_safety.ai_monitor_enabled = false;
-        s_safety.done_tick = xTaskGetTickCount();
-        taskEXIT_CRITICAL(&s_safety_mux);
+        (void)app_safety_force_idle();
         app_drone_ai_set_continuous(false);
-        app_safety_set_ui(APP_UI_SAFETY_TAKEOVER_FAILED, 0, target_id);
+        app_ui_safety_takeover_set_visible(false);
         return ret;
     }
     app_safety_set_ui(APP_UI_SAFETY_TAKEOVER_WAIT_DRONE, 0, target_id);
@@ -691,12 +770,18 @@ esp_err_t app_safety_takeover_trigger_typhoon(void)
         app_ui_safety_takeover_set_visible(false);
         return ESP_ERR_INVALID_STATE;
     }
-    if (ctx.typhoon_task_running)
-    {
-        return ESP_OK;
-    }
 
     taskENTER_CRITICAL(&s_safety_mux);
+    if (!s_safety.active)
+    {
+        taskEXIT_CRITICAL(&s_safety_mux);
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_safety.typhoon_task_running)
+    {
+        taskEXIT_CRITICAL(&s_safety_mux);
+        return ESP_OK;
+    }
     s_safety.phase = SAFETY_PHASE_TYPHOON;
     s_safety.ai_monitor_enabled = false;
     s_safety.countdown_deadline_tick = 0;
@@ -769,8 +854,16 @@ void app_safety_takeover_on_ch32_line(const app_ch32_line_t *msg)
     const bool require_active_owner =
         ctx.phase != SAFETY_PHASE_TYPHOON &&
         ctx.phase != SAFETY_PHASE_SAFE_DONE;
-    if (!app_safety_current_task_is_owned(require_active_owner))
+    app_task_snapshot_t owner = {0};
+    const bool have_owner = app_task_peek_snapshot(&owner) &&
+                            app_safety_task_is_owned(&owner) &&
+                            (!require_active_owner || owner.active);
+    if (!have_owner)
     {
+        if (ctx.phase == SAFETY_PHASE_STARTING && ctx.task_generation == 0U)
+        {
+            return;
+        }
         (void)app_safety_force_idle();
         app_drone_ai_set_continuous(false);
         app_ui_safety_takeover_set_visible(false);
@@ -784,11 +877,9 @@ void app_safety_takeover_on_ch32_line(const app_ch32_line_t *msg)
         s_safety.phase = SAFETY_PHASE_SAFE_DONE;
         s_safety.ai_monitor_enabled = false;
         s_safety.done_tick = xTaskGetTickCount();
-        const uint16_t target_id = s_safety.target_id;
         taskEXIT_CRITICAL(&s_safety_mux);
         app_drone_ai_set_continuous(false);
-        app_ui_safety_takeover_set_visible(true);
-        app_safety_set_ui(APP_UI_SAFETY_TAKEOVER_SAFE_DONE, 0, target_id);
+        (void)app_task_mark_completed_if_current(&owner, "safety takeover safe done");
         return;
     }
 
@@ -803,9 +894,8 @@ void app_safety_takeover_on_ch32_line(const app_ch32_line_t *msg)
         return;
     }
 
-    const TickType_t now = xTaskGetTickCount();
     taskENTER_CRITICAL(&s_safety_mux);
-    app_safety_mark_window_open_locked(now);
+    app_safety_mark_window_open_locked();
     const uint16_t target_id = s_safety.target_id;
     taskEXIT_CRITICAL(&s_safety_mux);
 
@@ -827,7 +917,18 @@ bool app_safety_takeover_preview_active(void)
 {
     bool active = false;
     taskENTER_CRITICAL(&s_safety_mux);
-    active = s_safety.active && s_safety.phase != SAFETY_PHASE_FAILED;
+    active = s_safety.active &&
+             s_safety.phase != SAFETY_PHASE_SAFE_DONE &&
+             s_safety.phase != SAFETY_PHASE_FAILED;
     taskEXIT_CRITICAL(&s_safety_mux);
     return active && app_safety_current_task_is_owned(false);
+}
+
+bool app_safety_takeover_is_active(void)
+{
+    bool active = false;
+    taskENTER_CRITICAL(&s_safety_mux);
+    active = s_safety.active;
+    taskEXIT_CRITICAL(&s_safety_mux);
+    return active;
 }

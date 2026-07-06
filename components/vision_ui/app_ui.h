@@ -140,7 +140,7 @@ typedef struct {
 typedef void (*app_ui_safety_typhoon_cb_t)(void);
 void app_ui_set_safety_typhoon_callback(app_ui_safety_typhoon_cb_t cb);
 void app_ui_safety_takeover_set_visible(bool visible);
-void app_ui_safety_takeover_set_view(const app_ui_safety_takeover_view_t *view);
+bool app_ui_safety_takeover_set_view(const app_ui_safety_takeover_view_t *view);
 void app_ui_safety_takeover_set_state(app_ui_safety_takeover_state_t state,
                                       int32_t countdown_s,
                                       uint16_t target_id);

@@ -11,7 +11,9 @@
 #include "app_audio_prompt.h"
 #include "app_cloud_cmd.h"
 #include "app_ch32_link.h"
+#include "app_ctrl_runtime.h"
 #include "app_delivery_photo.h"
+#include "app_safety_takeover.h"
 #include "mbedtls/base64.h"
 #include "app_ui.h"
 
@@ -436,7 +438,8 @@ static bool app_cloud_photo_upload_allowed(const app_delivery_photo_info_t *phot
     app_task_snapshot_t snap = {0};
     return app_task_peek_snapshot(&snap) &&
         snap.state == APP_TASK_STATE_COMPLETED &&
-        !snap.active;
+        !snap.active &&
+        strcmp(snap.source, "safety") != 0;
 }
 
 static void app_cloud_track_photo_upload_id(const app_delivery_photo_info_t *photo)
@@ -525,7 +528,11 @@ void app_cloud_publish_task_snapshot_internal(const app_task_snapshot_t *snap)
     uint32_t seq = ++s_cloud.msg_seq;
     time_t now = 0;
     time(&now);
-    int cargo_received = (snap->state == APP_TASK_STATE_COMPLETED) ? 1 : 0;
+    const bool safety_snapshot = strcmp(snap->source, "safety") == 0;
+    const char *request_id = safety_snapshot ? "" : s_cloud.current_request_id;
+    const char *order_id = safety_snapshot ? "" : s_cloud.current_order_id;
+    const char *order_name = safety_snapshot ? "" : s_cloud.current_order_name;
+    int cargo_received = (!safety_snapshot && snap->state == APP_TASK_STATE_COMPLETED) ? 1 : 0;
     int fault = (snap->state == APP_TASK_STATE_FAULT) ? 1 : 0;
     int accept_orders = (!s_cloud.weather_docking_blocked && !snap->active) ? 1 : 0;
     const char *fault_code = app_cloud_fault_code_from_snapshot(snap);
@@ -539,9 +546,9 @@ void app_cloud_publish_task_snapshot_internal(const app_task_snapshot_t *snap)
     }
     bool ok = app_cloud_json_add_number(root, "msg_id", seq) &&
         app_cloud_json_add_number(root, "ts", (double)now) &&
-        app_cloud_json_add_string(root, "request_id", s_cloud.current_request_id) &&
-        app_cloud_json_add_string(root, "order_id", s_cloud.current_order_id) &&
-        app_cloud_json_add_string(root, "order_name", s_cloud.current_order_name) &&
+        app_cloud_json_add_string(root, "request_id", request_id) &&
+        app_cloud_json_add_string(root, "order_id", order_id) &&
+        app_cloud_json_add_string(root, "order_name", order_name) &&
         app_cloud_json_add_string(root, "device", CONFIG_SKY_MQTT_DEVICE_NAME) &&
         app_cloud_json_add_string(root, "state", app_task_state_to_text(snap->state)) &&
         app_cloud_json_add_number(root, "active", snap->active ? 1U : 0U) &&
@@ -602,7 +609,9 @@ void app_cloud_on_task_event(app_task_event_t event,
     s_cloud.last_snapshot = *snap;
     s_cloud.have_last_snapshot = true;
     app_cloud_publish_task_snapshot_internal(snap);
-    if (snap->state == APP_TASK_STATE_COMPLETED && !snap->active)
+    if (snap->state == APP_TASK_STATE_COMPLETED &&
+        !snap->active &&
+        strcmp(snap->source, "safety") != 0)
     {
         app_cloud_request_photo_upload();
     }
@@ -611,6 +620,12 @@ void app_cloud_on_task_event(app_task_event_t event,
 
 static esp_err_t app_cloud_receive_set_target(uint16_t target_id)
 {
+    if (app_safety_takeover_is_active())
+    {
+        ESP_LOGW(TAG, "cloud rx: reject set_target during safety takeover");
+        app_cloud_publish_current_state();
+        return ESP_ERR_INVALID_STATE;
+    }
     return app_task_set_target_id(target_id, true);
 }
 
@@ -631,6 +646,15 @@ static esp_err_t app_cloud_receive_start_task(const app_cloud_cmd_t *cmd)
     if (cmd == NULL)
     {
         return ESP_ERR_INVALID_ARG;
+    }
+    if (app_safety_takeover_is_active())
+    {
+        ESP_LOGW(TAG,
+            "cloud rx: reject start_task during safety takeover target=%u request_id=%s",
+            (unsigned)cmd->target_id,
+            (cmd->request_id[0] != '\0') ? cmd->request_id : "-");
+        app_cloud_publish_current_state();
+        return ESP_ERR_INVALID_STATE;
     }
     if (s_cloud.weather_docking_blocked)
     {
@@ -683,6 +707,13 @@ static esp_err_t app_cloud_receive_start_task(const app_cloud_cmd_t *cmd)
 }
 static esp_err_t app_cloud_receive_cancel(void)
 {
+    if (app_safety_takeover_is_active())
+    {
+        ESP_LOGW(TAG, "cloud cancel rejected during safety takeover");
+        app_cloud_publish_current_state();
+        return ESP_ERR_INVALID_STATE;
+    }
+
     app_task_snapshot_t snap = {0};
     if (!app_task_peek_snapshot(&snap) || !snap.active)
     {
@@ -692,7 +723,14 @@ static esp_err_t app_cloud_receive_cancel(void)
     }
 
     const bool need_safe_close = snap.state == APP_TASK_STATE_DOCKING;
-    app_task_cancel("cancelled by cloud");
+    const bool cancelled = app_task_cancel_if_current(&snap, "cancelled by cloud");
+    if (!cancelled)
+    {
+        app_cloud_publish_current_state();
+        return ESP_ERR_INVALID_STATE;
+    }
+    snap.active = false;
+    snap.state = APP_TASK_STATE_CANCELLED;
     if (!need_safe_close)
     {
         return ESP_OK;
@@ -711,13 +749,20 @@ static esp_err_t app_cloud_receive_cancel(void)
     if (ret != ESP_OK)
     {
         ESP_LOGW(TAG, "ABORT for cancel failed: %s", esp_err_to_name(ret));
-        app_task_mark_fault("cancel safety command failed");
+        (void)app_task_mark_fault_if_current(&snap, "cancel safety command failed");
     }
     return ret;
 }
 
 static esp_err_t app_cloud_receive_demo_reset(void)
 {
+    if (app_safety_takeover_is_active())
+    {
+        ESP_LOGW(TAG, "cloud demo reset rejected during safety takeover");
+        app_cloud_publish_current_state();
+        return ESP_ERR_INVALID_STATE;
+    }
+
     app_task_snapshot_t snap = {0};
     if (!app_task_peek_snapshot(&snap) || !snap.active)
     {
@@ -727,7 +772,14 @@ static esp_err_t app_cloud_receive_demo_reset(void)
     }
 
     const bool need_safe_close = snap.state == APP_TASK_STATE_DOCKING;
-    app_task_cancel("demo reset requested");
+    const bool cancelled = app_task_cancel_if_current(&snap, "demo reset requested");
+    if (!cancelled)
+    {
+        app_cloud_publish_current_state();
+        return ESP_ERR_INVALID_STATE;
+    }
+    snap.active = false;
+    snap.state = APP_TASK_STATE_CANCELLED;
     if (!need_safe_close)
     {
         return ESP_OK;
@@ -746,23 +798,26 @@ static esp_err_t app_cloud_receive_demo_reset(void)
     if (ret != ESP_OK)
     {
         ESP_LOGW(TAG, "ABORT for demo reset failed: %s", esp_err_to_name(ret));
-        app_task_mark_fault("demo reset safety command failed");
+        (void)app_task_mark_fault_if_current(&snap, "demo reset safety command failed");
     }
     return ret;
 }
 
 static esp_err_t app_cloud_receive_manual_retract(void)
 {
-    // 现场称重/摆放校准用的主动回收，不属于板端故障。
+    // 未感受到重量时的兜底回收；ACK 后继续等待外门关闭终态。
+    app_task_snapshot_t snap = {0};
+    if (!app_task_peek_snapshot(&snap) ||
+        !snap.active ||
+        !app_ctrl_runtime_begin_manual_retract(&snap))
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
     esp_err_t ret = app_ch32_link_send_proto_cmd_and_wait_ack(APP_CH32_PROTO_CMD_SAFE_CLOSE,
         APP_CLOUD_MANUAL_RETRACT_WAIT_MS);
-    if (ret == ESP_OK)
+    if (ret != ESP_OK)
     {
-        app_task_snapshot_t snap = {0};
-        if (app_task_peek_snapshot(&snap) && snap.active)
-        {
-            app_task_cancel("manual retract completed");
-        }
+        app_ctrl_runtime_cancel_manual_retract(&snap);
     }
     return ret;
 }
@@ -772,6 +827,10 @@ static int app_cloud_start_task_ack_code(esp_err_t ret)
     if (ret == ESP_OK)
     {
         return 0;
+    }
+    if (ret == ESP_ERR_INVALID_STATE && app_safety_takeover_is_active())
+    {
+        return -4;
     }
     if (ret == ESP_ERR_INVALID_STATE && s_cloud.weather_docking_blocked)
     {
@@ -789,6 +848,10 @@ static const char *app_cloud_start_task_ack_msg(esp_err_t ret)
     if (ret == ESP_OK)
     {
         return "accepted";
+    }
+    if (ret == ESP_ERR_INVALID_STATE && app_safety_takeover_is_active())
+    {
+        return "device_busy";
     }
     if (ret == ESP_ERR_INVALID_STATE && s_cloud.weather_docking_blocked)
     {

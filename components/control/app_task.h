@@ -27,6 +27,7 @@ typedef struct {
     uint16_t target_id;           // 当前任务目标标签 ID。
     uint16_t matched_tag_id;      // 已认证通过的标签 ID。
     app_task_state_t state;       // 当前任务状态。
+    uint32_t generation;          // 任务生命周期代号，用于过滤过期控制结果。
     char source[20];              // 任务来源，例如 local/cloud。
     char note[64];                // 状态附加说明。
     uint32_t state_since_ms;      // 进入当前状态的时间戳。
@@ -52,6 +53,15 @@ void app_task_mark_docking_started(void);
 void app_task_mark_completed(const char *note);
 void app_task_mark_fault(const char *note);
 void app_task_cancel(const char *note);
+bool app_task_mark_auth_passed_if_current(const app_task_snapshot_t *owner,
+                                          uint16_t matched_tag_id);
+bool app_task_mark_docking_started_if_current(const app_task_snapshot_t *owner);
+bool app_task_mark_completed_if_current(const app_task_snapshot_t *owner,
+                                        const char *note);
+bool app_task_mark_fault_if_current(const app_task_snapshot_t *owner,
+                                    const char *note);
+bool app_task_cancel_if_current(const app_task_snapshot_t *owner,
+                                const char *note);
 // 读取任务快照；get 会清除 target_dirty，peek 只读不修改。
 bool app_task_get_snapshot(app_task_snapshot_t *out);
 bool app_task_peek_snapshot(app_task_snapshot_t *out);

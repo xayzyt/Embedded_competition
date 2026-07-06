@@ -8,7 +8,6 @@
 
 // 视觉检测频率高于无人机分类频率，避免两个重任务每帧同时运行。
 #define VISION_SAMPLE_INTERVAL   6
-#define DRONE_AI_SAMPLE_INTERVAL 8
 #define APRILTAG_GATE_SETTLE_FRAMES 12U
 
 // 这些计数器只由相机帧回调访问，不需要额外加锁。
@@ -70,7 +69,7 @@ app_camera_frame_route_t app_camera_route_select(void)
     {
         s_route.drone_ai_sample_skip = 0;
     }
-    else if (++s_route.drone_ai_sample_skip >= DRONE_AI_SAMPLE_INTERVAL)
+    else if (++s_route.drone_ai_sample_skip >= APP_DRONE_AI_SAMPLE_INTERVAL_FRAMES)
     {
         s_route.drone_ai_sample_skip = 0;
         route.ai_due = true;

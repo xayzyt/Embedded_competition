@@ -131,7 +131,7 @@
         disabled="{{loading || actionPending || !order.can_manual_retract}}"
         bindtap="manualRetractTray"
       >
-        回收托盘
+        兜底回收
       </button>
     </view>
   </view>

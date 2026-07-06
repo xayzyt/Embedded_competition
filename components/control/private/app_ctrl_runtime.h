@@ -53,6 +53,8 @@ esp_err_t app_ctrl_runtime_init(void);
 bool app_ctrl_runtime_is_initialized(void);
 // 接收 CH32 解析后的消息并更新内部状态。
 void app_ctrl_runtime_on_ch32_line(const app_ch32_line_t *msg);
+bool app_ctrl_runtime_begin_manual_retract(const app_task_snapshot_t *owner);
+void app_ctrl_runtime_cancel_manual_retract(const app_task_snapshot_t *owner);
 
 // 处理超时、自动接驳和任务状态变化，并生成 UI 所需状态。
 void app_ctrl_runtime_step(app_ctrl_cycle_t *cycle);

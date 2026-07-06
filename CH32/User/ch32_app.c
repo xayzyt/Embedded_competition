@@ -484,7 +484,9 @@ static uint8_t ch32_app_wait_for_cargo(uint32_t timeout_ms)
             hit_count++;
             if(hit_count >= WEIGHT_CONFIRM_COUNT)
             {
-                hit_count = WEIGHT_CONFIRM_COUNT;
+                ch32_app_publish_stage(ESP32_COMM_STAGE_CARGO_DETECTED,
+                                       ESP32_COMM_ERR_NONE);
+                return 1U;
             }
         }
         else
@@ -535,13 +537,15 @@ static uint8_t ch32_app_run_delivery_flow(void)
     if(ch32_app_extend_tray() == 0U)
         return 0U;
 
-    // 演示剧本要求托盘伸出后保持接驳窗口，不能因称重或等待超时自动回收。
-    // 后续仅由 SAFE_CLOSE（天气保护/手动安全关闭）打断等待并执行回收关门。
     wait_ret = ch32_app_wait_for_cargo(WEIGHT_WAIT_TIMEOUT_MS);
     if(wait_ret == 2U)
         return 0U;
 
-    return 0U;
+    if(ch32_app_close_to_safe_locked(1U) == 0U)
+        return 0U;
+
+    ch32_app_publish_stage(ESP32_COMM_STAGE_COMPLETE, ESP32_COMM_ERR_NONE);
+    return 1U;
 }
 
 /* ---------- 命令分发 ---------- */

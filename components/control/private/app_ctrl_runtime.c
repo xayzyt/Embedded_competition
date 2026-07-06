@@ -35,6 +35,7 @@ typedef struct {
     bool dock_busy;
     bool cargo_wait_window_seen;
     bool dock_completion_owned_by_start;
+    bool manual_retract_pending;
     bool has_weight;
     int32_t last_weight_g;
     app_ch32_proto_cmd_t last_proto_cmd;
@@ -42,6 +43,7 @@ typedef struct {
     app_ch32_proto_stage_t last_proto_stage;
     uint8_t last_proto_error;
     uint16_t applied_target_id;
+    app_task_snapshot_t manual_retract_owner;
     // 以下时间均为毫秒时间点，0 表示当前未启用。
     uint32_t last_ready_probe_ms;
     uint32_t busy_deadline_ms;
@@ -87,6 +89,23 @@ static void app_ctrl_set_notice(const char *text)
 static void app_ctrl_start_retrigger_cooldown_locked(void)
 {
     s_rt.retrigger_deadline_ms = app_ctrl_now_ms() + CTRL_RETRIGGER_COOLDOWN_MS;
+}
+
+static bool app_ctrl_task_owner_matches(const app_task_snapshot_t *a,
+    const app_task_snapshot_t *b)
+{
+    return a != NULL && b != NULL &&
+           a->generation == b->generation &&
+           a->target_id == b->target_id &&
+           strcmp(a->source, b->source) == 0;
+}
+
+static void app_ctrl_clear_manual_retract_locked(void)
+{
+    s_rt.manual_retract_pending = false;
+    s_rt.dock_completion_owned_by_start = false;
+    s_rt.last_proto_cmd = APP_CH32_PROTO_CMD_NONE;
+    memset(&s_rt.manual_retract_owner, 0, sizeof(s_rt.manual_retract_owner));
 }
 
 // 进入等待放货状态；保持 busy，但取消固定动作超时。
@@ -168,6 +187,7 @@ static void app_ctrl_apply_proto_msg_locked(const app_ch32_line_t *msg)
         s_rt.last_proto_error = msg->proto_detail;
         s_rt.dock_busy = false;
         s_rt.dock_completion_owned_by_start = false;
+        app_ctrl_clear_manual_retract_locked();
         s_rt.cargo_wait_window_seen = false;
         s_rt.busy_deadline_ms = 0;
         app_ctrl_start_retrigger_cooldown_locked();
@@ -286,6 +306,7 @@ static void app_ctrl_handle_busy_timeout(app_ctrl_cycle_t *cycle,
     taskENTER_CRITICAL(&s_ctrl_mux);
     s_rt.dock_busy = false;
     s_rt.dock_completion_owned_by_start = false;
+    app_ctrl_clear_manual_retract_locked();
     s_rt.busy_deadline_ms = 0;
     s_rt.last_proto_error = APP_CH32_ERR_TIMEOUT;
     app_ctrl_start_retrigger_cooldown_locked();
@@ -298,8 +319,10 @@ static void app_ctrl_handle_busy_timeout(app_ctrl_cycle_t *cycle,
     state->last_proto_error = APP_CH32_ERR_TIMEOUT;
     if (cycle->task.active || cycle->task.state == APP_TASK_STATE_DOCKING)
     {
-        app_task_mark_fault("CH32 timeout");
-        app_ctrl_refresh_task(cycle);
+        if (app_task_mark_fault_if_current(&cycle->task, "CH32 timeout"))
+        {
+            app_ctrl_refresh_task(cycle);
+        }
     }
 }
 
@@ -345,6 +368,15 @@ static bool app_ctrl_state_is_success_terminal(const app_ctrl_runtime_t *state)
     {
         return false;
     }
+    if (state->manual_retract_pending)
+    {
+        if (state->last_proto_stage == APP_CH32_STAGE_SAFE_LOCKED ||
+            state->last_proto_stage == APP_CH32_STAGE_COMPLETE)
+        {
+            return true;
+        }
+        return (state->last_proto_flags & APP_CH32_FLAG_LIMIT_DOOR_CLOSED) != 0U;
+    }
     if (!state->dock_completion_owned_by_start)
     {
         return false;
@@ -371,9 +403,11 @@ static void app_ctrl_mark_auth_if_ready(app_ctrl_cycle_t *cycle)
         return;
     }
 
-    app_task_mark_auth_passed(cycle->dock.tag_id);
-    app_ctrl_refresh_task(cycle);
-    app_ctrl_set_notice("auth passed / ready to dock");
+    if (app_task_mark_auth_passed_if_current(&cycle->task, cycle->dock.tag_id))
+    {
+        app_ctrl_refresh_task(cycle);
+        app_ctrl_set_notice("auth passed / ready to dock");
+    }
 }
 
 static void app_ctrl_try_auto_dock(app_ctrl_cycle_t *cycle,
@@ -397,8 +431,10 @@ static void app_ctrl_try_auto_dock(app_ctrl_cycle_t *cycle,
     if (app_cloud_is_weather_docking_blocked())
     {
         app_ctrl_set_notice("dock: blocked by weather");
-        app_task_cancel("blocked by severe weather");
-        app_ctrl_refresh_task(cycle);
+        if (app_task_cancel_if_current(&cycle->task, "blocked by severe weather"))
+        {
+            app_ctrl_refresh_task(cycle);
+        }
         *weather_blocked = true;
         return;
     }
@@ -438,8 +474,10 @@ static void app_ctrl_try_auto_dock(app_ctrl_cycle_t *cycle,
         state->last_proto_cmd = CTRL_DOCK_CMD;
         state->cargo_wait_window_seen = false;
         state->last_proto_error = APP_CH32_ERR_NONE;
-        app_task_mark_docking_started();
-        app_ctrl_refresh_task(cycle);
+        if (app_task_mark_docking_started_if_current(&cycle->task))
+        {
+            app_ctrl_refresh_task(cycle);
+        }
         return;
     }
 
@@ -457,8 +495,11 @@ static void app_ctrl_try_auto_dock(app_ctrl_cycle_t *cycle,
 
     state->last_proto_error = APP_CH32_ERR_INTERNAL;
     state->dock_completion_owned_by_start = false;
-    app_task_mark_fault(rejected ? "CH32 rejected cmd" : "CH32 ack timeout");
-    app_ctrl_refresh_task(cycle);
+    if (app_task_mark_fault_if_current(&cycle->task,
+        rejected ? "CH32 rejected cmd" : "CH32 ack timeout"))
+    {
+        app_ctrl_refresh_task(cycle);
+    }
 }
 
 static void app_ctrl_update_task_for_busy_transition(app_ctrl_cycle_t *cycle,
@@ -466,14 +507,19 @@ static void app_ctrl_update_task_for_busy_transition(app_ctrl_cycle_t *cycle,
 {
     const bool docking_task =
         cycle->task.active && cycle->task.state == APP_TASK_STATE_DOCKING;
+    const bool success_terminal = app_ctrl_state_is_success_terminal(state);
+    const bool completion_motion_done =
+        state->manual_retract_pending ? success_terminal : !state->dock_busy;
 
     if (!state->dock_busy && state->last_proto_error != APP_CH32_ERR_NONE)
     {
         if (cycle->task.active || cycle->task.state == APP_TASK_STATE_DOCKING)
         {
-            app_task_mark_fault(
-                app_ch32_link_proto_error_name(state->last_proto_error));
-            app_ctrl_refresh_task(cycle);
+            if (app_task_mark_fault_if_current(&cycle->task,
+                app_ch32_link_proto_error_name(state->last_proto_error)))
+            {
+                app_ctrl_refresh_task(cycle);
+            }
         }
         return;
     }
@@ -484,13 +530,15 @@ static void app_ctrl_update_task_for_busy_transition(app_ctrl_cycle_t *cycle,
         cycle->task.active &&
         cycle->task.state != APP_TASK_STATE_DOCKING)
     {
-        app_task_mark_docking_started();
-        app_ctrl_refresh_task(cycle);
+        if (app_task_mark_docking_started_if_current(&cycle->task))
+        {
+            app_ctrl_refresh_task(cycle);
+        }
         return;
     }
 
-    if (!state->dock_busy &&
-        app_ctrl_state_is_success_terminal(state) &&
+    if (completion_motion_done &&
+        success_terminal &&
         (cycle->prev_dock_busy || docking_task) &&
         (cycle->task.active || cycle->task.state == APP_TASK_STATE_DOCKING))
     {
@@ -502,8 +550,19 @@ static void app_ctrl_update_task_for_busy_transition(app_ctrl_cycle_t *cycle,
                 app_ch32_link_proto_stage_name(state->last_proto_stage),
                 (unsigned)state->last_proto_flags);
         }
-        app_task_mark_completed("dock cycle done");
-        app_ctrl_refresh_task(cycle);
+        const bool manual_retract = state->manual_retract_pending;
+        const app_task_snapshot_t *owner = manual_retract ?
+            &state->manual_retract_owner : &cycle->task;
+        const char *note = manual_retract ?
+            "manual retract fallback completed" : "dock cycle done";
+        if (app_task_mark_completed_if_current(owner, note))
+        {
+            app_ctrl_refresh_task(cycle);
+        }
+        if (manual_retract)
+        {
+            app_ctrl_runtime_cancel_manual_retract(owner);
+        }
     }
 }
 
@@ -552,6 +611,45 @@ bool app_ctrl_runtime_is_initialized(void)
     const bool inited = s_rt.inited;
     taskEXIT_CRITICAL(&s_ctrl_mux);
     return inited;
+}
+
+bool app_ctrl_runtime_begin_manual_retract(const app_task_snapshot_t *owner)
+{
+    if (owner == NULL || !owner->active || owner->generation == 0U)
+    {
+        return false;
+    }
+
+    taskENTER_CRITICAL(&s_ctrl_mux);
+    if (!s_rt.inited)
+    {
+        taskEXIT_CRITICAL(&s_ctrl_mux);
+        return false;
+    }
+    s_rt.manual_retract_pending = true;
+    s_rt.manual_retract_owner = *owner;
+    s_rt.dock_busy = true;
+    s_rt.cargo_wait_window_seen = false;
+    s_rt.dock_completion_owned_by_start = false;
+    s_rt.last_proto_cmd = APP_CH32_PROTO_CMD_SAFE_CLOSE;
+    s_rt.last_proto_stage = APP_CH32_STAGE_UNKNOWN;
+    s_rt.last_proto_flags = 0U;
+    s_rt.last_proto_error = APP_CH32_ERR_NONE;
+    s_rt.busy_deadline_ms = app_ctrl_now_ms() + CTRL_BUSY_TIMEOUT_MS;
+    app_ctrl_set_notice_locked("dock: manual fallback retract", CTRL_NOTICE_SHOW_MS);
+    taskEXIT_CRITICAL(&s_ctrl_mux);
+    return true;
+}
+
+void app_ctrl_runtime_cancel_manual_retract(const app_task_snapshot_t *owner)
+{
+    taskENTER_CRITICAL(&s_ctrl_mux);
+    if (s_rt.manual_retract_pending &&
+        app_ctrl_task_owner_matches(&s_rt.manual_retract_owner, owner))
+    {
+        app_ctrl_clear_manual_retract_locked();
+    }
+    taskEXIT_CRITICAL(&s_ctrl_mux);
 }
 
 // CH32 接收回调只更新状态，不执行发送命令等耗时操作。

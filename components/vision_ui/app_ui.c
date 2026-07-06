@@ -33,7 +33,7 @@ LV_IMAGE_DECLARE(logo);
 #define UI_TOP_BAR_W            (BSP_LCD_H_RES - UI_TOP_BAR_X - 18)
 #define UI_TOP_BAR_H            48
 #define UI_HUD_STATUS_W         260
-#define UI_HUD_VISION_W         190
+#define UI_HUD_VISION_W         220
 #define UI_HUD_HINT_W           190
 #define UI_FLOW_X               16
 #define UI_FLOW_Y               18
@@ -2332,7 +2332,7 @@ bool app_ui_create(void)
     {
         s_vision = lv_label_create(s_top_bar != NULL ? s_top_bar : scr);
         app_ui_style_top_label(s_vision, lv_color_hex(0x0F766E));
-        lv_obj_set_width(s_vision, UI_HUD_VISION_W);
+        lv_obj_set_size(s_vision, UI_HUD_VISION_W, 30);
         app_ui_label_set_dots(s_vision);
         lv_label_set_text(s_vision, "视觉：等待识别");
         lv_obj_set_pos(s_vision, 300, 13);
@@ -2765,7 +2765,7 @@ static void app_ui_safety_make_default_view(app_ui_safety_takeover_state_t state
     case APP_UI_SAFETY_TAKEOVER_WINDOW_OPEN:
         out->phase_text = "接驳窗口开启";
         out->status_title = "接驳窗口开启";
-        out->status_detail = "监测无人机离场，等待天气指令";
+        out->status_detail = "重新识别无人机，离场后开始倒计时";
         break;
     case APP_UI_SAFETY_TAKEOVER_DRONE_LOST:
         out->phase_text = "离场倒计时";
@@ -2968,15 +2968,15 @@ void app_ui_safety_takeover_set_visible(bool visible)
     bsp_display_unlock();
 }
 
-void app_ui_safety_takeover_set_view(const app_ui_safety_takeover_view_t *view)
+bool app_ui_safety_takeover_set_view(const app_ui_safety_takeover_view_t *view)
 {
     if (view == NULL)
     {
-        return;
+        return false;
     }
     if (!bsp_display_lock(UI_LOCK_SHORT_MS))
     {
-        return;
+        return false;
     }
     lv_obj_t *scr = app_ui_get_active_screen();
     app_ui_create_safety_takeover_unlocked(scr);
@@ -2984,6 +2984,7 @@ void app_ui_safety_takeover_set_view(const app_ui_safety_takeover_view_t *view)
     app_ui_safety_set_hidden(s_safety_layer, false);
     app_ui_move_foreground(s_safety_layer);
     bsp_display_unlock();
+    return true;
 }
 
 void app_ui_safety_takeover_set_state(app_ui_safety_takeover_state_t state,
@@ -2992,7 +2993,7 @@ void app_ui_safety_takeover_set_state(app_ui_safety_takeover_state_t state,
 {
     app_ui_safety_takeover_view_t view = {0};
     app_ui_safety_make_default_view(state, countdown_s, target_id, &view);
-    app_ui_safety_takeover_set_view(&view);
+    (void)app_ui_safety_takeover_set_view(&view);
 }
 
 void app_ui_set_status(const char *text)

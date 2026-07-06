@@ -31,6 +31,7 @@ typedef struct {
     uint16_t target_id;      // 期望匹配的 AprilTag ID。
     uint16_t matched_tag_id; // 已通过鉴权的标签 ID。
     app_task_state_t state;  // 高层任务阶段。
+    uint32_t generation;     // 每启动一单递增，避免过期 ACK/超时改写下一单。
     char source[20];         // 请求来源，例如 local/cloud。
     char note[64];           // 状态变化原因或完成说明。
     uint32_t state_since_ms; // 进入当前状态的时间。
@@ -72,9 +73,30 @@ static void app_task_copy_snapshot_locked(app_task_snapshot_t *out)
     out->target_id = s_rt.target_id;
     out->matched_tag_id = s_rt.matched_tag_id;
     out->state = s_rt.state;
+    out->generation = s_rt.generation;
     out->state_since_ms = s_rt.state_since_ms;
     strlcpy(out->source, s_rt.source, sizeof(out->source));
     strlcpy(out->note, s_rt.note, sizeof(out->note));
+}
+
+static void app_task_bump_generation_locked(void)
+{
+    s_rt.generation++;
+    if (s_rt.generation == 0U)
+    {
+        s_rt.generation = 1U;
+    }
+}
+
+static bool app_task_owner_matches_locked(const app_task_snapshot_t *owner)
+{
+    if (owner == NULL)
+    {
+        return true;
+    }
+    return s_rt.generation == owner->generation &&
+           s_rt.target_id == owner->target_id &&
+           strcmp(s_rt.source, owner->source) == 0;
 }
 // 发事件前复制快照和回调表，避免回调中再次访问任务模块造成长时间持锁。
 static void app_task_emit_event(app_task_event_t event)
@@ -225,6 +247,7 @@ esp_err_t app_task_start_with_target(uint16_t target_id, const char *source)
     s_rt.target_dirty = true;
     s_rt.active = true;
     s_rt.matched_tag_id = 0;
+    app_task_bump_generation_locked();
     strlcpy(s_rt.source, (source != NULL) ? source : "local", sizeof(s_rt.source));
     app_task_change_state_locked(APP_TASK_STATE_WAIT_APPROACH, "waiting target approach");
     taskEXIT_CRITICAL(&s_mux);
@@ -238,9 +261,16 @@ esp_err_t app_task_submit_remote_request(uint16_t target_id, const char *source)
 // AprilTag 对接判定 ready 后标记认证通过。
 void app_task_mark_auth_passed(uint16_t matched_tag_id)
 {
+    (void)app_task_mark_auth_passed_if_current(NULL, matched_tag_id);
+}
+bool app_task_mark_auth_passed_if_current(const app_task_snapshot_t *owner,
+                                          uint16_t matched_tag_id)
+{
     bool changed = false;
     taskENTER_CRITICAL(&s_mux);
-    if (s_rt.active && s_rt.state == APP_TASK_STATE_WAIT_APPROACH)
+    if (app_task_owner_matches_locked(owner) &&
+        s_rt.active &&
+        s_rt.state == APP_TASK_STATE_WAIT_APPROACH)
     {
         s_rt.matched_tag_id = matched_tag_id;
         app_task_change_state_locked(APP_TASK_STATE_AUTH_PASSED, "auth passed");
@@ -251,13 +281,19 @@ void app_task_mark_auth_passed(uint16_t matched_tag_id)
     {
         app_task_emit_event(APP_TASK_EVENT_STATE_CHANGED);
     }
+    return changed;
 }
 // CH32 接收对接命令或上报 busy 后进入 docking。
 void app_task_mark_docking_started(void)
 {
+    (void)app_task_mark_docking_started_if_current(NULL);
+}
+bool app_task_mark_docking_started_if_current(const app_task_snapshot_t *owner)
+{
     bool changed = false;
     taskENTER_CRITICAL(&s_mux);
-    if (s_rt.active &&
+    if (app_task_owner_matches_locked(owner) &&
+        s_rt.active &&
         (s_rt.state == APP_TASK_STATE_WAIT_APPROACH || s_rt.state == APP_TASK_STATE_AUTH_PASSED))
     {
         app_task_change_state_locked(APP_TASK_STATE_DOCKING, "docking in progress");
@@ -268,29 +304,64 @@ void app_task_mark_docking_started(void)
     {
         app_task_emit_event(APP_TASK_EVENT_STATE_CHANGED);
     }
+    return changed;
 }
 // 对接流程完成，任务转为非 active。
 void app_task_mark_completed(const char *note)
 {
-    taskENTER_CRITICAL(&s_mux);
-    s_rt.active = false;
-    app_task_change_state_locked(APP_TASK_STATE_COMPLETED, note != NULL ? note : "task completed");
-    taskEXIT_CRITICAL(&s_mux);
-    app_task_emit_event(APP_TASK_EVENT_STATE_CHANGED);
+    (void)app_task_mark_completed_if_current(NULL, note);
 }
-void app_task_mark_fault(const char *note)
-{
-    taskENTER_CRITICAL(&s_mux);
-    s_rt.active = false;
-    app_task_change_state_locked(APP_TASK_STATE_FAULT, note != NULL ? note : "task fault");
-    taskEXIT_CRITICAL(&s_mux);
-    app_task_emit_event(APP_TASK_EVENT_STATE_CHANGED);
-}
-void app_task_cancel(const char *note)
+bool app_task_mark_completed_if_current(const app_task_snapshot_t *owner, const char *note)
 {
     bool changed = false;
     taskENTER_CRITICAL(&s_mux);
-    if (s_rt.active)
+    if (app_task_owner_matches_locked(owner) &&
+        (owner == NULL || s_rt.active))
+    {
+        s_rt.active = false;
+        app_task_change_state_locked(APP_TASK_STATE_COMPLETED, note != NULL ? note : "task completed");
+        changed = true;
+    }
+    taskEXIT_CRITICAL(&s_mux);
+    if (changed)
+    {
+        app_task_emit_event(APP_TASK_EVENT_STATE_CHANGED);
+    }
+    return changed;
+}
+void app_task_mark_fault(const char *note)
+{
+    (void)app_task_mark_fault_if_current(NULL, note);
+}
+bool app_task_mark_fault_if_current(const app_task_snapshot_t *owner, const char *note)
+{
+    bool changed = false;
+    taskENTER_CRITICAL(&s_mux);
+    const bool terminal_owner =
+        owner != NULL && !owner->active && s_rt.state == owner->state;
+    if (app_task_owner_matches_locked(owner) &&
+        (owner == NULL || s_rt.active || terminal_owner))
+    {
+        s_rt.active = false;
+        app_task_change_state_locked(APP_TASK_STATE_FAULT, note != NULL ? note : "task fault");
+        changed = true;
+    }
+    taskEXIT_CRITICAL(&s_mux);
+    if (changed)
+    {
+        app_task_emit_event(APP_TASK_EVENT_STATE_CHANGED);
+    }
+    return changed;
+}
+void app_task_cancel(const char *note)
+{
+    (void)app_task_cancel_if_current(NULL, note);
+}
+bool app_task_cancel_if_current(const app_task_snapshot_t *owner, const char *note)
+{
+    bool changed = false;
+    taskENTER_CRITICAL(&s_mux);
+    if (app_task_owner_matches_locked(owner) && s_rt.active)
     {
         s_rt.active = false;
         s_rt.matched_tag_id = 0;
@@ -302,7 +373,9 @@ void app_task_cancel(const char *note)
     {
         app_task_emit_event(APP_TASK_EVENT_STATE_CHANGED);
     }
+    return changed;
 }
+
 // get_snapshot 同时消费 target_dirty 标记（读后清零），
 // 供控制循环调用——控制循环负责把新 target_id 同步给 dock_judge。
 bool app_task_get_snapshot(app_task_snapshot_t *out)

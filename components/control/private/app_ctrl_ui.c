@@ -114,28 +114,10 @@ static const char *app_ctrl_proto_stage_short_text(app_ch32_proto_stage_t stage)
 
 static void app_ctrl_format_ai_vision(char *buf, size_t buf_len)
 {
-    app_drone_ai_stats_t ai = {0};
-    app_drone_ai_get_stats(&ai);
-    const unsigned total = app_ctrl_ai_confirm_total(&ai);
-    const unsigned hits = app_ctrl_ai_hit_count(&ai);
-
-    if (ai.confirmed)
-    {
-        strlcpy(buf, UI_TEXT_DRONE_OK, buf_len);
-    }
-    else if (ai.inferred == 0U)
-    {
-        strlcpy(buf, UI_TEXT_WAIT_FRAME, buf_len);
-    }
-    else
-    {
-        snprintf(buf,
-            buf_len,
-            "\u63A8\u7406%lu \u547D\u4E2D%u/%u",
-            (unsigned long)ai.inferred,
-            hits,
-            total);
-    }
+    snprintf(buf,
+        buf_len,
+        "\u6BCF%u\u5E27\u63A8\u7406\u4E00\u6B21",
+        (unsigned)APP_DRONE_AI_SAMPLE_INTERVAL_FRAMES);
 }
 
 static void app_ctrl_format_ai_detail(char *buf, size_t buf_len)

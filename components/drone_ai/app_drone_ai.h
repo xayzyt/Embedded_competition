@@ -8,11 +8,13 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+#define APP_DRONE_AI_SAMPLE_INTERVAL_FRAMES 8U
 // 无人机 AI 模块吞吐和确认状态统计。
 typedef struct {
     uint32_t submitted;  // 已提交帧数。
     uint32_t inferred;   // 已完成推理帧数。
     uint32_t dropped;    // 忙碌时丢弃帧数。
+    uint32_t last_drone_seen_ms; // 最近一次稳定识别到无人机的时间。
     uint8_t hit_count;   // 当前任务累计的有效命中帧数。
     uint8_t confirm_hits; // 需要达到的确认帧数。
     bool confirmed;      // 是否已确认无人机存在。

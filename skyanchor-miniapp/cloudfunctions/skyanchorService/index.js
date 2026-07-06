@@ -14,6 +14,8 @@ const DELIVERY_PHOTO_READY_STATUSES = ['ready', 'uploaded'];
 const VALID_TARGET_IDS = new Set([0, 1]);
 const TERMINAL_ORDER_STATUSES = ['delivered', 'failed', 'cancelled'];
 const CLEARABLE_ORDER_STATUSES = ['created', 'delivered', 'failed', 'cancelled'];
+const BACKGROUND_SYNC_ORDER_STATUSES = ['pending_start', 'delivering', 'tag_matched', 'acting', 'delivered'];
+const BACKGROUND_SYNC_ORDER_LIMIT = 20;
 // 这里改成真实板子的逻辑设备名，避免继续沿用演示占位值。
 const DEFAULT_DEVICE_NAME = 'skyanchor-p4';
 const DEVICE_CANDIDATES = [DEFAULT_DEVICE_NAME];
@@ -1490,6 +1492,50 @@ async function handleGetOrder(payload) {
   };
 }
 
+async function handleScheduledOrderSync() {
+  const result = await db.collection(ORDERS_COLLECTION)
+    .where({ status: db.command.in(BACKGROUND_SYNC_ORDER_STATUSES) })
+    .limit(BACKGROUND_SYNC_ORDER_LIMIT)
+    .get();
+  const deviceStateCache = new Map();
+  let checked = 0;
+  let updated = 0;
+  let noticesSent = 0;
+
+  for (const order of (result.data || [])) {
+    if (order.status === 'delivered' &&
+        (!order.delivery_notice_enabled || order.delivery_notice_sent_at)) {
+      continue;
+    }
+
+    checked += 1;
+    try {
+      const previousStatus = order.status;
+      const previousNoticeSentAt = order.delivery_notice_sent_at;
+      const syncedOrder = await syncOrderProgress(order, deviceStateCache, {
+        skipPhotoSync: true
+      });
+      if (syncedOrder && syncedOrder.status !== previousStatus) {
+        updated += 1;
+      }
+      if (syncedOrder && !previousNoticeSentAt && syncedOrder.delivery_notice_sent_at) {
+        noticesSent += 1;
+      }
+    } catch (error) {
+      console.warn('[skyanchorService] 后台同步订单失败', {
+        order_id: order.order_id,
+        message: error && error.message
+      });
+    }
+  }
+
+  return {
+    checked,
+    updated,
+    notices_sent: noticesSent
+  };
+}
+
 async function handleSyncDeliveryPhoto(payload) {
   const orderId = ensureString(payload.order_id, 'order_id');
   const order = await getOrderById(orderId);
@@ -1730,7 +1776,7 @@ async function handleManualRetractOrder(payload) {
   }
 
   await addOrderEvent(orderId, 'manual_retract_requested', {
-    note: 'manual tray retract for weighing check',
+    note: 'manual tray retract fallback when cargo weight is not detected',
     device_name: deviceName,
     request_id: String(order.request_id || order.order_id)
   });
@@ -1884,12 +1930,16 @@ async function routeAction(action, payload) {
 }
 
 exports.main = async (event) => {
-  const action = String(event.action || '').trim();
-  const payload = clonePlainData(event.payload || {});
+  const input = event || {};
+  const timerTriggered = String(input.Type || '').trim() === 'Timer';
+  const action = String(input.action || '').trim();
+  const payload = clonePlainData(input.payload || {});
 
   try {
     await ensureCollectionsReady();
-    const data = await routeAction(action, payload);
+    const data = timerTriggered
+      ? await handleScheduledOrderSync()
+      : await routeAction(action, payload);
     return {
       ok: true,
       data

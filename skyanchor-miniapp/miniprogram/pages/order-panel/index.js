@@ -43,7 +43,7 @@ const EVENT_TYPE_LABELS = {
   created: '订单创建',
   dispatch_assigned: '分配 Tag',
   start_requested: '开始配送',
-  manual_retract_requested: '回收',
+  manual_retract_requested: '兜底回收',
   demo_reset_requested: '演示复位',
   delivery_photo_uploaded: '送达照片',
   status_changed: '状态更新',
@@ -267,7 +267,7 @@ function buildEventTitle(event) {
   }
 
   if (eventType === 'manual_retract_requested') {
-    return '播报：托盘回收中';
+    return '播报：托盘兜底回收中';
   }
 
   if (eventType === 'demo_reset_requested') {
@@ -1085,12 +1085,12 @@ Page({
       return;
     }
 
-    const ready = await this.ensureDeviceCommandReady('回收托盘');
+    const ready = await this.ensureDeviceCommandReady('兜底回收托盘');
     if (!ready) {
       return;
     }
 
-    await this.runAction(() => api.manualRetractOrder(this.data.orderId), '已请求回收');
+    await this.runAction(() => api.manualRetractOrder(this.data.orderId), '已请求兜底回收');
   },
 
   async runAction(action, toastTitle) {
