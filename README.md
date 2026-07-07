@@ -117,13 +117,14 @@ Open the `CH32/` project with MounRiver Studio, then configure the downloader, s
 
 Device names, MQTT topics, demo users, and dispatch details are documented in each subproject README.
 
-## Demo Readiness
+## What The Demo Shows
 
-Before a live demo, run one end-to-end readiness pass: network connection, MQTT connectivity, CH32 communication, visible camera preview, AprilTag target consistency with the dispatcher, and the expected voice-prompt setting for the venue.
+This repository presents a complete low-altitude logistics receiving node rather than a single-board prototype. It connects mobile ordering, dispatcher assignment, cloud-to-device messaging, on-device vision, actuator control, local UI feedback, and voice prompts into one demonstrable workflow.
 
-## Repository Notes
+## Repository Contents
 
-- `build/` and `managed_components/` are local build/dependency caches. They can stay on the development machine, but should not be committed.
-- `ai_models/` stores local model artifacts. The current drone AI flow depends on `drone_cls_p4_int8.espdl` being flashed to the model partition.
-- Virtual environments, databases, logs, temporary outputs, hardware secrets, MQTT credentials, WeChat cloud configuration, and local `.env` files should not be committed.
-- This repository is for competition, learning, and portfolio display. Third-party components, cloud services, and hardware materials follow their original licenses.
+- ESP32-P4 firmware source for the main controller, including camera, UI, MQTT, AI, audio, and task-control modules.
+- CH32 firmware source for the motion controller that drives the receiving-cabin mechanisms.
+- WeChat Mini Program and optional FastAPI backend code for reviewing or reproducing the order workflow.
+- AI model artifacts and build caches are kept as local development resources. The expected model path is documented so the full AI-enabled firmware can be reproduced.
+- Credentials, private cloud configuration, logs, databases, and generated build outputs are intentionally excluded from the public source tree.
