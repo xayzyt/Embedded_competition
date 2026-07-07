@@ -39,6 +39,10 @@ extern const uint8_t s_apriltag_located_pcm_start[] asm("_binary_apriltag_locate
 extern const uint8_t s_apriltag_located_pcm_end[] asm("_binary_apriltag_located_pcm_end");
 extern const uint8_t s_drone_identified_pcm_start[] asm("_binary_drone_identified_pcm_start");
 extern const uint8_t s_drone_identified_pcm_end[] asm("_binary_drone_identified_pcm_end");
+extern const uint8_t s_drone_not_detected_pcm_start[] asm("_binary_drone_not_detected_pcm_start");
+extern const uint8_t s_drone_not_detected_pcm_end[] asm("_binary_drone_not_detected_pcm_end");
+extern const uint8_t s_drone_returned_pcm_start[] asm("_binary_drone_returned_pcm_start");
+extern const uint8_t s_drone_returned_pcm_end[] asm("_binary_drone_returned_pcm_end");
 
 typedef struct {
     app_audio_prompt_id_t id;
@@ -91,6 +95,18 @@ static const app_audio_prompt_asset_t s_prompt_assets[APP_AUDIO_PROMPT_COUNT] = 
         .name = "drone_identified",
         .start = s_drone_identified_pcm_start,
         .end = s_drone_identified_pcm_end,
+    },
+    [APP_AUDIO_PROMPT_DRONE_NOT_DETECTED] = {
+        .id = APP_AUDIO_PROMPT_DRONE_NOT_DETECTED,
+        .name = "drone_not_detected",
+        .start = s_drone_not_detected_pcm_start,
+        .end = s_drone_not_detected_pcm_end,
+    },
+    [APP_AUDIO_PROMPT_DRONE_RETURNED] = {
+        .id = APP_AUDIO_PROMPT_DRONE_RETURNED,
+        .name = "drone_returned",
+        .start = s_drone_returned_pcm_start,
+        .end = s_drone_returned_pcm_end,
     },
 };
 
@@ -547,4 +563,14 @@ esp_err_t app_audio_prompt_request_apriltag_located(void)
 esp_err_t app_audio_prompt_request_drone_identified(void)
 {
     return app_audio_prompt_request(APP_AUDIO_PROMPT_DRONE_IDENTIFIED);
+}
+
+esp_err_t app_audio_prompt_request_drone_not_detected(void)
+{
+    return app_audio_prompt_request(APP_AUDIO_PROMPT_DRONE_NOT_DETECTED);
+}
+
+esp_err_t app_audio_prompt_request_drone_returned(void)
+{
+    return app_audio_prompt_request(APP_AUDIO_PROMPT_DRONE_RETURNED);
 }

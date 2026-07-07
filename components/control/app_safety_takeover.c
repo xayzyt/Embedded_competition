@@ -7,6 +7,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "app_audio_prompt.h"
 #include "app_cloud.h"
 #include "app_drone_ai.h"
 #include "app_task.h"
@@ -484,6 +485,7 @@ static void app_safety_task(void *arg)
             taskEXIT_CRITICAL(&s_safety_mux);
             app_drone_ai_reset_gate();
             app_drone_ai_set_continuous(true);
+            (void)app_audio_prompt_request_drone_not_detected();
             if (app_safety_set_ui(APP_UI_SAFETY_TAKEOVER_DRONE_LOST, 10, target_id))
             {
                 taskENTER_CRITICAL(&s_safety_mux);
@@ -511,6 +513,7 @@ static void app_safety_task(void *arg)
                 const uint16_t target_id = app_safety_mark_recovered_locked();
                 taskEXIT_CRITICAL(&s_safety_mux);
                 app_drone_ai_set_continuous(false);
+                (void)app_audio_prompt_request_drone_returned();
                 if (app_safety_set_ui(APP_UI_SAFETY_TAKEOVER_DRONE_RECOVERED, 0, target_id))
                 {
                     app_safety_mark_recovered_ui_synced();
@@ -526,6 +529,7 @@ static void app_safety_task(void *arg)
                 const uint16_t target_id = app_safety_mark_recovered_locked();
                 taskEXIT_CRITICAL(&s_safety_mux);
                 app_drone_ai_set_continuous(false);
+                (void)app_audio_prompt_request_drone_returned();
                 if (app_safety_set_ui(APP_UI_SAFETY_TAKEOVER_DRONE_RECOVERED, 0, target_id))
                 {
                     app_safety_mark_recovered_ui_synced();
@@ -642,11 +646,16 @@ static void app_safety_on_task_event(app_task_event_t event,
         }
         else
         {
+            const bool entered_recovered = ctx.phase != SAFETY_PHASE_RECOVERED;
             taskENTER_CRITICAL(&s_safety_mux);
             const uint16_t target_id = app_safety_mark_recovered_locked();
             taskEXIT_CRITICAL(&s_safety_mux);
             app_drone_ai_set_continuous(false);
             app_ui_safety_takeover_set_visible(true);
+            if (entered_recovered)
+            {
+                (void)app_audio_prompt_request_drone_returned();
+            }
             if (app_safety_set_ui(APP_UI_SAFETY_TAKEOVER_DRONE_RECOVERED, 0, target_id))
             {
                 app_safety_mark_recovered_ui_synced();

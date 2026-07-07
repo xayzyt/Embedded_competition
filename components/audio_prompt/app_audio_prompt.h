@@ -15,6 +15,8 @@ typedef enum {
     APP_AUDIO_PROMPT_TRAY_RETRACTING,
     APP_AUDIO_PROMPT_APRILTAG_LOCATED,
     APP_AUDIO_PROMPT_DRONE_IDENTIFIED,
+    APP_AUDIO_PROMPT_DRONE_NOT_DETECTED,
+    APP_AUDIO_PROMPT_DRONE_RETURNED,
     APP_AUDIO_PROMPT_COUNT,
 } app_audio_prompt_id_t;
 
@@ -29,6 +31,8 @@ esp_err_t app_audio_prompt_request_weather_paused(void);
 esp_err_t app_audio_prompt_request_tray_retracting(void);
 esp_err_t app_audio_prompt_request_apriltag_located(void);
 esp_err_t app_audio_prompt_request_drone_identified(void);
+esp_err_t app_audio_prompt_request_drone_not_detected(void);
+esp_err_t app_audio_prompt_request_drone_returned(void);
 
 #ifdef __cplusplus
 }

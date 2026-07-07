@@ -1,5 +1,0 @@
---flash_mode dio --flash_freq 40m --flash_size 16MB
-0x2000 bootloader/bootloader.bin
-0x10000 Embedded_competition.bin
-0x8000 partition_table/partition-table.bin
-0x710000 ../ai_models/drone_cls_pretrained_v3/drone_cls_p4_int8.espdl

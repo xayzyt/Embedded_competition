@@ -5,4 +5,10 @@ idf_component_register(
 )
 
 set(DRONE_AI_MODEL_FILE "${CMAKE_SOURCE_DIR}/ai_models/drone_cls_pretrained_v3/drone_cls_p4_int8.espdl")
-esptool_py_flash_to_partition(flash "model" "${DRONE_AI_MODEL_FILE}")
+if(EXISTS "${DRONE_AI_MODEL_FILE}")
+    esptool_py_flash_to_partition(flash "model" "${DRONE_AI_MODEL_FILE}")
+else()
+    message(WARNING
+        "Drone AI model not found: ${DRONE_AI_MODEL_FILE}. "
+        "Firmware can still be built, but drone AI requires flashing this .espdl file to the model partition.")
+endif()

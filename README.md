@@ -1,120 +1,132 @@
-# SkyAnchor Embedded Competition
+<p align="center">
+  <img src="components/vision_ui/assets/logo.png" width="116" alt="SkyAnchor logo">
+</p>
 
-面向无人配送演示场景的多端协同系统。项目将 ESP32-P4 主控、CH32 执行控制器、摄像头与 LVGL 界面、AprilTag 视觉定位、MQTT 设备通信、微信小程序和服务端流程整合在同一仓库中。
+<h1 align="center">SkyAnchor Embedded Competition</h1>
 
-> A multi-device delivery demo integrating ESP32-P4 firmware, a CH32 controller, camera and LVGL UI, AprilTag localization, MQTT messaging, a WeChat Mini Program, and backend services.
+<p align="center">
+  <b>面向城市低空物流演示的智能微港节点</b><br>
+  ESP32-P4 + CH32 + Camera + LVGL + AprilTag + Drone AI + MQTT + WeChat Mini Program
+</p>
 
-![C](https://img.shields.io/badge/C-00599C?style=flat-square&logo=c&logoColor=white)
-![ESP-IDF](https://img.shields.io/badge/ESP--IDF-E7352C?style=flat-square&logo=espressif&logoColor=white)
-![FreeRTOS](https://img.shields.io/badge/FreeRTOS-173B6C?style=flat-square)
-![MQTT](https://img.shields.io/badge/MQTT-660066?style=flat-square&logo=mqtt)
+<p align="center">
+  <img alt="C" src="https://img.shields.io/badge/C-00599C?style=flat-square&logo=c&logoColor=white">
+  <img alt="ESP-IDF" src="https://img.shields.io/badge/ESP--IDF-v5.5.x-E7352C?style=flat-square&logo=espressif&logoColor=white">
+  <img alt="ESP32-P4" src="https://img.shields.io/badge/Target-ESP32--P4-222222?style=flat-square">
+  <img alt="FreeRTOS" src="https://img.shields.io/badge/RTOS-FreeRTOS-173B6C?style=flat-square">
+  <img alt="MQTT" src="https://img.shields.io/badge/MQTT-EMQX-660066?style=flat-square&logo=mqtt">
+  <img alt="LVGL" src="https://img.shields.io/badge/UI-LVGL-2C7BB6?style=flat-square">
+  <img alt="Demo" src="https://img.shields.io/badge/Demo-ready-0F766E?style=flat-square">
+</p>
 
-> 演示素材待补：建议添加整机照片，以及“用户下单 → 调度 → 板端执行 → 状态回传”的短视频。
+SkyAnchor 是一个多端协同的无人配送接收舱演示工程。ESP32-P4 负责视觉、UI、任务调度、MQTT 通信与主控状态机；CH32 负责舱门、托盘和传感器等执行机构；微信小程序与云函数负责下单、调度、订单状态展示和现场演示闭环。
 
-## 演示流程
+## 项目亮点
 
-```text
-用户端下单
-  -> 调度台分配 AprilTag 目标
-  -> MQTT 下发 start_task
-  -> ESP32-P4 进入识别与执行流程
-  -> CH32 执行机构完成舱门/托盘动作
-  -> 设备持续上报 ACK、状态与失败原因
-  -> 小程序展示订单时间线
-```
+- ESP32-P4 主控：摄像头预览、AprilTag 定位、无人机 AI 分类、LVGL 交互界面和 MQTT 设备状态上报。
+- CH32 从控：通过 UART 二进制协议执行开门、托盘伸缩、货物检测和安全锁定动作。
+- 视觉链路：V4L2 USERPTR 取帧，PPA/CPU 缩放，显示缓冲与 AI/AprilTag 路由分离。
+- 安全接管：支持恶劣天气/异常场景的安全回收流程，并带离场检测、目标返回和语音播报。
+- 多端演示：微信小程序用户端、调度端、云函数和可选 FastAPI 本地服务形成订单闭环。
 
 ## 系统架构
 
 ```mermaid
 flowchart LR
-    User["微信小程序：用户端"] --> Cloud["云函数 / 服务端"]
-    Dispatch["微信小程序：调度端"] --> Cloud
-    Cloud <-->|"MQTT cmd / ack / state"| P4["ESP32-P4 主控"]
-    P4 --> UI["LVGL 交互界面"]
-    Camera["摄像头"] --> Pipeline["预览 / AprilTag / AI 路由"]
-    Pipeline --> P4
-    P4 <-->|"UART + CRC16 + ACK/NACK"| CH32["CH32 执行控制器"]
-    CH32 --> Actuator["舱门、托盘与传感器"]
+    User["用户端小程序"] --> Cloud["云函数 / 服务端"]
+    Dispatch["调度端小程序"] --> Cloud
+    Cloud <-->|MQTT cmd / ack / state| P4["ESP32-P4 主控"]
+    Camera["摄像头"] --> Vision["预览 / AprilTag / AI"]
+    Vision --> P4
+    P4 --> UI["LVGL 本地界面"]
+    P4 <-->|UART + CRC16 + ACK/NACK| CH32["CH32 执行控制器"]
+    CH32 --> Actuator["舱门 / 托盘 / 传感器"]
 ```
 
-## 核心模块
+## 演示闭环
 
-| 子系统 | 职责 |
-| --- | --- |
-| ESP32-P4 应用 | 系统启动、任务控制、设备状态和主业务流程 |
-| 摄像头链路 | V4L2 USERPTR 取帧、PPA/CPU 缩放、LVGL 预览和视觉任务分流 |
-| 视觉与 UI | AprilTag 识别、LVGL 页面、状态展示和交互 |
-| 控制协议 | ESP32 与 CH32 之间的二进制帧、CRC16、ACK/NACK 和状态缓存 |
-| CH32 固件 | 执行机构控制、传感器检查和安全状态机 |
-| 小程序与服务 | 下单、调度、自检、订单状态轮询及 MQTT 消息转发 |
-
-## 关键工程问题
-
-### 摄像头预览的数据所有权
-
-摄像头回调、图像缩放和 LVGL 显示运行在不同执行上下文。工程使用独立的 UI canvas 缓冲区和 stage buffer 状态队列，避免相机复用缓冲区时覆盖正在显示的画面，并处理 cache 同步和 RGB565 帧检查。
-
-### 多控制器可靠通信
-
-ESP32-P4 与 CH32 使用 UART 二进制协议。协议层包含帧头、负载长度、序号、CRC16/IBM、ACK/NACK、错误码与超时处理；上层通过状态快照判断从控是否可用。
-
-### 设备与订单状态一致性
-
-MQTT topic 按 `cmd`、`ack`、`state` 分离。设备使用 retained state 对外提供当前状态，小程序和服务端据此推进订单时间线，并保留天气保护、失败原因和取消流程。
+```text
+用户提交订单
+  -> 调度端分配 AprilTag 目标
+  -> 云函数或服务端下发 MQTT start_task
+  -> ESP32-P4 打开视觉链路并识别无人机 / Tag
+  -> CH32 执行接收舱动作
+  -> 设备持续上报 ack / state / failure reason
+  -> 小程序刷新订单时间线
+```
 
 ## 仓库结构
 
 ```text
-main/                  ESP32-P4 应用入口与项目配置
-components/            摄像头、控制、UI、AI、BSP 和共享类型
-CH32/                  CH32 控制器固件与 MounRiver 工程
-skyanchor-miniapp/     微信小程序与云函数
-skyanchor-server/      FastAPI 本地调试后端
-tools/                 转换和维护脚本
-DEMO_RUNBOOK.md        演示流程与故障检查清单
+main/                  ESP32-P4 应用入口、启动流程和主服务
+components/            BSP、相机、视觉、UI、控制、AI、语音和共享类型
+CH32/                  CH32 执行控制器固件与 MounRiver 工程
+skyanchor-miniapp/     微信小程序、云函数和演示端页面
+skyanchor-server/      FastAPI 本地调试后端，可选
+tools/                 AI 训练、模型转换和维护脚本，可选
 ```
 
-## 构建与演示
+本地构建时会生成或保留 `build/`、`managed_components/`、`ai_models/` 等目录；这些内容通常不提交到 GitHub，但在开发机上可以保留以便快速编译和烧录。
 
-### ESP32-P4
+## 核心模块
 
-项目提供 `sdkconfig.defaults` 和 `sdkconfig.defaults.esp32p4`。在已安装对应 ESP-IDF 与板级组件的环境中：
+| 模块 | 职责 |
+| --- | --- |
+| `main/` | 初始化 NVS、屏幕、UI、CH32 串口、MQTT、视觉和后台服务 |
+| `components/camera` | 摄像头取帧、预览缩放、帧路由和显示统计 |
+| `components/vision_ui` | LVGL 主屏、安全接管页、AprilTag 和 UI 资源 |
+| `components/drone_ai` | 无人机二分类模型加载、推理调度和连续监测 |
+| `components/control` | 任务状态机、MQTT 命令、CH32 协议、安全接管流程 |
+| `components/audio_prompt` | I2S/ES8311 语音播报与提示音资源 |
+| `CH32/` | 执行机构控制、限位/货物状态、从控协议响应 |
 
-```bash
+## 构建 ESP32-P4
+
+建议使用 ESP-IDF v5.5.x，目标芯片为 `esp32p4`。
+
+```powershell
 idf.py set-target esp32p4
 idf.py build
 idf.py flash monitor
 ```
 
-### CH32
+本工程依赖 ESP32-P4 Function EV Board 相关 BSP、ESP-DL、LVGL、MQTT 等组件。`managed_components/` 是本地组件缓存，清理仓库时可以不提交，但本机保留有助于快速编译。
 
-使用 MounRiver Studio 打开 `CH32/` 下的工程，按实际开发板配置下载器和串口。
+### AI 模型文件
 
-### 小程序
+无人机 AI 模型没有放入仓库。需要启用 AI 推理时，将模型放到：
 
-使用微信开发者工具导入 `skyanchor-miniapp/`，部署所需云函数，并按 `DEMO_RUNBOOK.md` 完成自检和演示。
+```text
+ai_models/drone_cls_pretrained_v3/drone_cls_p4_int8.espdl
+```
 
-完整演示步骤及预期日志见 [DEMO_RUNBOOK.md](DEMO_RUNBOOK.md)。
+如果该文件不存在，CMake 会跳过模型分区刷写目标；固件仍可构建，但运行时无人机 AI 无法正常加载模型。模型分区在 `partitions.csv` 中定义为 `model`。
 
-## 我的工作
+## 构建 CH32
 
-当前仓库提交记录显示我持续参与并维护以下部分：
+使用 MounRiver Studio 打开 `CH32/` 工程，按现场硬件配置下载器、串口和目标板。ESP32-P4 与 CH32 通过 UART 协议协同，协议状态会映射到主控任务状态和 UI。
 
-- ESP32-P4 摄像头预览、显示缓冲与 LVGL 界面
-- AprilTag/AI 图像路由及任务状态衔接
-- ESP32 与 CH32 通信协议、状态缓存和异常处理
-- 小程序界面、设备状态流和演示稳定性优化
-- 工程目录、注释、忽略规则和演示文档整理
+## 小程序与服务
 
+- `skyanchor-miniapp/`：微信小程序与云函数，适合现场演示。
+- `skyanchor-server/`：FastAPI 本地调试服务，用于不依赖微信云函数时验证订单和 MQTT 闭环。
 
+小程序侧的设备名、MQTT topic、演示用户和调度流程见各子目录 README。
 
-## 当前限制
+## 现场检查
 
-- 构建依赖具体 ESP32-P4 开发板、摄像头、显示组件和 CH32 硬件
-- 云端密钥、MQTT 凭据、模型文件和本地运行数据不进入仓库
-- 实物照片、完整演示视频、队伍分工和硬件接线文档仍需补充
-- 本地 FastAPI 服务用于调试；正式演示流程以微信云开发方案为准
+启动演示前建议确认：
 
-## 使用说明
+- ESP32-P4 串口出现 `wifi got ip`。
+- MQTT 连接成功并能收到云端命令。
+- CH32 串口链路在线，状态页无从控异常。
+- 摄像头首帧能进入 LVGL 预览。
+- AprilTag 目标与调度端分配一致。
+- 语音播报开关符合现场要求。
 
-本仓库用于竞赛、学习和作品展示。涉及的第三方组件、模型、云服务和硬件资料分别遵循其原始许可与使用条款。
+## 仓库维护说明
+
+- `build/`、`managed_components/` 是本地构建缓存，已在 `.gitignore` 中忽略。
+- `ai_models/`、虚拟环境、数据库、日志和临时输出不进入仓库。
+- 硬件密钥、MQTT 凭据、微信云配置和本地 `.env` 文件不要提交。
+- 本仓库用于竞赛、学习和作品展示；第三方组件、云服务和硬件资料遵循其原始许可。
