@@ -34,7 +34,7 @@ extern "C" {
 #define APP_CLOUD_FALLBACK_DNS_D       5
 #define APP_CLOUD_NTP_SERVER           "ntp.aliyun.com"
 #define APP_CLOUD_TIMEZONE             "CST-8"
-#define APP_CLOUD_WEATHER_CITY         "changsha"
+#define APP_CLOUD_WEATHER_CITY         "nanchang"
 #define APP_CLOUD_WEATHER_TEXT_LEN     96
 #define APP_CLOUD_WEATHER_URL_LEN      256
 #define APP_CLOUD_WEATHER_RESP_LEN     1024

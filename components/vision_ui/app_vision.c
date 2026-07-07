@@ -56,6 +56,17 @@ static inline uint32_t app_vision_now_ms(void)
 {
     return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
 }
+static inline uint8_t app_vision_rgb565_to_gray(uint16_t pixel)
+{
+    uint32_t r = (uint32_t)((pixel >> 11) & 0x1FU);
+    uint32_t g = (uint32_t)((pixel >> 5) & 0x3FU);
+    uint32_t b = (uint32_t)(pixel & 0x1FU);
+
+    r = (r << 3) | (r >> 2);
+    g = (g << 2) | (g >> 4);
+    b = (b << 3) | (b >> 2);
+    return (uint8_t)((r * 77U + g * 150U + b * 29U) >> 8);
+}
 // 输入分辨率不变时复用采样映射，减少每帧除法开销。
 static void app_vision_prepare_sample_map(uint32_t width, uint32_t height)
 {
@@ -408,7 +419,7 @@ esp_err_t app_vision_submit_frame(const uint8_t *rgb565,
         uint8_t *dst_row = &write_slot->gray[gy * VISION_GRAY_WIDTH];
         for (uint32_t gx = 0; gx < VISION_GRAY_WIDTH; gx++) {
             uint16_t pixel = src_row[s_sample_x[gx]];
-            dst_row[gx] = app_image_rgb565_to_gray(pixel);
+            dst_row[gx] = app_vision_rgb565_to_gray(pixel);
         }
     }
     taskENTER_CRITICAL(&s_vision_mux);

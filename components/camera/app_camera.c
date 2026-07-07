@@ -51,7 +51,6 @@
 #define PREVIEW_BAD_SOLID_PERCENT       98U
 #define PREVIEW_BAD_CAST_PERCENT        78U
 #define CAMERA_BUF_CAPS          (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT | MALLOC_CAP_CACHE_ALIGNED)
-#define CANVAS_BUF_CAPS          (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT | MALLOC_CAP_CACHE_ALIGNED)
 #define DISPLAY_BUF_CAPS         (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT | MALLOC_CAP_DMA)
 static const char *TAG = "app_camera";
 static bool s_camera_inited = false;
@@ -64,7 +63,6 @@ static uint8_t *s_cam_buf[CAMERA_NUM_BUFS] = {0};
 static size_t s_cam_buf_size = 0;
 // stage buffer 是相机回调和 LVGL 显示任务之间的轻量多缓冲队列。
 static uint8_t *s_stage_buf[STAGE_NUM_BUFS] = {0};
-static uint8_t *s_ui_canvas_buf = NULL;
 static uint32_t s_disp_buf_size = 0;
 static TaskHandle_t s_display_task_handle = NULL;
 static TaskHandle_t s_stats_task_handle = NULL;
@@ -82,7 +80,6 @@ static volatile uint32_t s_display_count = 0;
 static disp_buf_state_t s_stage_state[STAGE_NUM_BUFS] = {0};
 static uint32_t s_stage_letterbox_w[STAGE_NUM_BUFS] = {0};
 static uint32_t s_stage_letterbox_h[STAGE_NUM_BUFS] = {0};
-static volatile int s_retained_stage_index = -1;
 static uint32_t s_warmup_drop_remaining = 0;
 static uint32_t s_bad_preview_drop_count = 0;
 static bool s_cpu_fallback_preview = false;
@@ -154,7 +151,7 @@ static void app_camera_canvas_set_buffer(uint8_t *buf)
 }
 static inline bool app_camera_canvas_buffer_ready(void)
 {
-    return s_ui_canvas_buf != NULL;
+    return s_disp_buf_size != 0U && s_stage_buf[0] != NULL;
 }
 // 计算等比例缩放后的预览尺寸，保持画面不拉伸。
 static void app_camera_preview_calc_aspect_fit(uint32_t src_w,
@@ -664,17 +661,11 @@ static void app_camera_free_display_buffers(void)
         s_stage_letterbox_w[i] = 0;
         s_stage_letterbox_h[i] = 0;
     }
-    if (s_ui_canvas_buf)
-    {
-        heap_caps_free(s_ui_canvas_buf);
-        s_ui_canvas_buf = NULL;
-    }
     s_pending_stage_index = -1;
     s_displayed_stage_index = -1;
-    s_retained_stage_index = -1;
     s_disp_buf_size = 0;
 }
-// 分配 LVGL canvas 与 stage queue 缓冲区，均按 cache line 对齐。
+// 分配 stage queue 缓冲区，canvas 直接切换这些 buffer 以避免整屏复制。
 static esp_err_t app_camera_alloc_display_buffers(void)
 {
     esp_err_t ret = esp_cache_get_alignment(MALLOC_CAP_SPIRAM, &s_cache_line_size);
@@ -684,13 +675,6 @@ static esp_err_t app_camera_alloc_display_buffers(void)
         return ret;
     }
     s_disp_buf_size = ALIGN_UP(BSP_LCD_H_RES * BSP_LCD_V_RES * 2, s_cache_line_size);
-    s_ui_canvas_buf = app_camera_aligned_calloc(s_disp_buf_size, CANVAS_BUF_CAPS, "ui canvas");
-    if (s_ui_canvas_buf == NULL)
-    {
-        ESP_LOGE(TAG, "alloc ui canvas buffer failed");
-        app_camera_free_display_buffers();
-        return ESP_ERR_NO_MEM;
-    }
     for (int i = 0; i < STAGE_NUM_BUFS; i++) {
         s_stage_buf[i] = app_camera_aligned_calloc(s_disp_buf_size, DISPLAY_BUF_CAPS, "stage buffer");
         if (s_stage_buf[i] == NULL)
@@ -709,8 +693,7 @@ static esp_err_t app_camera_alloc_display_buffers(void)
         s_stage_state[i] = DISP_BUF_FREE;
     }
     ESP_LOGI(TAG,
-        "display buffers ready: canvas=%lu stage=%u each=%lu free_psram=%u",
-        (unsigned long)s_disp_buf_size,
+        "display buffers ready: zero-copy stage=%u each=%lu free_psram=%u",
         (unsigned)STAGE_NUM_BUFS,
         (unsigned long)s_disp_buf_size,
         (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
@@ -770,10 +753,14 @@ static esp_err_t app_camera_create_canvas(void)
         bsp_display_unlock();
         return ESP_FAIL;
     }
-    app_camera_canvas_set_buffer(s_ui_canvas_buf);
+    app_camera_canvas_set_buffer(s_stage_buf[0]);
     lv_obj_center(s_camera_canvas);
     lv_obj_move_background(s_camera_canvas);
     bsp_display_unlock();
+    taskENTER_CRITICAL(&s_display_mux);
+    s_stage_state[0] = DISP_BUF_DISPLAYED;
+    s_displayed_stage_index = 0;
+    taskEXIT_CRITICAL(&s_display_mux);
     return ESP_OK;
 }
 #if SOC_PPA_SUPPORTED
@@ -1029,14 +1016,9 @@ static void app_camera_release_stage_buffer(int buf_index)
         return;
     }
     taskENTER_CRITICAL(&s_display_mux);
-    s_stage_state[buf_index] = DISP_BUF_FREE;
-    if (s_displayed_stage_index == buf_index)
+    if (s_stage_state[buf_index] != DISP_BUF_DISPLAYED)
     {
-        s_displayed_stage_index = -1;
-    }
-    if (s_retained_stage_index == buf_index)
-    {
-        s_retained_stage_index = -1;
+        s_stage_state[buf_index] = DISP_BUF_FREE;
     }
     if (s_pending_stage_index == buf_index)
     {
@@ -1044,7 +1026,28 @@ static void app_camera_release_stage_buffer(int buf_index)
     }
     taskEXIT_CRITICAL(&s_display_mux);
 }
-// Copy the latest verified frame under the LVGL lock and let the LVGL task refresh it.
+static void app_camera_mark_stage_displayed(int buf_index)
+{
+    if (buf_index < 0 || buf_index >= STAGE_NUM_BUFS)
+    {
+        return;
+    }
+    taskENTER_CRITICAL(&s_display_mux);
+    const int old_displayed = s_displayed_stage_index;
+    if (old_displayed >= 0 && old_displayed < STAGE_NUM_BUFS && old_displayed != buf_index &&
+        s_stage_state[old_displayed] == DISP_BUF_DISPLAYED)
+    {
+        s_stage_state[old_displayed] = DISP_BUF_FREE;
+    }
+    s_stage_state[buf_index] = DISP_BUF_DISPLAYED;
+    s_displayed_stage_index = buf_index;
+    if (s_pending_stage_index == buf_index)
+    {
+        s_pending_stage_index = -1;
+    }
+    taskEXIT_CRITICAL(&s_display_mux);
+}
+// Switch the canvas to the latest verified frame under the LVGL lock.
 /* ---------- 相机回调与显示任务 ---------- */
 
 static void app_camera_display_task(void *arg)
@@ -1066,15 +1069,15 @@ static void app_camera_display_task(void *arg)
             bool displayed = false;
             if (bsp_display_lock(DISPLAY_LOCK_TIMEOUT_MS))
             {
-                memcpy(s_ui_canvas_buf, s_stage_buf[buf_index], s_disp_buf_size);
+                app_camera_canvas_set_buffer(s_stage_buf[buf_index]);
                 lv_obj_invalidate(s_camera_canvas);
                 displayed = true;
                 bsp_display_unlock();
             }
             if (displayed)
             {
+                app_camera_mark_stage_displayed(buf_index);
                 s_display_count++;
-                app_camera_release_stage_buffer(buf_index);
             }
             else
             {

@@ -86,7 +86,7 @@ config SKY_WEATHER_API_KEY
     string "Seniverse weather API key"
     default ""
     help
-        心知天气 API Key。主屏幕天气固定查询长沙：
-        https://api.seniverse.com/v3/weather/now.json?location=changsha
+        心知天气 API Key。主屏幕天气固定查询南昌：
+        https://api.seniverse.com/v3/weather/now.json?location=nanchang
 
 endmenu

@@ -20,6 +20,7 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "sdkconfig.h"
+#include "app_image_utils.h"
 
 static const char *TAG = "drone_ai";
 
@@ -89,6 +90,10 @@ static uint32_t s_drop_count = 0;
 static app_drone_ai_result_t s_latest = {};
 static uint8_t *s_motion_prev_gray = nullptr;
 static bool s_motion_prev_valid = false;
+static uint16_t s_sample_x[DRONE_AI_INPUT_W] = {};
+static uint16_t s_sample_y[DRONE_AI_INPUT_H] = {};
+static uint32_t s_sample_map_width = 0;
+static uint32_t s_sample_map_height = 0;
 
 static dl::Model *s_model = nullptr;
 static dl::TensorBase *s_model_input = nullptr;
@@ -197,44 +202,45 @@ static inline void app_drone_ai_rgb565_to_rgb888(uint16_t pixel,
     *b = (uint8_t)bv;
 }
 
-static void app_drone_ai_calc_center_crop(uint32_t src_width,
-                                          uint32_t src_height,
-                                          uint32_t dst_width,
-                                          uint32_t dst_height,
-                                          uint32_t *crop_x,
-                                          uint32_t *crop_y,
-                                          uint32_t *crop_w,
-                                          uint32_t *crop_h)
+static void app_drone_ai_prepare_sample_map(uint32_t width, uint32_t height)
 {
-    uint32_t x = 0;
-    uint32_t y = 0;
-    uint32_t w = src_width;
-    uint32_t h = src_height;
-
-    if (src_width == 0U || src_height == 0U || dst_width == 0U || dst_height == 0U)
+    if (s_sample_map_width == width && s_sample_map_height == height)
     {
-        if (crop_x) *crop_x = 0;
-        if (crop_y) *crop_y = 0;
-        if (crop_w) *crop_w = src_width;
-        if (crop_h) *crop_h = src_height;
         return;
     }
 
-    if ((uint64_t)src_width * dst_height > (uint64_t)src_height * dst_width)
-    {
-        w = (uint32_t)(((uint64_t)src_height * dst_width) / dst_height);
-        x = (src_width - w) / 2U;
+    uint32_t crop_x = 0;
+    uint32_t crop_y = 0;
+    uint32_t crop_w = width;
+    uint32_t crop_h = height;
+    app_image_calc_center_crop(width,
+                               height,
+                               DRONE_AI_INPUT_W,
+                               DRONE_AI_INPUT_H,
+                               &crop_x,
+                               &crop_y,
+                               &crop_w,
+                               &crop_h);
+
+    for (uint32_t y = 0; y < DRONE_AI_INPUT_H; y++) {
+        uint32_t sy = crop_y + (uint32_t)(((uint64_t)y * crop_h) / DRONE_AI_INPUT_H);
+        if (sy >= height)
+        {
+            sy = height - 1U;
+        }
+        s_sample_y[y] = (uint16_t)sy;
     }
-    else
-    {
-        h = (uint32_t)(((uint64_t)src_width * dst_height) / dst_width);
-        y = (src_height - h) / 2U;
+    for (uint32_t x = 0; x < DRONE_AI_INPUT_W; x++) {
+        uint32_t sx = crop_x + (uint32_t)(((uint64_t)x * crop_w) / DRONE_AI_INPUT_W);
+        if (sx >= width)
+        {
+            sx = width - 1U;
+        }
+        s_sample_x[x] = (uint16_t)sx;
     }
 
-    if (crop_x) *crop_x = x;
-    if (crop_y) *crop_y = y;
-    if (crop_w) *crop_w = w;
-    if (crop_h) *crop_h = h;
+    s_sample_map_width = width;
+    s_sample_map_height = height;
 }
 
 static bool app_drone_ai_input_is_nhwc(const std::vector<int> &shape)
@@ -286,38 +292,16 @@ static void app_drone_ai_resize_rgb565_to_rgb888(const uint8_t *rgb565,
                                                  uint32_t height,
                                                  uint8_t *dst_rgb)
 {
-    uint32_t crop_x = 0;
-    uint32_t crop_y = 0;
-    uint32_t crop_w = width;
-    uint32_t crop_h = height;
     const uint16_t *src = (const uint16_t *)rgb565;
 
-    app_drone_ai_calc_center_crop(width,
-                                  height,
-                                  DRONE_AI_INPUT_W,
-                                  DRONE_AI_INPUT_H,
-                                  &crop_x,
-                                  &crop_y,
-                                  &crop_w,
-                                  &crop_h);
+    app_drone_ai_prepare_sample_map(width, height);
 
     for (uint32_t y = 0; y < DRONE_AI_INPUT_H; y++) {
-        uint32_t sy = crop_y + (uint32_t)(((uint64_t)y * crop_h) / DRONE_AI_INPUT_H);
-        if (sy >= height)
-        {
-            sy = height - 1U;
-        }
-        const uint16_t *src_row = src + (size_t)sy * width;
+        const uint16_t *src_row = src + (size_t)s_sample_y[y] * width;
         uint8_t *dst_row = dst_rgb + (size_t)y * DRONE_AI_INPUT_W * DRONE_AI_INPUT_CH;
 
         for (uint32_t x = 0; x < DRONE_AI_INPUT_W; x++) {
-            uint32_t sx = crop_x + (uint32_t)(((uint64_t)x * crop_w) / DRONE_AI_INPUT_W);
-            if (sx >= width)
-            {
-                sx = width - 1U;
-            }
-
-            app_drone_ai_rgb565_to_rgb888(src_row[sx],
+            app_drone_ai_rgb565_to_rgb888(src_row[s_sample_x[x]],
                                           &dst_row[x * DRONE_AI_INPUT_CH + 0U],
                                           &dst_row[x * DRONE_AI_INPUT_CH + 1U],
                                           &dst_row[x * DRONE_AI_INPUT_CH + 2U]);

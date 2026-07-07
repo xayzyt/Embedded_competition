@@ -36,7 +36,7 @@ static inline void at_cooperate(uint32_t *processed)
     if (*processed >= AT_COOPERATE_PIXELS)
     {
         *processed = 0;
-        vTaskDelay(1);
+        taskYIELD();
     }
 }
 // tag36h11 全码表，用于汉明距离匹配。
