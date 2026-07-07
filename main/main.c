@@ -4,6 +4,7 @@
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "app_ai_capture.h"
+#include "app_audio_prompt.h"
 #include "app_ch32_link.h"
 #include "app_ctrl.h"
 #include "app_delivery_photo.h"
@@ -171,6 +172,12 @@ static app_runtime_start_result_t app_init_runtime_modules(const app_dock_judge_
             true);
         return result;
     }
+
+    // 音频必须在 AI、相机和云端任务之前固定占用其小块 DMA；失败只关闭语音。
+    (void)app_record_start_step("audio prompt",
+        50,
+        app_audio_prompt_init(),
+        false);
 
     if (!app_record_start_step("drone ai",
         55,

@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "app_audio_prompt.c"
+    SRCS "app_audio_prompt.c" "app_audio_prompt_hw.c"
     INCLUDE_DIRS "."
     EMBED_FILES
         "assets/ready.pcm"
@@ -9,5 +9,5 @@ idf_component_register(
         "assets/tray_retracting.pcm"
         "assets/apriltag_located.pcm"
         "assets/drone_identified.pcm"
-    REQUIRES esp32_p4_function_ev_board heap nvs_flash
+    REQUIRES esp32_p4_function_ev_board esp_driver_i2s heap nvs_flash
 )

@@ -20,7 +20,6 @@ static const char *TAG = "app_services";
 #define APP_STATUS_TASK_PRIO             3
 
 static bool s_cloud_start_requested = false;
-static bool s_audio_prompt_started = false;
 static bool s_ready_prompt_requested = false;
 static bool s_ready_prompt_error_logged = false;
 static TaskHandle_t s_status_task = NULL;
@@ -68,25 +67,6 @@ static void app_start_cloud_async(void)
         app_ui_set_status("task: local mode / cloud start failed");
         app_ui_main_screen_set_task_state(APP_UI_MAIN_TASK_LOCAL_WAIT);
     }
-}
-
-static void app_start_audio_prompt_task(void)
-{
-    if (s_audio_prompt_started)
-    {
-        return;
-    }
-
-    esp_err_t ret = app_audio_prompt_init();
-    if (ret == ESP_OK)
-    {
-        s_audio_prompt_started = true;
-        app_ui_main_screen_set_voice_enabled(app_audio_prompt_is_enabled());
-        return;
-    }
-
-    ESP_LOGW(TAG, "audio prompt disabled: %s", esp_err_to_name(ret));
-    app_ui_main_screen_set_voice_enabled(app_audio_prompt_is_enabled());
 }
 
 static void app_voice_toggle_cb(void)
@@ -142,6 +122,8 @@ static void app_main_screen_status_task(void *arg)
             cloud.wifi_connected,
             cloud.mqtt_connected,
             ch32_ready);
+        // 播放期间若音频硬件故障，及时把安全降级状态同步到主屏。
+        app_ui_main_screen_set_voice_enabled(app_audio_prompt_is_enabled());
         if (!s_ready_prompt_requested && cloud.mqtt_connected && ch32_ready)
         {
             esp_err_t ret = app_audio_prompt_request_ready();
@@ -172,7 +154,6 @@ void app_main_services_bind_ui_callbacks(void)
 
 void app_main_services_start(void)
 {
-    app_start_audio_prompt_task();
     app_start_cloud_async();
     if (s_status_task != NULL)
     {

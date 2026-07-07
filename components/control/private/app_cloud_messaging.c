@@ -27,7 +27,6 @@ static const char *TAG = "app_cloud";
 #define APP_CLOUD_PHOTO_FIRST_DELAY_MS 5000U
 #define APP_CLOUD_PHOTO_RETRY_MS 30000U
 #define APP_CLOUD_PHOTO_CHUNK_QOS 1
-#define APP_CLOUD_PHOTO_INLINE_MAX_BYTES (8 * 1024U)
 
 static char s_photo_upload_photo_id[16] = {0};
 static TickType_t s_photo_upload_next_tick = 0;
@@ -368,62 +367,6 @@ static esp_err_t app_cloud_publish_photo_chunks(const app_delivery_photo_info_t 
     return ret;
 }
 
-static bool app_cloud_json_add_inline_photo(cJSON *root, const app_delivery_photo_info_t *photo)
-{
-    if (root == NULL || photo == NULL ||
-        photo->photo_id[0] == '\0' ||
-        photo->size == 0U ||
-        photo->size > APP_CLOUD_PHOTO_INLINE_MAX_BYTES)
-    {
-        return true;
-    }
-
-    uint8_t *raw = (uint8_t *)malloc(photo->size);
-    if (raw == NULL)
-    {
-        return true;
-    }
-    size_t raw_len = 0;
-    esp_err_t ret = app_delivery_photo_read_jpeg_chunk(photo->photo_id,
-        0,
-        raw,
-        photo->size,
-        &raw_len);
-    if (ret != ESP_OK || raw_len != photo->size)
-    {
-        free(raw);
-        return true;
-    }
-
-    size_t b64_cap = (((size_t)photo->size + 2U) / 3U) * 4U + 1U;
-    unsigned char *b64 = (unsigned char *)malloc(b64_cap);
-    if (b64 == NULL)
-    {
-        free(raw);
-        return true;
-    }
-    size_t b64_len = 0;
-    int enc_ret = mbedtls_base64_encode(b64,
-        b64_cap,
-        &b64_len,
-        raw,
-        raw_len);
-    free(raw);
-    if (enc_ret != 0)
-    {
-        free(b64);
-        return true;
-    }
-    b64[b64_len] = '\0';
-
-    bool ok = app_cloud_json_add_number(root, "photo_inline", 1U) &&
-        app_cloud_json_add_string(root, "photo_inline_b64", (const char *)b64) &&
-        app_cloud_json_add_string(root, "photo_mime", "image/jpeg") &&
-        app_cloud_json_add_string(root, "photo_sha256", photo->sha256_hex);
-    free(b64);
-    return ok;
-}
-
 static bool app_cloud_photo_upload_allowed(const app_delivery_photo_info_t *photo)
 {
     if (photo == NULL || photo->order_id[0] == '\0' || photo->photo_id[0] == '\0')
@@ -569,7 +512,6 @@ void app_cloud_publish_task_snapshot_internal(const app_task_snapshot_t *snap)
         app_cloud_json_add_number(root, "photo_height", photo.height) &&
         app_cloud_json_add_number(root, "photo_chunks", photo.chunks) &&
         app_cloud_json_add_string(root, "photo_error", photo.error) &&
-        app_cloud_json_add_inline_photo(root, &photo) &&
         app_cloud_json_add_string(root, "source", snap->source) &&
         app_cloud_json_add_string(root, "note", snap->note);
     esp_err_t ret = ok ? app_cloud_publish_json(s_cloud.topic_state, root, 1) : ESP_ERR_NO_MEM;
@@ -595,7 +537,7 @@ void app_cloud_publish_current_state(void)
         app_cloud_publish_task_snapshot_internal(&s_cloud.last_snapshot);
     }
 }
-// 任务模块事件回调：缓存最新快照并推送到 MQTT。
+// 任务模块事件回调只缓存快照并唤醒云任务，避免在控制任务里构造 JSON 或阻塞 MQTT。
 void app_cloud_on_task_event(app_task_event_t event,
     const app_task_snapshot_t *snap,
     void *user_ctx)
@@ -608,7 +550,7 @@ void app_cloud_on_task_event(app_task_event_t event,
     }
     s_cloud.last_snapshot = *snap;
     s_cloud.have_last_snapshot = true;
-    app_cloud_publish_task_snapshot_internal(snap);
+    app_cloud_request_state_publish();
     if (snap->state == APP_TASK_STATE_COMPLETED &&
         !snap->active &&
         strcmp(snap->source, "safety") != 0)

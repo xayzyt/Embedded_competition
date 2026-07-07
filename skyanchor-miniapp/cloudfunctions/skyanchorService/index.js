@@ -715,10 +715,15 @@ function isPayloadForOrder(order, payload) {
     return false;
   }
 
-  const payloadRequestId = String(payload.request_id || payload.order_id || '').trim();
-  const orderRequestId = String(order.request_id || order.order_id || '').trim();
-  // 这里优先按 request_id 精确匹配，避免旧 retained state 错套到新订单。
-  if (!payloadRequestId || payloadRequestId !== orderRequestId) {
+  const payloadIds = [payload.request_id, payload.order_id]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean);
+  const orderIds = [order.request_id, order.order_id]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean);
+  // request_id 与 order_id 都是订单的强标识；任一精确相等即可兼容设备端字段回退，
+  // 同时仍可阻止其他订单的 retained state 被误套用。
+  if (!payloadIds.some((payloadId) => orderIds.includes(payloadId))) {
     return false;
   }
 
@@ -879,8 +884,9 @@ async function updateOrderStatus(order, status, note, extraPatch = {}, options =
   const updatedOrder = await getOrderById(order.order_id);
   if (!options.skipDeliveryNotice) {
     await sendDeliveryCompleteNotice(updatedOrder);
+    return getOrderById(order.order_id);
   }
-  return getOrderById(order.order_id);
+  return updatedOrder;
 }
 
 function isDevicePhotoReady(payload) {
@@ -1484,7 +1490,9 @@ async function handleGetOrder(payload) {
     throw new AppError('订单不存在', 'NOT_FOUND');
   }
 
-  order = await syncOrderProgress(order);
+  order = await syncOrderProgress(order, null, {
+    skipPhotoSync: true
+  });
 
   return {
     order: stripOrderDoc(order),

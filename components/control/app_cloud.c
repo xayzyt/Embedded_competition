@@ -288,6 +288,14 @@ void app_cloud_request_photo_upload(void)
     }
 }
 
+void app_cloud_request_state_publish(void)
+{
+    if (s_cloud.event_group != NULL)
+    {
+        xEventGroupSetBits(s_cloud.event_group, APP_CLOUD_STATE_DIRTY_BIT);
+    }
+}
+
 static void app_cloud_delivery_photo_status_cb(void *user_ctx)
 {
     (void)user_ctx;
@@ -300,7 +308,9 @@ static void app_cloud_task(void *arg)
     (void)arg;
     while (1) {
         EventBits_t bits = xEventGroupWaitBits(s_cloud.event_group,
-            APP_CLOUD_START_MQTT_BIT | APP_CLOUD_PHOTO_UPLOAD_BIT,
+            APP_CLOUD_START_MQTT_BIT |
+                APP_CLOUD_PHOTO_UPLOAD_BIT |
+                APP_CLOUD_STATE_DIRTY_BIT,
             pdTRUE,
             pdFALSE,
             pdMS_TO_TICKS(5000));
@@ -320,12 +330,16 @@ static void app_cloud_task(void *arg)
         {
             xEventGroupSetBits(s_cloud.event_group, APP_CLOUD_START_MQTT_BIT);
         }
-        if ((bits & APP_CLOUD_PHOTO_UPLOAD_BIT) != 0 || bits == 0)
+        if ((bits & (APP_CLOUD_STATE_DIRTY_BIT | APP_CLOUD_PHOTO_UPLOAD_BIT)) != 0 ||
+            bits == 0)
         {
             if (s_cloud.mqtt_connected)
             {
                 app_cloud_publish_current_state();
             }
+        }
+        if ((bits & APP_CLOUD_PHOTO_UPLOAD_BIT) != 0 || bits == 0)
+        {
             app_cloud_publish_pending_photo();
         }
     }
@@ -390,7 +404,7 @@ static void app_cloud_mqtt_event_handler(void *handler_args,
             CONFIG_SKY_MQTT_QOS);
         if (s_cloud.have_last_snapshot)
         {
-            app_cloud_publish_task_snapshot_internal(&s_cloud.last_snapshot);
+            app_cloud_request_state_publish();
         }
         app_cloud_request_photo_upload();
         app_cloud_start_weather_task_once();

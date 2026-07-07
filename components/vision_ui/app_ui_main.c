@@ -486,7 +486,7 @@ static void app_ui_apply_weather_unlocked(void)
     {
         lv_label_set_text(s_main_weather_label, s_main_weather_text);
         lv_obj_set_style_text_color(s_main_weather_label,
-            extreme ? lv_color_hex(0x991B1B) : lv_color_hex(0x0F172A),
+            extreme ? lv_color_hex(0x991B1B) : lv_color_hex(0x15803D),
             0);
     }
     app_ui_update_main_exception_button_unlocked();
@@ -516,7 +516,7 @@ static void app_ui_exception_apply_weather_unlocked(void)
     {
         lv_label_set_text(s_exception_weather_value_label, s_exception_weather_text);
         lv_obj_set_style_text_color(s_exception_weather_value_label,
-            extreme ? lv_color_hex(0x991B1B) : lv_color_hex(0x0F172A),
+            extreme ? lv_color_hex(0x991B1B) : lv_color_hex(0x15803D),
             0);
     }
 }

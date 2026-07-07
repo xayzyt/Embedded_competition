@@ -22,6 +22,7 @@ extern "C" {
 #define APP_CLOUD_MQTT_CONNECTED_BIT   BIT1
 #define APP_CLOUD_START_MQTT_BIT       BIT2
 #define APP_CLOUD_PHOTO_UPLOAD_BIT     BIT3
+#define APP_CLOUD_STATE_DIRTY_BIT      BIT4
 #define APP_CLOUD_TASK_STACK_SIZE      (8 * 1024)
 #define APP_CLOUD_TASK_PRIORITY        5
 #define APP_CLOUD_TOPIC_BUF_LEN        192
@@ -94,6 +95,7 @@ void app_cloud_publish_current_state(void);
 void app_cloud_publish_task_snapshot_internal(const app_task_snapshot_t *snap);
 void app_cloud_publish_pending_photo(void);
 void app_cloud_request_photo_upload(void);
+void app_cloud_request_state_publish(void);
 void app_cloud_on_task_event(app_task_event_t event,
     const app_task_snapshot_t *snap,
     void *user_ctx);
