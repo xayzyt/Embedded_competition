@@ -271,6 +271,9 @@ static void app_ctrl_probe_ready_if_needed(const app_ctrl_cycle_t *cycle,
     taskEXIT_CRITICAL(&s_ctrl_mux);
     state->last_ready_probe_ms = cycle->now_ms;
     (void)app_ch32_link_probe_ready(200);
+    // 探测回复由 UART 回调更新 s_rt；同步刷新本轮快照，
+    // 避免用探测前的 false 错过刚完成的鉴权触发。
+    state->ch32_ready = app_ch32_link_is_ready();
 }
 
 static void app_ctrl_hold_waiting_cargo(app_ctrl_runtime_t *state)

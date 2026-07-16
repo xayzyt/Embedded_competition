@@ -640,10 +640,13 @@ static esp_err_t app_cloud_receive_start_task(const app_cloud_cmd_t *cmd)
     }
     else
     {
+        app_task_snapshot_t started = {0};
+        (void)app_task_peek_snapshot(&started);
         (void)app_delivery_photo_begin_order(s_cloud.current_order_id,
             s_cloud.current_request_id,
             s_cloud.current_order_name,
-            cmd->target_id);
+            cmd->target_id,
+            started.generation);
     }
     return ret;
 }

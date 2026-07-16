@@ -17,6 +17,7 @@ void app_audio_prompt_hw_deinit(void);
 
 bool app_audio_prompt_hw_is_ready(void);
 bool app_audio_prompt_hw_dma_budget_ok(const char *stage);
+esp_err_t app_audio_prompt_hw_set_volume(uint8_t volume);
 esp_err_t app_audio_prompt_hw_write(const uint8_t *data, size_t len);
 
 #ifdef __cplusplus

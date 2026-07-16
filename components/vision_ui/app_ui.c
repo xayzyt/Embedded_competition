@@ -8,6 +8,14 @@
 #include "esp_log.h"
 #include "lvgl.h"
 
+extern bool app_safety_takeover_is_active(void) __attribute__((weak));
+
+static bool app_ui_ordinary_updates_blocked(void)
+{
+    return app_safety_takeover_is_active != NULL &&
+        app_safety_takeover_is_active();
+}
+
 // 相机预览 HUD 与启动页 UI：负责状态文字、对接框、锁定条、抓图按钮和天气保护按钮。
 
 #ifndef BSP_CAMERA_ROTATION
@@ -19,6 +27,8 @@ LV_FONT_DECLARE(font_button_cn)
 LV_FONT_DECLARE(font_safety_title_cn)
 LV_FONT_DECLARE(font_hud_cn)
 LV_FONT_DECLARE(font_title_en)
+LV_FONT_DECLARE(font_cockpit_cn)
+LV_FONT_DECLARE(font_cockpit_title_cn)
 LV_FONT_DECLARE(lv_font_source_han_sans_sc_16_cjk)
 LV_IMAGE_DECLARE(logo);
 
@@ -61,14 +71,12 @@ LV_IMAGE_DECLARE(logo);
 #define UI_TELEMETRY_W          620
 #define UI_TELEMETRY_H          40
 #define UI_TELEMETRY_BOTTOM_MARGIN 44
-#define UI_TASK_INTRO_W         620
-#define UI_TASK_INTRO_H         320
-#define UI_TASK_INTRO_CONTENT_W (UI_TASK_INTRO_W - 112)
-#define UI_TASK_INTRO_STEP_W    152
-#define UI_TASK_INTRO_STEP_H    54
+#define UI_TASK_INTRO_W         860
+#define UI_TASK_INTRO_H         300
+#define UI_TASK_INTRO_NODE_COUNT 3
 #define UI_TRACK_CORNER_COUNT   8
-#define UI_TRACK_LABEL_W        118
-#define UI_TRACK_LABEL_H        24
+#define UI_TRACK_LABEL_W        160
+#define UI_TRACK_LABEL_H        28
 #define UI_CONTEST_NAME         "第九届（2026）全国大学生嵌入式芯片与系统设计竞赛"
 #define UI_TEAM_NAME            "地线引力队"
 #define UI_SAFETY_MARGIN        24
@@ -83,6 +91,18 @@ LV_IMAGE_DECLARE(logo);
 #define UI_SAFETY_BUTTON_W      148
 #define UI_SAFETY_BUTTON_H      44
 #define UI_SAFETY_ALERT_FLASH_MS 1500U
+#define UI_COCKPIT_UPDATE_MS      100U
+#define UI_COCKPIT_MARGIN         18
+#define UI_COCKPIT_TOP_H          52
+#define UI_COCKPIT_BOTTOM_H       58
+#define UI_COCKPIT_BOTTOM_Y       (BSP_LCD_V_RES - UI_COCKPIT_BOTTOM_H - UI_COCKPIT_MARGIN)
+#define UI_COCKPIT_PANEL_W        (BSP_LCD_H_RES - (UI_COCKPIT_MARGIN * 2))
+#define UI_COCKPIT_GATE_W         88
+#define UI_COCKPIT_GATE_START_X   156
+#define UI_COCKPIT_GATE_GAP       4
+#define UI_COCKPIT_GATE_DOT       10
+#define UI_COCKPIT_ARROW_LINES    3
+#define UI_COCKPIT_TAG_LINES      4
 
 static const char *TAG = "app_ui";
 
@@ -106,6 +126,14 @@ static lv_obj_t *s_stop_btn = NULL;
 static lv_obj_t *s_mode_btn = NULL;
 static lv_obj_t *s_mode_label = NULL;
 static lv_obj_t *s_capture = NULL;
+static lv_obj_t *s_cockpit_ai = NULL;
+static lv_obj_t *s_cockpit_gate_dot[APP_UI_COCKPIT_GATE_COUNT] = {0};
+static lv_obj_t *s_cockpit_gate_label[APP_UI_COCKPIT_GATE_COUNT] = {0};
+static lv_obj_t *s_cockpit_bottom = NULL;
+static lv_obj_t *s_cockpit_guidance = NULL;
+static lv_obj_t *s_cockpit_metrics = NULL;
+static lv_obj_t *s_cockpit_tag_line[UI_COCKPIT_TAG_LINES] = {0};
+static lv_obj_t *s_cockpit_arrow_line[UI_COCKPIT_ARROW_LINES] = {0};
 static lv_obj_t *s_flow_panel = NULL;
 static lv_obj_t *s_flow_title = NULL;
 static lv_obj_t *s_flow_title_rule = NULL;
@@ -120,6 +148,8 @@ static lv_obj_t *s_loading_detail = NULL;
 static lv_obj_t *s_loading_bar = NULL;
 static lv_obj_t *s_task_intro_layer = NULL;
 static lv_obj_t *s_task_intro_target = NULL;
+static uint32_t s_task_intro_generation = 0;
+static char s_task_intro_target_text[24] = "TAG 0";
 static lv_obj_t *s_safety_layer = NULL;
 static lv_obj_t *s_safety_banner = NULL;
 static lv_obj_t *s_safety_top_line = NULL;
@@ -174,6 +204,32 @@ static uint8_t s_control_hover_score = 0;
 static uint8_t s_control_ready_pass_count = 0;
 static app_ui_flow_snapshot_t s_control_flow_cache = {0};
 
+#if LVGL_VERSION_MAJOR >= 9
+typedef lv_point_precise_t app_ui_line_point_t;
+#else
+typedef lv_point_t app_ui_line_point_t;
+#endif
+
+static app_ui_line_point_t s_cockpit_tag_points[UI_COCKPIT_TAG_LINES][2] = {0};
+static app_ui_line_point_t s_cockpit_arrow_points[UI_COCKPIT_ARROW_LINES][2] = {0};
+static bool s_preview_hud_visible = false;
+static bool s_cockpit_cache_valid = false;
+static app_ui_cockpit_view_t s_cockpit_cache = {0};
+static uint32_t s_cockpit_last_update_ms = 0;
+static uint32_t s_cockpit_generation = 0;
+static int32_t s_cockpit_last_distance_mm = 0;
+static uint16_t s_cockpit_last_stable_frames = 0;
+static bool s_cockpit_have_last_quad = false;
+static uint16_t s_cockpit_last_quad_tag_id = 0;
+static uint32_t s_cockpit_last_quad_color_hex = 0xFBBF24U;
+static char s_cockpit_target_text[32] = "目标 Tag --";
+static char s_cockpit_ai_text[64] = "模型置信度 -- · 0/3";
+static char s_cockpit_guidance_text[128] = "等待无人机进入画面";
+static char s_cockpit_metrics_text[64] = "距离 -- | 稳定 0/3";
+static char s_cockpit_tag_text[24] = "Tag --";
+
+static void app_ui_cockpit_hide_lines(lv_obj_t *const *lines, int count);
+
 static lv_obj_t *app_ui_get_active_screen(void)
 {
 #if LVGL_VERSION_MAJOR >= 9
@@ -189,7 +245,11 @@ static lv_obj_t *app_ui_get_active_screen(void)
 static void app_ui_style_hud_layer(lv_obj_t *obj)
 {
     lv_obj_set_style_bg_opa(obj, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(obj, 0, 0);
     lv_obj_set_style_border_opa(obj, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_pad_all(obj, 0, 0);
+    lv_obj_set_style_radius(obj, 0, 0);
+    lv_obj_set_style_shadow_width(obj, 0, 0);
     lv_obj_clear_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
 #if LVGL_VERSION_MAJOR >= 9
     lv_obj_remove_flag(obj, LV_OBJ_FLAG_CLICKABLE);
@@ -199,17 +259,14 @@ static void app_ui_style_hud_layer(lv_obj_t *obj)
 }
 static void app_ui_style_top_bar(lv_obj_t *obj)
 {
-    lv_obj_set_style_bg_color(obj, lv_color_hex(0xFFFFFF), 0);
-    lv_obj_set_style_bg_opa(obj, (lv_opa_t)242, 0);
+    lv_obj_set_style_bg_color(obj, lv_color_hex(0x07151C), 0);
+    lv_obj_set_style_bg_opa(obj, (lv_opa_t)188, 0);
     lv_obj_set_style_border_width(obj, 1, 0);
-    lv_obj_set_style_border_color(obj, lv_color_hex(0xC7DCE3), 0);
-    lv_obj_set_style_border_opa(obj, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(obj, 12, 0);
+    lv_obj_set_style_border_color(obj, lv_color_hex(0x67E8F9), 0);
+    lv_obj_set_style_border_opa(obj, (lv_opa_t)90, 0);
+    lv_obj_set_style_radius(obj, 10, 0);
     lv_obj_set_style_pad_all(obj, 0, 0);
-    lv_obj_set_style_shadow_width(obj, 14, 0);
-    lv_obj_set_style_shadow_offset_y(obj, 3, 0);
-    lv_obj_set_style_shadow_color(obj, lv_color_hex(0x8AA6AF), 0);
-    lv_obj_set_style_shadow_opa(obj, (lv_opa_t)46, 0);
+    lv_obj_set_style_shadow_width(obj, 0, 0);
     lv_obj_clear_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
 #if LVGL_VERSION_MAJOR >= 9
     lv_obj_remove_flag(obj, LV_OBJ_FLAG_CLICKABLE);
@@ -225,10 +282,41 @@ static void app_ui_style_top_label(lv_obj_t *obj, lv_color_t color)
     lv_obj_set_style_text_font(obj, &font_loading_cn, 0);
     lv_obj_set_style_text_align(obj, LV_TEXT_ALIGN_LEFT, 0);
 }
+
+static void app_ui_style_cockpit_label(lv_obj_t *obj, lv_color_t color)
+{
+    app_ui_style_top_label(obj, color);
+    lv_obj_set_style_text_font(obj, &font_cockpit_cn, 0);
+}
+
+static void app_ui_style_cockpit_panel(lv_obj_t *obj)
+{
+    app_ui_style_top_bar(obj);
+    lv_obj_clear_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
+#if LVGL_VERSION_MAJOR >= 9
+    lv_obj_remove_flag(obj, LV_OBJ_FLAG_CLICKABLE);
+#else
+    lv_obj_clear_flag(obj, LV_OBJ_FLAG_CLICKABLE);
+#endif
+}
+
+static void app_ui_style_cockpit_line(lv_obj_t *obj, uint8_t width)
+{
+    lv_obj_set_style_line_color(obj, lv_color_hex(0xFBBF24), 0);
+    lv_obj_set_style_line_width(obj, width, 0);
+    lv_obj_set_style_line_rounded(obj, true, 0);
+    lv_obj_set_style_line_opa(obj, LV_OPA_COVER, 0);
+    lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
+#if LVGL_VERSION_MAJOR >= 9
+    lv_obj_remove_flag(obj, LV_OBJ_FLAG_CLICKABLE);
+#else
+    lv_obj_clear_flag(obj, LV_OBJ_FLAG_CLICKABLE);
+#endif
+}
 static void app_ui_style_cross_line(lv_obj_t *obj)
 {
     lv_obj_set_style_bg_color(obj, lv_color_hex(0xA7FFF0), 0);
-    lv_obj_set_style_bg_opa(obj, (lv_opa_t)116, 0);
+    lv_obj_set_style_bg_opa(obj, (lv_opa_t)176, 0);
     lv_obj_set_style_border_width(obj, 0, 0);
     lv_obj_set_style_radius(obj, 0, 0);
 }
@@ -237,7 +325,7 @@ static void app_ui_style_reticle_ring(lv_obj_t *obj)
     lv_obj_set_style_bg_opa(obj, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(obj, 1, 0);
     lv_obj_set_style_border_color(obj, lv_color_hex(0xA7FFF0), 0);
-    lv_obj_set_style_border_opa(obj, (lv_opa_t)86, 0);
+    lv_obj_set_style_border_opa(obj, (lv_opa_t)136, 0);
     lv_obj_set_style_radius(obj, UI_RETICLE_SIZE / 2, 0);
     lv_obj_set_style_pad_all(obj, 0, 0);
     lv_obj_clear_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
@@ -279,7 +367,7 @@ static void app_ui_style_track_label(lv_obj_t *obj)
     lv_obj_set_style_border_color(obj, lv_color_hex(0x63D5FF), 0);
     lv_obj_set_style_border_opa(obj, (lv_opa_t)120, 0);
     lv_obj_set_style_text_color(obj, lv_color_hex(0xE9FBFF), 0);
-    lv_obj_set_style_text_font(obj, &font_loading_cn, 0);
+    lv_obj_set_style_text_font(obj, &font_cockpit_cn, 0);
     lv_obj_set_style_text_align(obj, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_pad_hor(obj, 8, 0);
     lv_obj_set_style_pad_ver(obj, 3, 0);
@@ -470,9 +558,7 @@ static void app_ui_style_loading_detail(lv_obj_t *obj)
 static void app_ui_style_task_intro_layer(lv_obj_t *obj)
 {
     lv_obj_set_size(obj, BSP_LCD_H_RES, BSP_LCD_V_RES);
-    lv_obj_set_style_bg_color(obj, lv_color_hex(0xE7F3F5), 0);
-    lv_obj_set_style_bg_grad_color(obj, lv_color_hex(0xF9FCFD), 0);
-    lv_obj_set_style_bg_grad_dir(obj, LV_GRAD_DIR_VER, 0);
+    lv_obj_set_style_bg_color(obj, lv_color_hex(0x06151D), 0);
     lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(obj, 0, 0);
     lv_obj_set_style_radius(obj, 0, 0);
@@ -482,17 +568,14 @@ static void app_ui_style_task_intro_layer(lv_obj_t *obj)
 static void app_ui_style_task_intro_panel(lv_obj_t *obj)
 {
     lv_obj_set_size(obj, UI_TASK_INTRO_W, UI_TASK_INTRO_H);
-    lv_obj_set_style_bg_color(obj, lv_color_hex(0xF8FCFD), 0);
+    lv_obj_set_style_bg_color(obj, lv_color_hex(0x0B2530), 0);
     lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(obj, 1, 0);
-    lv_obj_set_style_border_color(obj, lv_color_hex(0xB8DCE2), 0);
+    lv_obj_set_style_border_color(obj, lv_color_hex(0x155E75), 0);
     lv_obj_set_style_border_opa(obj, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(obj, 16, 0);
+    lv_obj_set_style_radius(obj, 20, 0);
     lv_obj_set_style_pad_all(obj, 0, 0);
-    lv_obj_set_style_shadow_width(obj, 26, 0);
-    lv_obj_set_style_shadow_offset_y(obj, 8, 0);
-    lv_obj_set_style_shadow_color(obj, lv_color_hex(0x6D8D98), 0);
-    lv_obj_set_style_shadow_opa(obj, (lv_opa_t)72, 0);
+    lv_obj_set_style_shadow_width(obj, 0, 0);
     lv_obj_clear_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
 }
 static void app_ui_style_task_intro_label(lv_obj_t *obj,
@@ -502,7 +585,7 @@ static void app_ui_style_task_intro_label(lv_obj_t *obj,
     lv_obj_set_style_bg_opa(obj, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(obj, 0, 0);
     lv_obj_set_style_text_color(obj, color, 0);
-    lv_obj_set_style_text_font(obj, &font_loading_cn, 0);
+    lv_obj_set_style_text_font(obj, &font_cockpit_cn, 0);
     lv_obj_set_style_text_align(obj, align, 0);
     lv_obj_set_style_pad_all(obj, 0, 0);
 }
@@ -877,58 +960,192 @@ static void app_ui_create_safety_takeover_unlocked(lv_obj_t *scr)
     lv_obj_add_flag(s_safety_layer, LV_OBJ_FLAG_HIDDEN);
 }
 
-static lv_obj_t *app_ui_create_task_intro_step(lv_obj_t *parent,
-    const char *title,
-    const char *detail,
+static void app_ui_task_intro_make_passive(lv_obj_t *obj)
+{
+    lv_obj_clear_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
+#if LVGL_VERSION_MAJOR >= 9
+    lv_obj_remove_flag(obj, LV_OBJ_FLAG_CLICKABLE);
+#else
+    lv_obj_clear_flag(obj, LV_OBJ_FLAG_CLICKABLE);
+#endif
+}
+
+static void app_ui_task_intro_set_label_clip(lv_obj_t *label)
+{
+#if LVGL_VERSION_MAJOR >= 9
+    lv_label_set_long_mode(label, LV_LABEL_LONG_MODE_CLIP);
+#else
+    lv_label_set_long_mode(label, LV_LABEL_LONG_CLIP);
+#endif
+}
+
+static lv_obj_t *app_ui_task_intro_create_shape(lv_obj_t *parent,
     int32_t x,
     int32_t y,
-    lv_color_t accent,
-    lv_color_t fill)
+    int32_t width,
+    int32_t height,
+    lv_color_t color,
+    lv_opa_t opacity,
+    int32_t radius)
 {
-    lv_obj_t *step = lv_obj_create(parent);
-    lv_obj_set_size(step, UI_TASK_INTRO_STEP_W, UI_TASK_INTRO_STEP_H);
-    lv_obj_set_style_bg_color(step, fill, 0);
-    lv_obj_set_style_bg_opa(step, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(step, 1, 0);
-    lv_obj_set_style_border_color(step, accent, 0);
-    lv_obj_set_style_border_opa(step, (lv_opa_t)120, 0);
-    lv_obj_set_style_radius(step, 10, 0);
-    lv_obj_set_style_pad_all(step, 0, 0);
-    lv_obj_clear_flag(step, LV_OBJ_FLAG_SCROLLABLE);
-#if LVGL_VERSION_MAJOR >= 9
-    lv_obj_remove_flag(step, LV_OBJ_FLAG_CLICKABLE);
-#else
-    lv_obj_clear_flag(step, LV_OBJ_FLAG_CLICKABLE);
-#endif
-    lv_obj_align(step, LV_ALIGN_TOP_LEFT, x, y);
+    lv_obj_t *shape = lv_obj_create(parent);
+    lv_obj_set_size(shape, width, height);
+    lv_obj_set_pos(shape, x, y);
+    lv_obj_set_style_bg_color(shape, color, 0);
+    lv_obj_set_style_bg_opa(shape, opacity, 0);
+    lv_obj_set_style_border_width(shape, 0, 0);
+    lv_obj_set_style_radius(shape, radius, 0);
+    lv_obj_set_style_pad_all(shape, 0, 0);
+    app_ui_task_intro_make_passive(shape);
+    return shape;
+}
 
-    lv_obj_t *dot = lv_obj_create(step);
-    lv_obj_set_size(dot, 9, 9);
-    lv_obj_set_style_bg_color(dot, accent, 0);
-    lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(dot, 0, 0);
-    lv_obj_set_style_radius(dot, 5, 0);
-    lv_obj_set_style_pad_all(dot, 0, 0);
-    lv_obj_clear_flag(dot, LV_OBJ_FLAG_SCROLLABLE);
-#if LVGL_VERSION_MAJOR >= 9
-    lv_obj_remove_flag(dot, LV_OBJ_FLAG_CLICKABLE);
-#else
-    lv_obj_clear_flag(dot, LV_OBJ_FLAG_CLICKABLE);
-#endif
-    lv_obj_align(dot, LV_ALIGN_TOP_LEFT, 16, 14);
+static void app_ui_create_task_intro_unlocked(lv_obj_t *scr)
+{
+    if (scr == NULL || s_task_intro_layer != NULL)
+    {
+        return;
+    }
 
-    lv_obj_t *title_label = lv_label_create(step);
-    app_ui_style_task_intro_label(title_label, lv_color_hex(0x334155), LV_TEXT_ALIGN_LEFT);
-    lv_obj_set_width(title_label, 94);
-    lv_label_set_text(title_label, title);
-    lv_obj_align(title_label, LV_ALIGN_TOP_LEFT, 33, 8);
+    s_task_intro_layer = lv_obj_create(scr);
+    app_ui_style_task_intro_layer(s_task_intro_layer);
+    app_ui_task_intro_make_passive(s_task_intro_layer);
+    lv_obj_align(s_task_intro_layer, LV_ALIGN_CENTER, 0, 0);
 
-    lv_obj_t *detail_label = lv_label_create(step);
-    app_ui_style_task_intro_label(detail_label, accent, LV_TEXT_ALIGN_LEFT);
-    lv_obj_set_width(detail_label, 118);
-    lv_label_set_text(detail_label, detail);
-    lv_obj_align(detail_label, LV_ALIGN_TOP_LEFT, 33, 29);
-    return step;
+    lv_obj_t *panel = lv_obj_create(s_task_intro_layer);
+    app_ui_style_task_intro_panel(panel);
+    app_ui_task_intro_make_passive(panel);
+    lv_obj_align(panel, LV_ALIGN_CENTER, 0, 0);
+
+    lv_obj_t *mode_chip = lv_obj_create(panel);
+    lv_obj_set_size(mode_chip, 120, 32);
+    lv_obj_set_pos(mode_chip, 48, 28);
+    lv_obj_set_style_bg_color(mode_chip, lv_color_hex(0x0F3D46), 0);
+    lv_obj_set_style_bg_opa(mode_chip, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(mode_chip, 1, 0);
+    lv_obj_set_style_border_color(mode_chip, lv_color_hex(0x2DD4BF), 0);
+    lv_obj_set_style_border_opa(mode_chip, (lv_opa_t)120, 0);
+    lv_obj_set_style_radius(mode_chip, 16, 0);
+    lv_obj_set_style_pad_all(mode_chip, 0, 0);
+    app_ui_task_intro_make_passive(mode_chip);
+
+    lv_obj_t *mode_label = lv_label_create(mode_chip);
+    app_ui_style_task_intro_label(mode_label, lv_color_hex(0xA7F3D0), LV_TEXT_ALIGN_CENTER);
+    lv_obj_set_size(mode_label, 104, 22);
+    app_ui_task_intro_set_label_clip(mode_label);
+    lv_label_set_text(mode_label, "普通配送");
+    lv_obj_center(mode_label);
+
+    (void)app_ui_task_intro_create_shape(panel,
+        48,
+        82,
+        4,
+        72,
+        lv_color_hex(0x2DD4BF),
+        LV_OPA_COVER,
+        2);
+
+    lv_obj_t *title = lv_label_create(panel);
+    app_ui_style_task_intro_label(title, lv_color_hex(0xF8FAFC), LV_TEXT_ALIGN_LEFT);
+    lv_obj_set_style_text_font(title, &font_cockpit_title_cn, 0);
+    lv_obj_set_size(title, 470, 34);
+    app_ui_task_intro_set_label_clip(title);
+    lv_label_set_text(title, "任务已接收");
+    lv_obj_set_pos(title, 68, 82);
+
+    lv_obj_t *detail = lv_label_create(panel);
+    app_ui_style_task_intro_label(detail, lv_color_hex(0xA5C4CC), LV_TEXT_ALIGN_LEFT);
+    lv_obj_set_size(detail, 480, 24);
+    app_ui_task_intro_set_label_clip(detail);
+    lv_label_set_text(detail, "目标已锁定，正在进入识别画面");
+    lv_obj_set_pos(detail, 68, 128);
+
+    (void)app_ui_task_intro_create_shape(panel,
+        574,
+        62,
+        1,
+        106,
+        lv_color_hex(0x1E5261),
+        (lv_opa_t)180,
+        0);
+
+    lv_obj_t *target_caption = lv_label_create(panel);
+    app_ui_style_task_intro_label(target_caption, lv_color_hex(0x94A3B8), LV_TEXT_ALIGN_LEFT);
+    lv_obj_set_size(target_caption, 190, 22);
+    app_ui_task_intro_set_label_clip(target_caption);
+    lv_label_set_text(target_caption, "本次目标");
+    lv_obj_set_pos(target_caption, 622, 78);
+
+    s_task_intro_target = lv_label_create(panel);
+    app_ui_style_task_intro_label(s_task_intro_target, lv_color_hex(0x67E8F9), LV_TEXT_ALIGN_LEFT);
+    lv_obj_set_style_text_font(s_task_intro_target, &font_title_en, 0);
+    lv_obj_set_size(s_task_intro_target, 230, 50);
+    app_ui_task_intro_set_label_clip(s_task_intro_target);
+    lv_label_set_text_static(s_task_intro_target, s_task_intro_target_text);
+    lv_obj_set_pos(s_task_intro_target, 620, 110);
+
+    const int32_t node_x[UI_TASK_INTRO_NODE_COUNT] = {96, 430, 764};
+    const char *const node_text[UI_TASK_INTRO_NODE_COUNT] = {
+        "任务接收",
+        "目标锁定",
+        "进入识别",
+    };
+    (void)app_ui_task_intro_create_shape(panel,
+        node_x[0] + 6,
+        219,
+        node_x[1] - node_x[0] - 12,
+        2,
+        lv_color_hex(0x34D399),
+        (lv_opa_t)210,
+        1);
+    (void)app_ui_task_intro_create_shape(panel,
+        node_x[1] + 6,
+        219,
+        node_x[2] - node_x[1] - 14,
+        2,
+        lv_color_hex(0x22D3EE),
+        (lv_opa_t)180,
+        1);
+
+    for (int i = 0; i < UI_TASK_INTRO_NODE_COUNT; i++)
+    {
+        const bool active = i == (UI_TASK_INTRO_NODE_COUNT - 1);
+        const int32_t node_size = active ? 16 : 12;
+        lv_obj_t *node = app_ui_task_intro_create_shape(panel,
+            node_x[i] - (node_size / 2),
+            220 - (node_size / 2),
+            node_size,
+            node_size,
+            active ? lv_color_hex(0x0B2530) : lv_color_hex(0x34D399),
+            LV_OPA_COVER,
+            node_size / 2);
+        if (active)
+        {
+            lv_obj_set_style_border_width(node, 2, 0);
+            lv_obj_set_style_border_color(node, lv_color_hex(0x67E8F9), 0);
+            lv_obj_set_style_border_opa(node, LV_OPA_COVER, 0);
+            lv_obj_t *inner = app_ui_task_intro_create_shape(node,
+                3,
+                3,
+                6,
+                6,
+                lv_color_hex(0x67E8F9),
+                LV_OPA_COVER,
+                3);
+            lv_obj_center(inner);
+        }
+
+        lv_obj_t *node_label = lv_label_create(panel);
+        app_ui_style_task_intro_label(node_label,
+            active ? lv_color_hex(0x67E8F9) : lv_color_hex(0xA7F3D0),
+            LV_TEXT_ALIGN_CENTER);
+        lv_obj_set_size(node_label, 160, 24);
+        app_ui_task_intro_set_label_clip(node_label);
+        lv_label_set_text(node_label, node_text[i]);
+        lv_obj_set_pos(node_label, node_x[i] - 80, 242);
+    }
+
+    lv_obj_add_flag(s_task_intro_layer, LV_OBJ_FLAG_HIDDEN);
 }
 
 static void app_ui_set_task_intro_target_unlocked(uint16_t target_id)
@@ -937,16 +1154,11 @@ static void app_ui_set_task_intro_target_unlocked(uint16_t target_id)
     {
         return;
     }
-    char target_buf[32] = {0};
-    if (target_id != 0U)
-    {
-        snprintf(target_buf, sizeof(target_buf), "TAG %u", (unsigned)target_id);
-    }
-    else
-    {
-        snprintf(target_buf, sizeof(target_buf), "TAG --");
-    }
-    lv_label_set_text(s_task_intro_target, target_buf);
+    snprintf(s_task_intro_target_text,
+        sizeof(s_task_intro_target_text),
+        "TAG %u",
+        (unsigned)target_id);
+    lv_obj_invalidate(s_task_intro_target);
 }
 
 /* ---------- 文本转换与流程面板 ---------- */
@@ -2015,6 +2227,55 @@ static void app_ui_map_bbox_to_screen(const app_vision_result_t *vision,
         *h = BSP_LCD_V_RES - *y;
     }
 }
+
+static bool app_ui_map_gray_point_to_screen(const app_vision_result_t *vision,
+    int32_t gray_x,
+    int32_t gray_y,
+    app_ui_line_point_t *out)
+{
+    if (vision == NULL || out == NULL)
+    {
+        return false;
+    }
+    const int32_t gray_w = vision->gray_width > 0U ? (int32_t)vision->gray_width : HUD_SRC_W;
+    const int32_t gray_h = vision->gray_height > 0U ? (int32_t)vision->gray_height : HUD_SRC_H;
+    const int32_t src_w = vision->src_width > 0U ? (int32_t)vision->src_width : gray_w;
+    const int32_t src_h = vision->src_height > 0U ? (int32_t)vision->src_height : gray_h;
+    const int32_t crop_w = vision->crop_w > 0U ? (int32_t)vision->crop_w : gray_w;
+    const int32_t crop_h = vision->crop_h > 0U ? (int32_t)vision->crop_h : gray_h;
+    const float src_x = (float)vision->crop_x +
+        (float)app_ui_clamp_i32(gray_x, 0, gray_w) * (float)crop_w / (float)gray_w;
+    const float src_y = (float)vision->crop_y +
+        (float)app_ui_clamp_i32(gray_y, 0, gray_h) * (float)crop_h / (float)gray_h;
+
+    float rotated_x = 0.0f;
+    float rotated_y = 0.0f;
+    app_ui_transform_src_point(src_x,
+        src_y,
+        src_w,
+        src_h,
+        &rotated_x,
+        &rotated_y);
+
+    int32_t rotated_w = src_w;
+    int32_t rotated_h = src_h;
+    app_ui_get_rotated_dims(src_w, src_h, &rotated_w, &rotated_h);
+    int32_t fit_w = rotated_w;
+    int32_t fit_h = rotated_h;
+    app_ui_calc_fit_dims(rotated_w, rotated_h, &fit_w, &fit_h);
+    const int32_t offset_x = (BSP_LCD_H_RES - fit_w) / 2;
+    const int32_t offset_y = (BSP_LCD_V_RES - fit_h) / 2;
+    out->x = app_ui_clamp_i32(offset_x +
+        (int32_t)(rotated_x * (float)fit_w / (float)rotated_w + 0.5f),
+        0,
+        BSP_LCD_H_RES - 1);
+    out->y = app_ui_clamp_i32(offset_y +
+        (int32_t)(rotated_y * (float)fit_h / (float)rotated_h + 0.5f),
+        0,
+        BSP_LCD_V_RES - 1);
+    return true;
+}
+
 // 锁定条表示稳定帧数/ready 状态，给用户一个靠近完成度反馈。
 static void app_ui_update_lock_bar(const app_dock_judge_result_t *dock)
 {
@@ -2168,6 +2429,29 @@ bool app_ui_create(void)
         lv_obj_align(s_hud_layer, LV_ALIGN_CENTER, 0, 0);
     }
     app_ui_create_safety_takeover_unlocked(scr);
+    app_ui_create_task_intro_unlocked(scr);
+    for (int i = 0; i < UI_COCKPIT_TAG_LINES; i++)
+    {
+        if (s_cockpit_tag_line[i] == NULL)
+        {
+            s_cockpit_tag_line[i] = lv_line_create(s_hud_layer);
+            app_ui_style_cockpit_line(s_cockpit_tag_line[i], 3);
+            lv_obj_set_size(s_cockpit_tag_line[i], BSP_LCD_H_RES, BSP_LCD_V_RES);
+            lv_obj_set_pos(s_cockpit_tag_line[i], 0, 0);
+            lv_line_set_points(s_cockpit_tag_line[i], s_cockpit_tag_points[i], 2);
+        }
+    }
+    for (int i = 0; i < UI_COCKPIT_ARROW_LINES; i++)
+    {
+        if (s_cockpit_arrow_line[i] == NULL)
+        {
+            s_cockpit_arrow_line[i] = lv_line_create(s_hud_layer);
+            app_ui_style_cockpit_line(s_cockpit_arrow_line[i], 4);
+            lv_obj_set_size(s_cockpit_arrow_line[i], BSP_LCD_H_RES, BSP_LCD_V_RES);
+            lv_obj_set_pos(s_cockpit_arrow_line[i], 0, 0);
+            lv_line_set_points(s_cockpit_arrow_line[i], s_cockpit_arrow_points[i], 2);
+        }
+    }
     if (s_track_box == NULL)
     {
         s_track_box = lv_obj_create(s_hud_layer);
@@ -2184,8 +2468,9 @@ bool app_ui_create(void)
     {
         s_track_label = lv_label_create(s_hud_layer);
         app_ui_style_track_label(s_track_label);
+        lv_obj_set_size(s_track_label, UI_TRACK_LABEL_W, UI_TRACK_LABEL_H);
         app_ui_label_set_dots(s_track_label);
-        lv_label_set_text(s_track_label, "\u6807\u7B7E");
+        lv_label_set_text_static(s_track_label, s_cockpit_tag_text);
     }
     if (s_reticle_ring == NULL)
     {
@@ -2208,6 +2493,7 @@ bool app_ui_create(void)
         lv_obj_set_size(s_cross_v, 2, 48);
         lv_obj_align(s_cross_v, LV_ALIGN_CENTER, 0, 0);
     }
+    app_ui_move_foreground(s_track_label);
     const int32_t seg_w = 28;
     const int32_t seg_h = 8;
     const int32_t seg_gap = 6;
@@ -2308,8 +2594,8 @@ bool app_ui_create(void)
     {
         s_top_bar = lv_obj_create(scr);
         app_ui_style_top_bar(s_top_bar);
-        lv_obj_set_size(s_top_bar, UI_TOP_BAR_W, UI_TOP_BAR_H);
-        lv_obj_set_pos(s_top_bar, UI_TOP_BAR_X, UI_TOP_BAR_Y);
+        lv_obj_set_size(s_top_bar, UI_COCKPIT_PANEL_W, UI_COCKPIT_TOP_H);
+        lv_obj_set_pos(s_top_bar, UI_COCKPIT_MARGIN, UI_COCKPIT_MARGIN);
     }
     if (s_auth == NULL)
     {
@@ -2322,11 +2608,48 @@ bool app_ui_create(void)
     if (s_status == NULL)
     {
         s_status = lv_label_create(s_top_bar != NULL ? s_top_bar : scr);
-        app_ui_style_top_label(s_status, lv_color_hex(0x0F172A));
-        lv_obj_set_width(s_status, UI_HUD_STATUS_W);
+        app_ui_style_cockpit_label(s_status, lv_color_hex(0xF8FAFC));
+        lv_obj_set_width(s_status, 136);
         app_ui_label_set_dots(s_status);
-        lv_label_set_text(s_status, "任务：系统启动");
-        lv_obj_set_pos(s_status, 18, 13);
+        lv_label_set_text_static(s_status, s_cockpit_target_text);
+        lv_obj_set_pos(s_status, 16, 14);
+    }
+    static const char *const cockpit_gate_names[APP_UI_COCKPIT_GATE_COUNT] = {
+        "任务", "AI", "身份", "位置", "环境",
+    };
+    for (int i = 0; i < APP_UI_COCKPIT_GATE_COUNT; i++)
+    {
+        const int32_t gate_x = UI_COCKPIT_GATE_START_X +
+            i * (UI_COCKPIT_GATE_W + UI_COCKPIT_GATE_GAP);
+        if (s_cockpit_gate_dot[i] == NULL)
+        {
+            s_cockpit_gate_dot[i] = lv_obj_create(s_top_bar);
+            lv_obj_set_size(s_cockpit_gate_dot[i], UI_COCKPIT_GATE_DOT, UI_COCKPIT_GATE_DOT);
+            lv_obj_set_style_bg_color(s_cockpit_gate_dot[i], lv_color_hex(0x94A3B8), 0);
+            lv_obj_set_style_bg_opa(s_cockpit_gate_dot[i], LV_OPA_COVER, 0);
+            lv_obj_set_style_border_width(s_cockpit_gate_dot[i], 0, 0);
+            lv_obj_set_style_radius(s_cockpit_gate_dot[i], UI_COCKPIT_GATE_DOT / 2, 0);
+            lv_obj_set_style_pad_all(s_cockpit_gate_dot[i], 0, 0);
+            lv_obj_clear_flag(s_cockpit_gate_dot[i], LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_set_pos(s_cockpit_gate_dot[i], gate_x, 21);
+        }
+        if (s_cockpit_gate_label[i] == NULL)
+        {
+            s_cockpit_gate_label[i] = lv_label_create(s_top_bar);
+            app_ui_style_cockpit_label(s_cockpit_gate_label[i], lv_color_hex(0xE2E8F0));
+            lv_obj_set_width(s_cockpit_gate_label[i], UI_COCKPIT_GATE_W - 18);
+            lv_label_set_text(s_cockpit_gate_label[i], cockpit_gate_names[i]);
+            lv_obj_set_pos(s_cockpit_gate_label[i], gate_x + 16, 14);
+        }
+    }
+    if (s_cockpit_ai == NULL)
+    {
+        s_cockpit_ai = lv_label_create(s_top_bar);
+        app_ui_style_cockpit_label(s_cockpit_ai, lv_color_hex(0xE2E8F0));
+        lv_obj_set_width(s_cockpit_ai, 330);
+        lv_obj_set_style_text_align(s_cockpit_ai, LV_TEXT_ALIGN_RIGHT, 0);
+        lv_label_set_text_static(s_cockpit_ai, s_cockpit_ai_text);
+        lv_obj_align(s_cockpit_ai, LV_ALIGN_RIGHT_MID, -16, 0);
     }
     if (s_vision == NULL)
     {
@@ -2355,6 +2678,31 @@ bool app_ui_create(void)
         app_ui_label_set_dots(s_hint);
         lv_label_set_text(s_hint, "标签：等待识别");
         lv_obj_set_pos(s_hint, 526, 13);
+    }
+    if (s_cockpit_bottom == NULL)
+    {
+        s_cockpit_bottom = lv_obj_create(s_hud_layer != NULL ? s_hud_layer : scr);
+        app_ui_style_cockpit_panel(s_cockpit_bottom);
+        lv_obj_set_size(s_cockpit_bottom, UI_COCKPIT_PANEL_W, UI_COCKPIT_BOTTOM_H);
+        lv_obj_set_pos(s_cockpit_bottom, UI_COCKPIT_MARGIN, UI_COCKPIT_BOTTOM_Y);
+    }
+    if (s_cockpit_guidance == NULL)
+    {
+        s_cockpit_guidance = lv_label_create(s_cockpit_bottom);
+        app_ui_style_cockpit_label(s_cockpit_guidance, lv_color_hex(0xF8FAFC));
+        lv_obj_set_width(s_cockpit_guidance, 570);
+        app_ui_label_set_dots(s_cockpit_guidance);
+        lv_label_set_text_static(s_cockpit_guidance, s_cockpit_guidance_text);
+        lv_obj_align(s_cockpit_guidance, LV_ALIGN_LEFT_MID, 18, 0);
+    }
+    if (s_cockpit_metrics == NULL)
+    {
+        s_cockpit_metrics = lv_label_create(s_cockpit_bottom);
+        app_ui_style_cockpit_label(s_cockpit_metrics, lv_color_hex(0xCFFAFE));
+        lv_obj_set_width(s_cockpit_metrics, 360);
+        lv_obj_set_style_text_align(s_cockpit_metrics, LV_TEXT_ALIGN_RIGHT, 0);
+        lv_label_set_text_static(s_cockpit_metrics, s_cockpit_metrics_text);
+        lv_obj_align(s_cockpit_metrics, LV_ALIGN_RIGHT_MID, -18, 0);
     }
     if (s_cap_btn == NULL)
     {
@@ -2413,6 +2761,7 @@ bool app_ui_create(void)
     app_ui_move_foreground(s_vision);
     app_ui_move_foreground(s_hint);
     app_ui_move_foreground(s_flow_panel);
+    app_ui_move_foreground(s_cockpit_bottom);
     app_ui_move_foreground(s_auth);
     app_ui_move_foreground(s_mode_btn);
     app_ui_move_foreground(s_cap_btn);
@@ -2517,142 +2866,36 @@ void app_ui_hide_loading(void)
     lv_refr_now(NULL);
     bsp_display_unlock();
 }
-// 远程任务进入预览前短暂停留，让评委先看到任务链路已启动。
-bool app_ui_show_task_intro(uint16_t target_id)
+// 普通任务进入预览前短暂停留，只展示当前任务的真实目标。
+bool app_ui_show_task_intro(const app_ui_task_intro_view_t *view)
 {
+    if (view == NULL ||
+        view->generation == 0U ||
+        !view->target_valid ||
+        app_ui_ordinary_updates_blocked())
+    {
+        return false;
+    }
+    if (s_task_intro_layer == NULL || s_task_intro_target == NULL)
+    {
+        return false;
+    }
     if (!bsp_display_lock(UI_LOCK_BOOT_MS))
     {
         return false;
     }
-
-    lv_obj_t *scr = app_ui_get_active_screen();
-    if (s_task_intro_layer == NULL)
+    if (app_ui_ordinary_updates_blocked())
     {
-        s_task_intro_layer = lv_obj_create(scr);
-        app_ui_style_task_intro_layer(s_task_intro_layer);
-        lv_obj_align(s_task_intro_layer, LV_ALIGN_CENTER, 0, 0);
-
-        lv_obj_t *bg_line = lv_obj_create(s_task_intro_layer);
-        lv_obj_set_size(bg_line, BSP_LCD_H_RES - 96, 2);
-        lv_obj_set_style_bg_color(bg_line, lv_color_hex(0x79B6C2), 0);
-        lv_obj_set_style_bg_opa(bg_line, (lv_opa_t)72, 0);
-        lv_obj_set_style_border_width(bg_line, 0, 0);
-        lv_obj_set_style_radius(bg_line, 1, 0);
-        lv_obj_set_style_pad_all(bg_line, 0, 0);
-        lv_obj_clear_flag(bg_line, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_align(bg_line, LV_ALIGN_CENTER, 0, 52);
-
-        lv_obj_t *panel = lv_obj_create(s_task_intro_layer);
-        app_ui_style_task_intro_panel(panel);
-        lv_obj_align(panel, LV_ALIGN_CENTER, 0, 0);
-
-        lv_obj_t *accent = lv_obj_create(panel);
-        lv_obj_set_size(accent, UI_TASK_INTRO_CONTENT_W, 5);
-        lv_obj_set_style_bg_color(accent, lv_color_hex(0x0F766E), 0);
-        lv_obj_set_style_bg_grad_color(accent, lv_color_hex(0x2563EB), 0);
-        lv_obj_set_style_bg_grad_dir(accent, LV_GRAD_DIR_HOR, 0);
-        lv_obj_set_style_bg_opa(accent, LV_OPA_COVER, 0);
-        lv_obj_set_style_border_width(accent, 0, 0);
-        lv_obj_set_style_radius(accent, 2, 0);
-        lv_obj_set_style_pad_all(accent, 0, 0);
-        lv_obj_clear_flag(accent, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_align(accent, LV_ALIGN_TOP_MID, 0, 0);
-
-        lv_obj_t *eyebrow = lv_label_create(panel);
-        app_ui_style_task_intro_label(eyebrow, lv_color_hex(0x0F766E), LV_TEXT_ALIGN_LEFT);
-        lv_obj_set_width(eyebrow, 210);
-        lv_label_set_text(eyebrow, "\u4E91\u7AEF\u8C03\u5EA6");
-        lv_obj_align(eyebrow, LV_ALIGN_TOP_LEFT, 56, 24);
-
-        lv_obj_t *ready_chip = lv_label_create(panel);
-        app_ui_style_task_intro_label(ready_chip, lv_color_hex(0x2563EB), LV_TEXT_ALIGN_RIGHT);
-        lv_obj_set_width(ready_chip, 180);
-        lv_label_set_text(ready_chip, "\u4EFB\u52A1\u5DF2\u5C31\u7EEA");
-        lv_obj_align(ready_chip, LV_ALIGN_TOP_RIGHT, -56, 24);
-
-        lv_obj_t *title = lv_label_create(panel);
-        app_ui_style_task_intro_label(title, lv_color_hex(0x0F172A), LV_TEXT_ALIGN_LEFT);
-        lv_obj_set_style_text_font(title, &font_main_title_cn, 0);
-        lv_obj_set_width(title, UI_TASK_INTRO_CONTENT_W);
-        lv_label_set_text(title, "\u4E91\u7AEF\u4EFB\u52A1\u5DF2\u63A5\u6536");
-        lv_obj_align(title, LV_ALIGN_TOP_LEFT, 56, 52);
-
-        lv_obj_t *target_card = lv_obj_create(panel);
-        lv_obj_set_size(target_card, UI_TASK_INTRO_CONTENT_W, 78);
-        lv_obj_set_style_bg_color(target_card, lv_color_hex(0x073B42), 0);
-        lv_obj_set_style_bg_grad_color(target_card, lv_color_hex(0x0F766E), 0);
-        lv_obj_set_style_bg_grad_dir(target_card, LV_GRAD_DIR_HOR, 0);
-        lv_obj_set_style_bg_opa(target_card, LV_OPA_COVER, 0);
-        lv_obj_set_style_border_width(target_card, 1, 0);
-        lv_obj_set_style_border_color(target_card, lv_color_hex(0xA7F3D0), 0);
-        lv_obj_set_style_border_opa(target_card, LV_OPA_COVER, 0);
-        lv_obj_set_style_radius(target_card, 8, 0);
-        lv_obj_set_style_pad_all(target_card, 0, 0);
-        lv_obj_clear_flag(target_card, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_align(target_card, LV_ALIGN_TOP_MID, 0, 96);
-
-        lv_obj_t *target_accent = lv_obj_create(target_card);
-        lv_obj_set_size(target_accent, 5, 46);
-        lv_obj_set_style_bg_color(target_accent, lv_color_hex(0xF59E0B), 0);
-        lv_obj_set_style_bg_opa(target_accent, LV_OPA_COVER, 0);
-        lv_obj_set_style_border_width(target_accent, 0, 0);
-        lv_obj_set_style_radius(target_accent, 3, 0);
-        lv_obj_set_style_pad_all(target_accent, 0, 0);
-        lv_obj_clear_flag(target_accent, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_align(target_accent, LV_ALIGN_LEFT_MID, 16, 0);
-
-        lv_obj_t *target_caption = lv_label_create(target_card);
-        app_ui_style_task_intro_label(target_caption, lv_color_hex(0xCFFAFE), LV_TEXT_ALIGN_LEFT);
-        lv_obj_set_width(target_caption, 150);
-        lv_label_set_text(target_caption, "\u76EE\u6807\u6807\u7B7E");
-        lv_obj_align(target_caption, LV_ALIGN_LEFT_MID, 34, -11);
-
-        lv_obj_t *target_hint = lv_label_create(target_card);
-        app_ui_style_task_intro_label(target_hint, lv_color_hex(0xBAE6FD), LV_TEXT_ALIGN_LEFT);
-        lv_obj_set_width(target_hint, 230);
-        lv_label_set_text(target_hint, "\u5B9A\u4F4D\u63A5\u5165\u89C6\u89C9");
-        lv_obj_align(target_hint, LV_ALIGN_LEFT_MID, 34, 15);
-
-        s_task_intro_target = lv_label_create(target_card);
-        app_ui_style_task_intro_label(s_task_intro_target, lv_color_hex(0xFFFFFF), LV_TEXT_ALIGN_RIGHT);
-        lv_obj_set_style_text_font(s_task_intro_target, &font_main_title_cn, 0);
-        lv_obj_set_width(s_task_intro_target, 220);
-        lv_obj_align(s_task_intro_target, LV_ALIGN_RIGHT_MID, -24, 0);
-
-        app_ui_create_task_intro_step(panel,
-            "\u901A\u4FE1",
-            "\u5DF2\u8FDE\u63A5",
-            56,
-            194,
-            lv_color_hex(0x0F766E),
-            lv_color_hex(0xF0FDF4));
-        app_ui_create_task_intro_step(panel,
-            "\u5929\u6C14",
-            "\u6B63\u5E38",
-            234,
-            194,
-            lv_color_hex(0x16A34A),
-            lv_color_hex(0xF0FDF4));
-        app_ui_create_task_intro_step(panel,
-            "\u89C6\u89C9",
-            "\u542F\u52A8\u4E2D",
-            412,
-            194,
-            lv_color_hex(0x2563EB),
-            lv_color_hex(0xEFF6FF));
-
-        lv_obj_t *footer = lv_label_create(panel);
-        app_ui_style_task_intro_label(footer, lv_color_hex(0x64748B), LV_TEXT_ALIGN_CENTER);
-        lv_obj_set_width(footer, UI_TASK_INTRO_CONTENT_W);
-        lv_label_set_text(footer, "\u89C6\u89C9\u542F\u52A8\u4E2D  \u7B49\u5F85\u8FDB\u5165\u753B\u9762");
-        lv_obj_align(footer, LV_ALIGN_BOTTOM_MID, 0, -20);
-    }
-    else
-    {
-        lv_obj_clear_flag(s_task_intro_layer, LV_OBJ_FLAG_HIDDEN);
+        bsp_display_unlock();
+        return false;
     }
 
-    app_ui_set_task_intro_target_unlocked(target_id);
+    if (s_task_intro_generation != view->generation)
+    {
+        s_task_intro_generation = view->generation;
+        app_ui_set_task_intro_target_unlocked(view->target_id);
+    }
+    lv_obj_clear_flag(s_task_intro_layer, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(s_task_intro_layer);
     lv_refr_now(NULL);
     bsp_display_unlock();
@@ -2661,7 +2904,7 @@ bool app_ui_show_task_intro(uint16_t target_id)
 
 void app_ui_hide_task_intro(void)
 {
-    if (s_task_intro_layer == NULL)
+    if (s_task_intro_layer == NULL || s_task_intro_generation == 0U)
     {
         return;
     }
@@ -2672,6 +2915,7 @@ void app_ui_hide_task_intro(void)
     if (s_task_intro_layer != NULL)
     {
         lv_obj_add_flag(s_task_intro_layer, LV_OBJ_FLAG_HIDDEN);
+        s_task_intro_generation = 0U;
     }
     lv_refr_now(NULL);
     bsp_display_unlock();
@@ -2679,24 +2923,73 @@ void app_ui_hide_task_intro(void)
 
 void app_ui_set_preview_hud_visible(bool visible)
 {
+    if (visible && app_ui_ordinary_updates_blocked())
+    {
+        return;
+    }
+    if (!visible)
+    {
+        s_preview_hud_visible = false;
+    }
     if (!bsp_display_lock(UI_LOCK_SHORT_MS))
     {
         return;
     }
+    if (visible && app_ui_ordinary_updates_blocked())
+    {
+        bsp_display_unlock();
+        return;
+    }
     app_ui_set_hidden(s_hud_layer, !visible);
     app_ui_set_hidden(s_top_bar, !visible);
-    app_ui_set_hidden(s_dock, !visible);
-    app_ui_set_hidden(s_flow_panel, !visible);
-    for (int i = 0; i < HUD_LOCK_SEG_COUNT; i++)
-    {
-        app_ui_set_hidden(s_lock_seg[i], !visible);
-    }
     if (visible)
     {
+        app_ui_set_hidden(s_status, false);
+        app_ui_set_hidden(s_cockpit_ai, false);
+        app_ui_set_hidden(s_vision, true);
+        app_ui_set_hidden(s_hint, true);
+        app_ui_set_hidden(s_dock, true);
+        app_ui_set_hidden(s_flow_panel, true);
+        app_ui_set_hidden(s_auth, true);
+        for (int i = 0; i < HUD_LOCK_SEG_COUNT; i++)
+        {
+            app_ui_set_hidden(s_lock_seg[i], true);
+        }
+        strlcpy(s_cockpit_target_text, "目标 Tag --", sizeof(s_cockpit_target_text));
+        strlcpy(s_cockpit_ai_text, "模型置信度 -- · 0/--", sizeof(s_cockpit_ai_text));
+        strlcpy(s_cockpit_guidance_text, "等待无人机进入画面", sizeof(s_cockpit_guidance_text));
+        strlcpy(s_cockpit_metrics_text, "距离 -- | 稳定 0/--", sizeof(s_cockpit_metrics_text));
+        strlcpy(s_cockpit_tag_text, "Tag --", sizeof(s_cockpit_tag_text));
+        lv_label_set_text_static(s_status, s_cockpit_target_text);
+        lv_label_set_text_static(s_cockpit_ai, s_cockpit_ai_text);
+        lv_label_set_text_static(s_cockpit_guidance, s_cockpit_guidance_text);
+        lv_label_set_text_static(s_cockpit_metrics, s_cockpit_metrics_text);
+        lv_label_set_text_static(s_track_label, s_cockpit_tag_text);
+        app_ui_cockpit_hide_lines(s_cockpit_tag_line, UI_COCKPIT_TAG_LINES);
+        app_ui_cockpit_hide_lines(s_cockpit_arrow_line, UI_COCKPIT_ARROW_LINES);
+        app_ui_set_hidden(s_track_label, true);
+        for (int i = 0; i < APP_UI_COCKPIT_GATE_COUNT; i++)
+        {
+            lv_obj_set_style_bg_color(s_cockpit_gate_dot[i], lv_color_hex(0x94A3B8), 0);
+            lv_obj_set_style_text_color(s_cockpit_gate_label[i], lv_color_hex(0x94A3B8), 0);
+        }
+        s_cockpit_generation = 0U;
+        s_cockpit_last_distance_mm = 0;
+        s_cockpit_last_stable_frames = 0U;
+        s_cockpit_last_update_ms = 0U;
+        s_cockpit_cache_valid = false;
+        s_cockpit_have_last_quad = false;
+        s_cockpit_last_quad_tag_id = 0U;
+        s_cockpit_last_quad_color_hex = 0xFBBF24U;
         app_ui_move_foreground(s_hud_layer);
         app_ui_move_foreground(s_top_bar);
-        app_ui_move_foreground(s_dock);
-        app_ui_move_foreground(s_flow_panel);
+        app_ui_move_foreground(s_cockpit_bottom);
+        s_preview_hud_visible = true;
+    }
+    else
+    {
+        s_cockpit_cache_valid = false;
+        s_cockpit_have_last_quad = false;
     }
     bsp_display_unlock();
 }
@@ -2998,12 +3291,21 @@ void app_ui_safety_takeover_set_state(app_ui_safety_takeover_state_t state,
 
 void app_ui_set_status(const char *text)
 {
+    if (app_ui_ordinary_updates_blocked() || s_preview_hud_visible)
+    {
+        return;
+    }
     if ((text == NULL) || (s_status == NULL && s_flow_title == NULL))
     {
         return;
     }
     if (!bsp_display_lock(UI_LOCK_SHORT_MS))
     {
+        return;
+    }
+    if (app_ui_ordinary_updates_blocked() || s_preview_hud_visible)
+    {
+        bsp_display_unlock();
         return;
     }
     const char *status_display = app_ui_status_display_text(text, NULL);
@@ -3015,6 +3317,455 @@ void app_ui_set_status(const char *text)
     s_control_cache_valid = false;
     bsp_display_unlock();
 }
+
+typedef enum {
+    APP_UI_COCKPIT_DIR_NONE = 0,
+    APP_UI_COCKPIT_DIR_LEFT,
+    APP_UI_COCKPIT_DIR_RIGHT,
+    APP_UI_COCKPIT_DIR_UP,
+    APP_UI_COCKPIT_DIR_DOWN,
+} app_ui_cockpit_direction_t;
+
+static lv_color_t app_ui_cockpit_gate_color(app_ui_cockpit_gate_state_t state)
+{
+    switch (state) {
+    case APP_UI_COCKPIT_GATE_ACTIVE:  return lv_color_hex(0x38BDF8);
+    case APP_UI_COCKPIT_GATE_ADJUST:  return lv_color_hex(0xFBBF24);
+    case APP_UI_COCKPIT_GATE_PASSED:  return lv_color_hex(0x34D399);
+    case APP_UI_COCKPIT_GATE_BLOCKED: return lv_color_hex(0xF87171);
+    case APP_UI_COCKPIT_GATE_WAITING:
+    default:                          return lv_color_hex(0x94A3B8);
+    }
+}
+
+static int32_t app_ui_abs_i32(int32_t value)
+{
+    return value < 0 ? -value : value;
+}
+
+static app_ui_cockpit_direction_t app_ui_cockpit_direction(const app_ui_cockpit_view_t *view)
+{
+    if (view == NULL || !view->dock.vision_valid || view->dock.centered_ok)
+    {
+        return APP_UI_COCKPIT_DIR_NONE;
+    }
+    const int32_t tol_x = view->center_x_tol > 0 ? view->center_x_tol : 1;
+    const int32_t tol_y = view->center_y_tol > 0 ? view->center_y_tol : 1;
+    const int64_t x_error = (int64_t)app_ui_abs_i32(view->dock.dx) * tol_y;
+    const int64_t y_error = (int64_t)app_ui_abs_i32(view->dock.dy) * tol_x;
+    if (x_error >= y_error)
+    {
+        return view->dock.dx < 0 ? APP_UI_COCKPIT_DIR_RIGHT : APP_UI_COCKPIT_DIR_LEFT;
+    }
+    return view->dock.dy < 0 ? APP_UI_COCKPIT_DIR_DOWN : APP_UI_COCKPIT_DIR_UP;
+}
+
+static void app_ui_cockpit_hide_lines(lv_obj_t *const *lines, int count)
+{
+    for (int i = 0; i < count; i++)
+    {
+        if (lines[i] != NULL)
+        {
+            lv_obj_add_flag(lines[i], LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+}
+
+static void app_ui_cockpit_update_arrow_unlocked(app_ui_cockpit_direction_t direction)
+{
+    if (direction == APP_UI_COCKPIT_DIR_NONE)
+    {
+        app_ui_cockpit_hide_lines(s_cockpit_arrow_line, UI_COCKPIT_ARROW_LINES);
+        return;
+    }
+
+    const int32_t cx = BSP_LCD_H_RES / 2;
+    const int32_t cy = BSP_LCD_V_RES / 2;
+    int32_t start_x = cx;
+    int32_t start_y = cy;
+    int32_t end_x = cx;
+    int32_t end_y = cy;
+    switch (direction) {
+    case APP_UI_COCKPIT_DIR_LEFT:  start_x += 34; end_x -= 32; break;
+    case APP_UI_COCKPIT_DIR_RIGHT: start_x -= 34; end_x += 32; break;
+    case APP_UI_COCKPIT_DIR_UP:    start_y += 34; end_y -= 32; break;
+    case APP_UI_COCKPIT_DIR_DOWN:  start_y -= 34; end_y += 32; break;
+    case APP_UI_COCKPIT_DIR_NONE:
+    default: break;
+    }
+    s_cockpit_arrow_points[0][0].x = start_x;
+    s_cockpit_arrow_points[0][0].y = start_y;
+    s_cockpit_arrow_points[0][1].x = end_x;
+    s_cockpit_arrow_points[0][1].y = end_y;
+
+    if (direction == APP_UI_COCKPIT_DIR_LEFT || direction == APP_UI_COCKPIT_DIR_RIGHT)
+    {
+        const int32_t head_x = end_x + (direction == APP_UI_COCKPIT_DIR_LEFT ? 13 : -13);
+        s_cockpit_arrow_points[1][0].x = end_x;
+        s_cockpit_arrow_points[1][0].y = end_y;
+        s_cockpit_arrow_points[1][1].x = head_x;
+        s_cockpit_arrow_points[1][1].y = end_y - 10;
+        s_cockpit_arrow_points[2][0].x = end_x;
+        s_cockpit_arrow_points[2][0].y = end_y;
+        s_cockpit_arrow_points[2][1].x = head_x;
+        s_cockpit_arrow_points[2][1].y = end_y + 10;
+    }
+    else
+    {
+        const int32_t head_y = end_y + (direction == APP_UI_COCKPIT_DIR_UP ? 13 : -13);
+        s_cockpit_arrow_points[1][0].x = end_x;
+        s_cockpit_arrow_points[1][0].y = end_y;
+        s_cockpit_arrow_points[1][1].x = end_x - 10;
+        s_cockpit_arrow_points[1][1].y = head_y;
+        s_cockpit_arrow_points[2][0].x = end_x;
+        s_cockpit_arrow_points[2][0].y = end_y;
+        s_cockpit_arrow_points[2][1].x = end_x + 10;
+        s_cockpit_arrow_points[2][1].y = head_y;
+    }
+
+    for (int i = 0; i < UI_COCKPIT_ARROW_LINES; i++)
+    {
+        lv_line_set_points(s_cockpit_arrow_line[i], s_cockpit_arrow_points[i], 2);
+        lv_obj_set_style_line_color(s_cockpit_arrow_line[i], lv_color_hex(0xFBBF24), 0);
+        lv_obj_clear_flag(s_cockpit_arrow_line[i], LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void app_ui_cockpit_update_quad_unlocked(const app_ui_cockpit_view_t *view)
+{
+    bool show = false;
+    bool hold = false;
+    if (view->vision.valid)
+    {
+        app_ui_line_point_t corners[UI_COCKPIT_TAG_LINES] = {0};
+        const int32_t gray_corners[UI_COCKPIT_TAG_LINES][2] = {
+            {view->vision.corner_tl_x, view->vision.corner_tl_y},
+            {view->vision.corner_tr_x, view->vision.corner_tr_y},
+            {view->vision.corner_br_x, view->vision.corner_br_y},
+            {view->vision.corner_bl_x, view->vision.corner_bl_y},
+        };
+        show = true;
+        for (int i = 0; i < UI_COCKPIT_TAG_LINES; i++)
+        {
+            if (!app_ui_map_gray_point_to_screen(&view->vision,
+                gray_corners[i][0],
+                gray_corners[i][1],
+                &corners[i]))
+            {
+                show = false;
+                break;
+            }
+        }
+        if (show)
+        {
+            for (int i = 0; i < UI_COCKPIT_TAG_LINES; i++)
+            {
+                s_cockpit_tag_points[i][0] = corners[i];
+                s_cockpit_tag_points[i][1] = corners[(i + 1) % UI_COCKPIT_TAG_LINES];
+            }
+            s_cockpit_have_last_quad = true;
+            s_cockpit_last_quad_tag_id = view->vision.tag_id;
+        }
+    }
+    else if (s_cockpit_have_last_quad &&
+        view->dock.invalid_hold_count > 0U &&
+        view->dock.state != APP_DOCK_STATE_SEARCHING)
+    {
+        show = true;
+        hold = true;
+    }
+
+    if (!show)
+    {
+        s_cockpit_have_last_quad = false;
+        s_cockpit_last_quad_tag_id = 0U;
+        s_cockpit_last_quad_color_hex = 0xFBBF24U;
+        app_ui_cockpit_hide_lines(s_cockpit_tag_line, UI_COCKPIT_TAG_LINES);
+        app_ui_set_hidden(s_track_label, true);
+        return;
+    }
+
+    uint32_t color_hex = s_cockpit_last_quad_color_hex;
+    if (!hold && !view->dock.target_id_ok)
+    {
+        color_hex = 0xF87171U;
+    }
+    else if (!hold &&
+        (view->delivery_permitted || view->dock.state == APP_DOCK_STATE_READY_TO_DOCK))
+    {
+        color_hex = 0x34D399U;
+    }
+    else if (!hold && view->dock.state == APP_DOCK_STATE_TRACKING)
+    {
+        color_hex = 0x38BDF8U;
+    }
+    else if (!hold)
+    {
+        color_hex = 0xFBBF24U;
+    }
+    if (!hold)
+    {
+        s_cockpit_last_quad_color_hex = color_hex;
+    }
+    const lv_color_t color = lv_color_hex(color_hex);
+    const lv_opa_t opacity = hold ? (lv_opa_t)128 : LV_OPA_COVER;
+    for (int i = 0; i < UI_COCKPIT_TAG_LINES; i++)
+    {
+        lv_line_set_points(s_cockpit_tag_line[i], s_cockpit_tag_points[i], 2);
+        lv_obj_set_style_line_color(s_cockpit_tag_line[i], color, 0);
+        lv_obj_set_style_line_opa(s_cockpit_tag_line[i], opacity, 0);
+        lv_obj_clear_flag(s_cockpit_tag_line[i], LV_OBJ_FLAG_HIDDEN);
+    }
+
+    const uint16_t display_tag = hold ? s_cockpit_last_quad_tag_id : view->vision.tag_id;
+    snprintf(s_cockpit_tag_text,
+        sizeof(s_cockpit_tag_text),
+        hold ? "Tag %u · 保持" : "Tag %u",
+        (unsigned)display_tag);
+    lv_label_set_text_static(s_track_label, s_cockpit_tag_text);
+    int32_t min_x = BSP_LCD_H_RES - 1;
+    int32_t min_y = BSP_LCD_V_RES - 1;
+    for (int i = 0; i < UI_COCKPIT_TAG_LINES; i++)
+    {
+        if (s_cockpit_tag_points[i][0].x < min_x) min_x = s_cockpit_tag_points[i][0].x;
+        if (s_cockpit_tag_points[i][0].y < min_y) min_y = s_cockpit_tag_points[i][0].y;
+    }
+    lv_obj_set_pos(s_track_label,
+        app_ui_clamp_i32(min_x, 4, BSP_LCD_H_RES - UI_TRACK_LABEL_W - 4),
+        app_ui_clamp_i32(min_y - UI_TRACK_LABEL_H - 4,
+            UI_COCKPIT_MARGIN + UI_COCKPIT_TOP_H + 4,
+            UI_COCKPIT_BOTTOM_Y - UI_TRACK_LABEL_H - 4));
+    lv_obj_set_style_border_color(s_track_label, color, 0);
+    lv_obj_set_style_text_color(s_track_label, color, 0);
+    lv_obj_clear_flag(s_track_label, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_invalidate(s_track_label);
+}
+
+static app_ui_cockpit_direction_t app_ui_cockpit_guidance_unlocked(
+    const app_ui_cockpit_view_t *view,
+    lv_color_t *color)
+{
+    *color = lv_color_hex(0xCFFAFE);
+    if (view->weather_blocked)
+    {
+        *color = lv_color_hex(0xF87171);
+        strlcpy(s_cockpit_guidance_text, "天气保护，禁止接驳", sizeof(s_cockpit_guidance_text));
+        return APP_UI_COCKPIT_DIR_NONE;
+    }
+    if (view->delivery_permitted)
+    {
+        *color = lv_color_hex(0x34D399);
+        strlcpy(s_cockpit_guidance_text, "验证完成，允许配送", sizeof(s_cockpit_guidance_text));
+        return APP_UI_COCKPIT_DIR_NONE;
+    }
+    if (view->dock.vision_valid && !view->dock.target_id_ok)
+    {
+        *color = lv_color_hex(0xF87171);
+        snprintf(s_cockpit_guidance_text,
+            sizeof(s_cockpit_guidance_text),
+            "标签不匹配：授权 Tag %u / 检测 Tag %u",
+            (unsigned)view->target_id,
+            (unsigned)view->dock.tag_id);
+        return APP_UI_COCKPIT_DIR_NONE;
+    }
+    if (!view->task_active || !view->ai_valid)
+    {
+        strlcpy(s_cockpit_guidance_text, "等待无人机进入画面", sizeof(s_cockpit_guidance_text));
+        return APP_UI_COCKPIT_DIR_NONE;
+    }
+    if (!view->ai_confirmed)
+    {
+        strlcpy(s_cockpit_guidance_text, "无人机确认中", sizeof(s_cockpit_guidance_text));
+        return APP_UI_COCKPIT_DIR_NONE;
+    }
+    if (!view->dock.vision_valid)
+    {
+        strlcpy(s_cockpit_guidance_text, "等待识别标签", sizeof(s_cockpit_guidance_text));
+        return APP_UI_COCKPIT_DIR_NONE;
+    }
+
+    const app_ui_cockpit_direction_t direction = app_ui_cockpit_direction(view);
+    if (direction != APP_UI_COCKPIT_DIR_NONE)
+    {
+        *color = lv_color_hex(0xFBBF24);
+        static const char *const direction_text[] = {
+            "", "请向左移动", "请向右移动", "请向上移动", "请向下移动",
+        };
+        strlcpy(s_cockpit_guidance_text,
+            direction_text[direction],
+            sizeof(s_cockpit_guidance_text));
+        return direction;
+    }
+    if (!view->dock.near_ok)
+    {
+        *color = lv_color_hex(0xFBBF24);
+        strlcpy(s_cockpit_guidance_text, "请靠近", sizeof(s_cockpit_guidance_text));
+        return APP_UI_COCKPIT_DIR_NONE;
+    }
+    if (view->use_distance_gate && !view->dock.distance_ok)
+    {
+        *color = lv_color_hex(0xFBBF24);
+        strlcpy(s_cockpit_guidance_text,
+            view->dock.est_distance_mm > view->max_distance_mm ? "请靠近" : "请远离",
+            sizeof(s_cockpit_guidance_text));
+        return APP_UI_COCKPIT_DIR_NONE;
+    }
+    strlcpy(s_cockpit_guidance_text, "请保持稳定", sizeof(s_cockpit_guidance_text));
+    *color = view->dock.stable_ok ? lv_color_hex(0x38BDF8) : lv_color_hex(0xFBBF24);
+    return APP_UI_COCKPIT_DIR_NONE;
+}
+
+static void app_ui_update_cockpit_unlocked(const app_ui_cockpit_view_t *view)
+{
+    if (s_cockpit_generation != view->task_generation)
+    {
+        s_cockpit_generation = view->task_generation;
+        s_cockpit_last_distance_mm = 0;
+        s_cockpit_last_stable_frames = 0;
+        s_cockpit_have_last_quad = false;
+        s_cockpit_last_quad_tag_id = 0U;
+        s_cockpit_last_quad_color_hex = 0xFBBF24U;
+    }
+    if (view->dock.vision_valid && view->dock.est_distance_mm > 0)
+    {
+        s_cockpit_last_distance_mm = view->dock.est_distance_mm;
+    }
+    if (view->dock.vision_valid)
+    {
+        s_cockpit_last_stable_frames = view->dock.stable_count;
+    }
+    // 授权成功后保留本 generation 最后一次真实测距；Tag 离场不应让成功态退回“--”。
+    else if (!view->delivery_permitted &&
+        (view->dock.invalid_hold_count == 0U ||
+         view->dock.state == APP_DOCK_STATE_SEARCHING))
+    {
+        s_cockpit_last_distance_mm = 0;
+        s_cockpit_last_stable_frames = 0U;
+    }
+
+    snprintf(s_cockpit_target_text,
+        sizeof(s_cockpit_target_text),
+        "目标 Tag %u",
+        (unsigned)view->target_id);
+    lv_obj_invalidate(s_status);
+
+    const uint8_t total_hits = view->ai_confirm_hits != 0U ? view->ai_confirm_hits : 1U;
+    const uint8_t hits = view->ai_hit_count > total_hits ? total_hits : view->ai_hit_count;
+    if (view->ai_valid)
+    {
+        int32_t confidence = (int32_t)(view->ai_drone_score * 100.0f + 0.5f);
+        confidence = app_ui_clamp_i32(confidence, 0, 100);
+        snprintf(s_cockpit_ai_text,
+            sizeof(s_cockpit_ai_text),
+            "模型置信度 %ld%% · %u/%u",
+            (long)confidence,
+            (unsigned)hits,
+            (unsigned)total_hits);
+    }
+    else
+    {
+        snprintf(s_cockpit_ai_text,
+            sizeof(s_cockpit_ai_text),
+            "模型置信度 -- · %u/%u",
+            (unsigned)hits,
+            (unsigned)total_hits);
+    }
+    lv_obj_set_style_text_color(s_cockpit_ai,
+        view->ai_confirmed ? lv_color_hex(0x34D399) : lv_color_hex(0xE2E8F0),
+        0);
+    lv_obj_invalidate(s_cockpit_ai);
+
+    for (int i = 0; i < APP_UI_COCKPIT_GATE_COUNT; i++)
+    {
+        const lv_color_t gate_color = app_ui_cockpit_gate_color(view->gate[i]);
+        lv_obj_set_style_bg_color(s_cockpit_gate_dot[i], gate_color, 0);
+        lv_obj_set_style_text_color(s_cockpit_gate_label[i], gate_color, 0);
+    }
+
+    lv_color_t guidance_color = lv_color_hex(0xCFFAFE);
+    const app_ui_cockpit_direction_t direction =
+        app_ui_cockpit_guidance_unlocked(view, &guidance_color);
+    lv_obj_set_style_text_color(s_cockpit_guidance, guidance_color, 0);
+    lv_obj_invalidate(s_cockpit_guidance);
+
+    const uint16_t stable_required = view->stable_required != 0U ? view->stable_required : 1U;
+    const uint16_t stable = view->delivery_permitted ?
+        stable_required :
+        (s_cockpit_last_stable_frames > stable_required ? stable_required : s_cockpit_last_stable_frames);
+    if (s_cockpit_last_distance_mm > 0)
+    {
+        snprintf(s_cockpit_metrics_text,
+            sizeof(s_cockpit_metrics_text),
+            "距离 %ld cm | 稳定 %u/%u",
+            (long)((s_cockpit_last_distance_mm + 5) / 10),
+            (unsigned)stable,
+            (unsigned)stable_required);
+    }
+    else
+    {
+        snprintf(s_cockpit_metrics_text,
+            sizeof(s_cockpit_metrics_text),
+            "距离 -- | 稳定 %u/%u",
+            (unsigned)stable,
+            (unsigned)stable_required);
+    }
+    lv_obj_invalidate(s_cockpit_metrics);
+
+    app_ui_cockpit_update_quad_unlocked(view);
+    app_ui_cockpit_update_arrow_unlocked(direction);
+    app_ui_set_hidden(s_track_box, true);
+    for (int i = 0; i < UI_TRACK_CORNER_COUNT; i++)
+    {
+        app_ui_set_hidden(s_track_corner[i], true);
+    }
+
+    const lv_color_t target_color = view->delivery_permitted ?
+        lv_color_hex(0x34D399) : lv_color_hex(0x67E8F9);
+    lv_obj_set_style_bg_color(s_cross_h, target_color, 0);
+    lv_obj_set_style_bg_color(s_cross_v, target_color, 0);
+    lv_obj_set_style_border_color(s_reticle_ring, target_color, 0);
+}
+
+void app_ui_update_cockpit(const app_ui_cockpit_view_t *view)
+{
+    if (app_ui_ordinary_updates_blocked())
+    {
+        return;
+    }
+    if (view == NULL || !s_preview_hud_visible)
+    {
+        return;
+    }
+    if (s_cockpit_cache_valid)
+    {
+        app_ui_cockpit_view_t comparable = *view;
+        comparable.updated_ms = s_cockpit_cache.updated_ms;
+        if (memcmp(&comparable, &s_cockpit_cache, sizeof(comparable)) == 0)
+        {
+            return;
+        }
+    }
+    if (s_cockpit_last_update_ms != 0U &&
+        (view->updated_ms - s_cockpit_last_update_ms) < UI_COCKPIT_UPDATE_MS)
+    {
+        return;
+    }
+    if (!bsp_display_lock(UI_LOCK_SHORT_MS))
+    {
+        return;
+    }
+    if (app_ui_ordinary_updates_blocked() || !s_preview_hud_visible)
+    {
+        bsp_display_unlock();
+        return;
+    }
+    app_ui_update_cockpit_unlocked(view);
+    s_cockpit_cache = *view;
+    s_cockpit_cache_valid = true;
+    s_cockpit_last_update_ms = view->updated_ms;
+    bsp_display_unlock();
+}
+
 // 更新视觉框、准星颜色、锁定条和认证提示；调用者需持有 LVGL 锁。
 static void app_ui_update_hud_unlocked(const char *dock_text,
     const app_vision_result_t *vision,
@@ -3091,6 +3842,10 @@ void app_ui_update_control_state(const char *status,
     const app_dock_judge_result_t *dock,
     const app_ui_flow_snapshot_t *flow)
 {
+    if (app_ui_ordinary_updates_blocked() || s_preview_hud_visible)
+    {
+        return;
+    }
     const char *status_display = app_ui_status_display_text(status, dock);
     const char *vision_display = app_ui_vision_display_text(vision_text, dock);
     app_ui_flow_snapshot_t fallback_flow = {0};
@@ -3105,6 +3860,11 @@ void app_ui_update_control_state(const char *status,
     }
     if (!bsp_display_lock(UI_LOCK_SHORT_MS))
     {
+        return;
+    }
+    if (app_ui_ordinary_updates_blocked() || s_preview_hud_visible)
+    {
+        bsp_display_unlock();
         return;
     }
     app_ui_set_header_unlocked(status_display, vision_display, dock_text, dock);

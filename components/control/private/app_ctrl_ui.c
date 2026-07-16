@@ -5,6 +5,7 @@
 
 #include "app_ch32_link.h"
 #include "app_drone_ai.h"
+#include "app_safety_takeover.h"
 #include "app_ui.h"
 
 // UI text is kept as escaped UTF-8 literals so this file remains ASCII-safe.
@@ -57,6 +58,105 @@ static unsigned app_ctrl_ai_hit_count(const app_drone_ai_stats_t *ai)
     const unsigned total = app_ctrl_ai_confirm_total(ai);
     unsigned hits = (unsigned)(ai != NULL ? ai->hit_count : 0U);
     return hits > total ? total : hits;
+}
+
+static void app_ctrl_build_cockpit_view(const app_ctrl_cycle_t *cycle,
+    app_ui_cockpit_view_t *view)
+{
+    memset(view, 0, sizeof(*view));
+
+    app_task_snapshot_t task = cycle->task;
+    app_task_snapshot_t latest_task = {0};
+    if (app_task_peek_snapshot(&latest_task) &&
+        latest_task.generation == task.generation)
+    {
+        task = latest_task;
+    }
+
+    view->task_generation = task.generation;
+    view->updated_ms = cycle->now_ms;
+    view->target_id = task.target_id;
+    view->task_active = task.active;
+    view->vision = cycle->vision;
+    view->dock = cycle->dock;
+    view->weather_blocked = cycle->runtime.weather_blocked;
+
+    app_drone_ai_snapshot_t ai = {0};
+    const bool have_ai = app_drone_ai_get_snapshot(&ai);
+    const bool task_advanced =
+        task.state == APP_TASK_STATE_AUTH_PASSED ||
+        task.state == APP_TASK_STATE_DOCKING;
+    view->ai_valid = have_ai &&
+        (task_advanced || ai.result_ms >= task.state_since_ms);
+    view->ai_confirmed = task_advanced || (view->ai_valid && ai.confirmed);
+    view->ai_drone_score = view->ai_valid ? ai.drone_score : 0.0f;
+    view->ai_hit_count = view->ai_valid ? ai.hit_count : 0U;
+    view->ai_confirm_hits = ai.confirm_hits != 0U ? ai.confirm_hits : 1U;
+    view->delivery_permitted = task_advanced && !view->weather_blocked;
+
+    app_dock_judge_config_t cfg = {0};
+    if (app_dock_judge_get_config(&cfg))
+    {
+        view->use_distance_gate = cfg.use_distance_gate;
+        view->min_distance_mm = cfg.min_distance_mm;
+        view->max_distance_mm = cfg.max_distance_mm;
+        view->center_x_tol = cfg.center_x_tol;
+        view->center_y_tol = cfg.center_y_tol;
+        view->stable_required = cfg.min_stable_count;
+    }
+    if (view->stable_required == 0U)
+    {
+        view->stable_required = 1U;
+    }
+
+    view->gate[0] = view->task_active ?
+        APP_UI_COCKPIT_GATE_PASSED : APP_UI_COCKPIT_GATE_WAITING;
+    view->gate[1] = view->ai_confirmed ?
+        APP_UI_COCKPIT_GATE_PASSED :
+        (view->task_active ? APP_UI_COCKPIT_GATE_ACTIVE : APP_UI_COCKPIT_GATE_WAITING);
+
+    if (task_advanced)
+    {
+        view->gate[2] = APP_UI_COCKPIT_GATE_PASSED;
+        view->gate[3] = APP_UI_COCKPIT_GATE_PASSED;
+        view->gate[4] = view->weather_blocked ?
+            APP_UI_COCKPIT_GATE_BLOCKED : APP_UI_COCKPIT_GATE_PASSED;
+        return;
+    }
+
+    if (!view->ai_confirmed || !view->dock.vision_valid)
+    {
+        view->gate[2] = APP_UI_COCKPIT_GATE_WAITING;
+    }
+    else
+    {
+        view->gate[2] = view->dock.target_id_ok ?
+            APP_UI_COCKPIT_GATE_PASSED : APP_UI_COCKPIT_GATE_BLOCKED;
+    }
+
+    const bool identity_passed =
+        view->gate[2] == APP_UI_COCKPIT_GATE_PASSED;
+    const bool position_passed = identity_passed &&
+        view->dock.centered_ok &&
+        view->dock.near_ok &&
+        view->dock.distance_ok;
+    view->gate[3] = !identity_passed ?
+        APP_UI_COCKPIT_GATE_WAITING :
+        (position_passed ? APP_UI_COCKPIT_GATE_PASSED : APP_UI_COCKPIT_GATE_ADJUST);
+
+    if (view->weather_blocked)
+    {
+        view->gate[4] = APP_UI_COCKPIT_GATE_BLOCKED;
+    }
+    else if (!position_passed)
+    {
+        view->gate[4] = APP_UI_COCKPIT_GATE_WAITING;
+    }
+    else
+    {
+        view->gate[4] = view->dock.stable_ok ?
+            APP_UI_COCKPIT_GATE_PASSED : APP_UI_COCKPIT_GATE_ACTIVE;
+    }
 }
 
 static int32_t app_ctrl_distance_cm(const app_dock_judge_result_t *dock)
@@ -275,7 +375,7 @@ static void app_ctrl_format_stage_detail(const app_ctrl_cycle_t *cycle,
     }
 }
 
-static void app_ctrl_compose_detail(const app_ctrl_cycle_t *cycle,
+static void __attribute__((unused)) app_ctrl_compose_detail(const app_ctrl_cycle_t *cycle,
     char *buf,
     size_t buf_len)
 {
@@ -327,7 +427,7 @@ static void app_ctrl_compose_detail(const app_ctrl_cycle_t *cycle,
     }
 }
 
-static void app_ctrl_compose_task_status(const app_ctrl_cycle_t *cycle,
+static void __attribute__((unused)) app_ctrl_compose_task_status(const app_ctrl_cycle_t *cycle,
     char *buf,
     size_t buf_len)
 {
@@ -374,7 +474,7 @@ static void app_ctrl_compose_task_status(const app_ctrl_cycle_t *cycle,
     }
 }
 
-static void app_ctrl_compose_vision_status(const app_ctrl_cycle_t *cycle,
+static void __attribute__((unused)) app_ctrl_compose_vision_status(const app_ctrl_cycle_t *cycle,
     char *buf,
     size_t buf_len)
 {
@@ -519,7 +619,7 @@ static void app_ctrl_fill_tag_flow(const app_ctrl_cycle_t *cycle,
         tag_status);
 }
 
-static void app_ctrl_fill_flow_snapshot(const app_ctrl_cycle_t *cycle,
+static void __attribute__((unused)) app_ctrl_fill_flow_snapshot(const app_ctrl_cycle_t *cycle,
     app_ui_flow_snapshot_t *flow)
 {
     const app_task_snapshot_t *task = &cycle->task;
@@ -615,6 +715,10 @@ static void app_ctrl_fill_flow_snapshot(const app_ctrl_cycle_t *cycle,
 
 void app_ctrl_ui_publish(const app_ctrl_cycle_t *cycle)
 {
+    if (app_safety_takeover_is_active())
+    {
+        return;
+    }
     if (cycle == NULL)
     {
         return;
@@ -626,59 +730,7 @@ void app_ctrl_ui_publish(const app_ctrl_cycle_t *cycle)
         app_ui_main_screen_set_task_state(APP_UI_MAIN_TASK_WEATHER_BLOCKED);
     }
 
-    char status[128] = {0};
-    char detail[224] = {0};
-    char vision_status[96] = {0};
-    app_ctrl_compose_task_status(cycle, status, sizeof(status));
-    app_ctrl_compose_vision_status(cycle, vision_status, sizeof(vision_status));
-    app_ctrl_compose_detail(cycle, detail, sizeof(detail));
-
-    if (runtime->dock_busy)
-    {
-        strlcpy(status,
-            app_ctrl_proto_stage_action_text(runtime->proto_stage),
-            sizeof(status));
-    }
-    if (runtime->proto_error != APP_CH32_ERR_NONE && !runtime->dock_busy)
-    {
-        snprintf(status,
-            sizeof(status),
-            UI_TEXT_STAGE_FAULT " %s",
-            app_ch32_link_proto_error_name(runtime->proto_error));
-    }
-    if (runtime->retrigger_blocked &&
-        !runtime->dock_busy &&
-        runtime->proto_error == APP_CH32_ERR_NONE &&
-        runtime->notice[0] == '\0')
-    {
-        strlcpy(status, UI_TEXT_DOCK_WAIT, sizeof(status));
-    }
-    if (runtime->notice_active && runtime->notice[0] != '\0' && !runtime->dock_busy)
-    {
-        if (strstr(runtime->notice, "weather") != NULL)
-        {
-            strlcpy(status, UI_TEXT_WEATHER, sizeof(status));
-        }
-        else if (strstr(runtime->notice, "auth passed") != NULL)
-        {
-            strlcpy(status, UI_TEXT_READY_DOCK, sizeof(status));
-        }
-        else if (strstr(runtime->notice, "accepted start dock") != NULL)
-        {
-            strlcpy(status, UI_TEXT_DOCK_START, sizeof(status));
-        }
-        else
-        {
-            strlcpy(status, runtime->notice, sizeof(status));
-        }
-    }
-
-    app_ui_flow_snapshot_t flow = {0};
-    app_ctrl_fill_flow_snapshot(cycle, &flow);
-    app_ui_update_control_state(status,
-        vision_status,
-        detail,
-        &cycle->vision,
-        &cycle->dock,
-        &flow);
+    app_ui_cockpit_view_t cockpit = {0};
+    app_ctrl_build_cockpit_view(cycle, &cockpit);
+    app_ui_update_cockpit(&cockpit);
 }

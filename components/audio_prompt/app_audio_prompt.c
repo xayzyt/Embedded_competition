@@ -24,6 +24,8 @@ static const char *TAG = "audio_prompt";
 #define APP_AUDIO_PROMPT_CHUNK_BYTES 2048U
 #define APP_AUDIO_PROMPT_NVS_NS      "audio_prompt"
 #define APP_AUDIO_PROMPT_NVS_KEY     "enabled"
+#define APP_AUDIO_PROMPT_NORMAL_VOLUME 75U
+#define APP_AUDIO_PROMPT_SAFETY_VOLUME 65U
 
 extern const uint8_t s_ready_pcm_start[] asm("_binary_ready_pcm_start");
 extern const uint8_t s_ready_pcm_end[] asm("_binary_ready_pcm_end");
@@ -135,6 +137,18 @@ static const app_audio_prompt_asset_t *app_audio_prompt_asset(app_audio_prompt_i
         return NULL;
     }
     return &s_prompt_assets[prompt];
+}
+
+static uint8_t app_audio_prompt_volume(app_audio_prompt_id_t prompt)
+{
+    switch (prompt)
+    {
+        case APP_AUDIO_PROMPT_DRONE_NOT_DETECTED:
+        case APP_AUDIO_PROMPT_DRONE_RETURNED:
+            return APP_AUDIO_PROMPT_SAFETY_VOLUME;
+        default:
+            return APP_AUDIO_PROMPT_NORMAL_VOLUME;
+    }
 }
 
 static void app_audio_prompt_load_enabled_once(void)
@@ -301,7 +315,11 @@ static void app_audio_prompt_task(void *arg)
         app_audio_prompt_mark_playing(prompt);
 
         const size_t len = (size_t)(asset->end - asset->start);
-        esp_err_t ret = app_audio_prompt_write_pcm(asset->start, len);
+        esp_err_t ret = app_audio_prompt_hw_set_volume(app_audio_prompt_volume(prompt));
+        if (ret == ESP_OK)
+        {
+            ret = app_audio_prompt_write_pcm(asset->start, len);
+        }
         if (ret == ESP_OK)
         {
             ESP_LOGI(TAG, "%s prompt played, bytes=%u", asset->name, (unsigned)len);

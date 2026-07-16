@@ -1,6 +1,11 @@
 const { formatDeviceState } = require('./order-display.js');
 
 const DEFAULT_MESSAGE = '检查中...';
+const BUSY_DEVICE_STATES = ['wait_approach', 'auth_passed', 'docking'];
+
+function isBusyDeviceState(value) {
+  return BUSY_DEVICE_STATES.includes(String(value || '').trim());
+}
 
 function pad(value) {
   return String(value).padStart(2, '0');
@@ -47,6 +52,7 @@ function defaultServiceStatus() {
     serviceMqttReady: false,
     serviceWeatherBlocked: false,
     serviceAcceptOrders: false,
+    serviceDeviceBusy: false,
     serviceDeviceNotReady: false,
     serviceActionBlocked: true,
     serviceWeatherMode: 'normal',
@@ -78,6 +84,7 @@ function buildWeatherSummary(status) {
   };
   const weatherBlocked = !!current.serviceWeatherBlocked;
   const acceptOrders = !!current.serviceAcceptOrders && !weatherBlocked;
+  const deviceBusy = !!current.serviceDeviceBusy && !weatherBlocked;
   const linkReady = !!current.serviceOnline && !!current.serviceMqttReady;
 
   return {
@@ -96,9 +103,9 @@ function buildWeatherSummary(status) {
       },
       {
         key: 'policy',
-        label: weatherBlocked ? '天气' : '接单',
-        value: weatherBlocked ? '管制' : (acceptOrders ? '开放' : '暂停'),
-        state: acceptOrders ? 'ok' : 'warn'
+        label: weatherBlocked ? '天气' : (deviceBusy ? '任务' : '接单'),
+        value: weatherBlocked ? '管制' : (deviceBusy ? '执行中' : (acceptOrders ? '开放' : '暂停')),
+        state: acceptOrders || deviceBusy ? 'ok' : 'warn'
       }
     ]
   };
@@ -114,7 +121,7 @@ function buildCheckingStatus(previousStatus) {
   };
 }
 
-function buildReadyMessage(payload) {
+function buildReadyMessage(payload, deviceBusy) {
   if (payload && payload.device_state_ready === false) {
     return '板端未上报';
   }
@@ -122,7 +129,7 @@ function buildReadyMessage(payload) {
     return '天气管制';
   }
   if (payload && payload.accept_orders !== undefined && Number(payload.accept_orders) === 0) {
-    return '设备未就绪';
+    return deviceBusy ? '配送进行中' : '设备未就绪';
   }
 
   return '系统就绪';
@@ -132,7 +139,7 @@ function buildBackendOnlyMessage() {
   return '调度未就绪';
 }
 
-function buildBlockInfo(payload, mqttReady, deviceStateReady, weatherBlocked, acceptOrders) {
+function buildBlockInfo(payload, mqttReady, deviceStateReady, weatherBlocked, acceptOrders, deviceBusy) {
   if (!mqttReady) {
     return {
       title: '云端调度未就绪',
@@ -151,6 +158,13 @@ function buildBlockInfo(payload, mqttReady, deviceStateReady, weatherBlocked, ac
     return {
       title: '恶劣天气管制',
       advice: '板端处于天气保护状态，暂时不能下单或开始配送。'
+    };
+  }
+
+  if (deviceBusy) {
+    return {
+      title: '配送进行中',
+      advice: '板端正在执行当前任务，已暂停接收新订单。当前订单状态会继续更新。'
     };
   }
 
@@ -175,9 +189,14 @@ function buildServiceStatusFromHealth(payload) {
     ? Number(payload.accept_orders) !== 0
     : !weatherBlocked;
   const deviceFault = Number(payload && payload.device_fault || 0) === 1;
-  const deviceNotReady = deviceStateReady && !weatherBlocked && !acceptOrders;
+  const deviceBusy = deviceStateReady &&
+    !weatherBlocked &&
+    !deviceFault &&
+    !acceptOrders &&
+    isBusyDeviceState(payload && payload.device_state);
+  const deviceNotReady = deviceStateReady && !weatherBlocked && !acceptOrders && !deviceBusy;
   const actionBlocked = !mqttReady || !deviceStateReady || weatherBlocked || !acceptOrders;
-  const blockInfo = buildBlockInfo(payload, mqttReady, deviceStateReady, weatherBlocked, acceptOrders);
+  const blockInfo = buildBlockInfo(payload, mqttReady, deviceStateReady, weatherBlocked, acceptOrders, deviceBusy);
   const checkedAt = Number(payload && payload.checked_at) || Date.now();
   let serviceState = 'ready';
 
@@ -187,6 +206,8 @@ function buildServiceStatusFromHealth(payload) {
     serviceState = 'device-state-missing';
   } else if (weatherBlocked) {
     serviceState = 'weather-blocked';
+  } else if (deviceBusy) {
+    serviceState = 'busy';
   } else if (!acceptOrders) {
     serviceState = 'device-not-ready';
   }
@@ -198,11 +219,12 @@ function buildServiceStatusFromHealth(payload) {
     serviceMqttReady: mqttReady,
     serviceWeatherBlocked: weatherBlocked,
     serviceAcceptOrders: acceptOrders,
+    serviceDeviceBusy: deviceBusy,
     serviceDeviceNotReady: deviceNotReady,
     serviceActionBlocked: actionBlocked,
     serviceWeatherMode: String(payload && payload.weather_mode || 'normal'),
     serviceState,
-    serviceMessage: !mqttReady ? buildBackendOnlyMessage() : buildReadyMessage(payload),
+    serviceMessage: !mqttReady ? buildBackendOnlyMessage() : buildReadyMessage(payload, deviceBusy),
     serviceBlockTitle: blockInfo.title,
     serviceBlockAdvice: blockInfo.advice,
     serviceDeviceStateReady: deviceStateReady,
@@ -286,7 +308,9 @@ function formatServiceDiagnostics(status) {
     `MQTT：${boolText(current.serviceMqttReady)}`,
     `板端：${deviceText}`,
     `天气：${weatherText}`,
-    `接单：${current.serviceAcceptOrders && !current.serviceWeatherBlocked ? '接受订单' : '暂停接单'}`,
+    `接单：${current.serviceDeviceBusy && !current.serviceWeatherBlocked
+      ? '任务执行中（暂停新单）'
+      : (current.serviceAcceptOrders && !current.serviceWeatherBlocked ? '接受订单' : '暂停接单')}`,
     `语音：${current.serviceVoiceEnabled ? '开启' : '关闭'}`,
     `当前设备：${current.serviceDefaultDevice || '-'}`,
     `State Topic：${current.serviceStateTopic || '-'}`,

@@ -421,6 +421,12 @@ button::after {
   color: #166534;
 }
 
+.service-banner.status-busy {
+  background: linear-gradient(135deg, #dbeafe 0%, #eff6ff 100%);
+  border-color: #bfdbfe;
+  color: #1d4ed8;
+}
+
 .service-banner.status-backend-only {
   background: linear-gradient(135deg, #fff7ed 0%, #fffbeb 100%);
   border-color: #fed7aa;

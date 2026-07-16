@@ -2,6 +2,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "app_safety_takeover.h"
+
 // AprilTag 对接判定器
 //
 // 判定流程：
@@ -258,6 +260,21 @@ void app_dock_judge_get_default_config(app_dock_judge_config_t *out)
     out->wrong_id_enter_frames = 2;
     out->lost_hold_frames = 6;
 }
+
+bool app_dock_judge_get_config(app_dock_judge_config_t *out)
+{
+    if (app_safety_takeover_is_active())
+    {
+        return false;
+    }
+    if (!s_inited || out == NULL)
+    {
+        return false;
+    }
+    *out = s_cfg;
+    return true;
+}
+
 esp_err_t app_dock_judge_init(const app_dock_judge_config_t *cfg)
 {
     if (cfg == NULL)

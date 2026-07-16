@@ -2,11 +2,13 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "app_camera.h"
+#include "app_ctrl.h"
 #include "app_drone_ai.h"
 #include "app_safety_takeover.h"
 #include "app_task.h"
@@ -21,7 +23,8 @@ static const char *TAG = "app_preview";
 #define APP_TASK_EVENT_TASK_STACK       (8 * 1024)
 #define APP_TASK_EVENT_TASK_PRIO        5
 #define APP_TASK_STATE_POLL_MS          250U
-#define APP_PREVIEW_INTRO_MS            2000U
+#define APP_PREVIEW_INTRO_MS            1500U
+#define APP_PREVIEW_INTRO_POLL_MS       50U
 #define APP_PREVIEW_FIRST_FRAME_WAIT_MS 12000U
 #define APP_PREVIEW_SWITCH_WAIT_MS      800U
 #define APP_DRONE_AI_READY_WAIT_MS      200U
@@ -71,6 +74,52 @@ static bool app_leave_camera_preview(void)
     return true;
 }
 
+static bool app_show_normal_completion_receipt(const app_task_snapshot_t *snap)
+{
+    if (app_safety_takeover_is_active())
+    {
+        return false;
+    }
+    if (snap == NULL ||
+        snap->generation == 0U ||
+        strcmp(snap->source, "safety") == 0)
+    {
+        return false;
+    }
+
+    app_ui_completion_receipt_view_t receipt = {0};
+    if (!app_ctrl_get_completion_receipt(snap->generation, &receipt))
+    {
+        return false;
+    }
+
+    app_ui_hide_task_intro();
+    app_ui_set_preview_hud_visible(false);
+    app_camera_pause();
+    s_preview_visible = false;
+    app_ui_main_screen_set_task_state(APP_UI_MAIN_TASK_COMPLETED);
+    return app_ui_show_completion_receipt(&receipt);
+}
+
+static void app_refresh_normal_completion_receipt(const app_task_snapshot_t *snap)
+{
+    if (app_safety_takeover_is_active())
+    {
+        return;
+    }
+    if (snap == NULL ||
+        !app_ui_completion_receipt_is_visible() ||
+        strcmp(snap->source, "safety") == 0)
+    {
+        return;
+    }
+    app_ui_completion_receipt_view_t receipt = {0};
+    if (app_ctrl_get_completion_receipt(snap->generation, &receipt))
+    {
+        app_ui_update_completion_receipt(&receipt);
+    }
+}
+
 // 只有活动中的识别、鉴权和机械执行阶段需要停留在相机预览。
 static bool app_task_snapshot_wants_camera_preview(const app_task_snapshot_t *snap)
 {
@@ -99,7 +148,60 @@ static bool app_task_wants_camera_preview(void)
     return app_task_snapshot_wants_camera_preview(&snap);
 }
 
-// Guard the one-second intro against concurrent switch attempts.
+static bool app_task_snapshot_is_normal_intro(const app_task_snapshot_t *snap)
+{
+    return snap != NULL &&
+           snap->inited &&
+           snap->active &&
+           snap->generation != 0U &&
+           snap->state == APP_TASK_STATE_WAIT_APPROACH &&
+           strcmp(snap->source, "safety") != 0;
+}
+
+static bool app_task_snapshot_is_same_normal_preview(const app_task_snapshot_t *snap)
+{
+    return snap != NULL &&
+           snap->inited &&
+           snap->active &&
+           snap->generation != 0U &&
+           strcmp(snap->source, "safety") != 0 &&
+           (snap->state == APP_TASK_STATE_WAIT_APPROACH ||
+            snap->state == APP_TASK_STATE_AUTH_PASSED ||
+            snap->state == APP_TASK_STATE_DOCKING);
+}
+
+static bool app_task_intro_is_current(uint32_t generation, uint16_t target_id)
+{
+    if (app_safety_takeover_is_active())
+    {
+        return false;
+    }
+    app_task_snapshot_t snap = {0};
+    return app_task_peek_snapshot(&snap) &&
+           app_task_snapshot_is_same_normal_preview(&snap) &&
+           snap.generation == generation &&
+           snap.target_id == target_id;
+}
+
+static bool app_wait_task_intro(uint32_t generation, uint16_t target_id)
+{
+    uint32_t elapsed_ms = 0U;
+    while (elapsed_ms < APP_PREVIEW_INTRO_MS)
+    {
+        const uint32_t remaining_ms = APP_PREVIEW_INTRO_MS - elapsed_ms;
+        const uint32_t wait_ms = remaining_ms < APP_PREVIEW_INTRO_POLL_MS ?
+            remaining_ms : APP_PREVIEW_INTRO_POLL_MS;
+        vTaskDelay(pdMS_TO_TICKS(wait_ms));
+        elapsed_ms += wait_ms;
+        if (!app_task_intro_is_current(generation, target_id))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Guard the ordinary intro against concurrent switch attempts.
 static bool app_preview_switch_try_begin(void)
 {
     bool started = false;
@@ -126,22 +228,37 @@ static bool app_enter_camera_preview(bool show_intro)
     {
         return false;
     }
-    const bool safety_preview = app_safety_takeover_preview_active();
+    const bool safety_preview_at_entry = app_safety_takeover_preview_active();
 
     app_task_snapshot_t snap = {0};
-    uint16_t target_id = 0;
-    if (app_task_peek_snapshot(&snap))
+    (void)app_task_peek_snapshot(&snap);
+
+    bool intro_shown = false;
+    if (show_intro &&
+        !safety_preview_at_entry &&
+        app_task_snapshot_is_normal_intro(&snap))
     {
-        target_id = snap.target_id;
+        const app_ui_task_intro_view_t intro = {
+            .generation = snap.generation,
+            .target_valid = true,
+            .target_id = snap.target_id,
+        };
+        intro_shown = app_ui_show_task_intro(&intro);
+        if (intro_shown && !app_wait_task_intro(intro.generation, intro.target_id))
+        {
+            if (!app_safety_takeover_is_active())
+            {
+                app_ui_hide_task_intro();
+            }
+            app_preview_switch_finish();
+            return false;
+        }
     }
 
-    if (show_intro && !safety_preview && app_ui_show_task_intro(target_id))
-    {
-        vTaskDelay(pdMS_TO_TICKS(APP_PREVIEW_INTRO_MS));
-    }
-
+    const bool safety_active = app_safety_takeover_is_active();
+    const bool safety_preview = app_safety_takeover_preview_active();
     bool entered = false;
-    if (app_task_wants_camera_preview())
+    if (app_task_wants_camera_preview() && (!safety_active || safety_preview))
     {
         app_ui_hide_main_screen();
         if (safety_preview)
@@ -152,11 +269,17 @@ static bool app_enter_camera_preview(bool show_intro)
         else
         {
             app_ui_set_preview_hud_visible(true);
+            if (app_safety_takeover_is_active())
+            {
+                app_preview_switch_finish();
+                return false;
+            }
         }
         s_preview_visible = true;
         entered = true;
     }
-    if (!safety_preview)
+    if (!app_safety_takeover_is_active() &&
+        !app_safety_takeover_preview_active())
     {
         app_ui_hide_task_intro();
     }
@@ -324,6 +447,10 @@ static void app_handle_task_state_changed(const app_task_snapshot_t *snap)
 
     if (!state_changed && !needs_visibility_fix)
     {
+        if (snap->state == APP_TASK_STATE_COMPLETED)
+        {
+            app_refresh_normal_completion_receipt(snap);
+        }
         return;
     }
 
@@ -342,9 +469,13 @@ static void app_handle_task_state_changed(const app_task_snapshot_t *snap)
             completed ||
             snap->state == APP_TASK_STATE_FAULT ||
             snap->state == APP_TASK_STATE_CANCELLED;
-        if ((needs_visibility_fix || terminal) &&
-            app_leave_camera_preview() &&
-            completed)
+        if ((needs_visibility_fix || terminal) && completed &&
+            app_show_normal_completion_receipt(snap))
+        {
+            // 完成凭证自身负责 8 秒后恢复主界面。
+        }
+        else if ((needs_visibility_fix || terminal) &&
+            app_leave_camera_preview() && completed)
         {
             app_ui_main_screen_set_task_state(APP_UI_MAIN_TASK_COMPLETED);
         }

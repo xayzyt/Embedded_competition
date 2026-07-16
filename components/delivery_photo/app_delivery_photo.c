@@ -459,7 +459,8 @@ esp_err_t app_delivery_photo_register_status_callback(app_delivery_photo_status_
 esp_err_t app_delivery_photo_begin_order(const char *order_id,
                                          const char *request_id,
                                          const char *order_name,
-                                         uint16_t target_id)
+                                         uint16_t target_id,
+                                         uint32_t task_generation)
 {
     if (!s_inited)
     {
@@ -477,6 +478,7 @@ esp_err_t app_delivery_photo_begin_order(const char *order_id,
     taskENTER_CRITICAL(&s_mux);
     memset(&s_info, 0, sizeof(s_info));
     s_info.status = APP_DELIVERY_PHOTO_STATUS_NONE;
+    s_info.task_generation = task_generation;
     s_info.target_id = target_id;
     s_info.width = DELIVERY_PHOTO_WIDTH;
     s_info.height = DELIVERY_PHOTO_HEIGHT;

@@ -7,6 +7,14 @@
 #include "bsp/esp-bsp.h"
 #include "bsp/display.h"
 
+extern bool app_safety_takeover_is_active(void) __attribute__((weak));
+
+static bool app_ui_ordinary_receipt_blocked(void)
+{
+    return app_safety_takeover_is_active != NULL &&
+        app_safety_takeover_is_active();
+}
+
 // 主屏 UI：展示任务阶段、连接状态、天气、时钟、异常演示和语音开关。
 
 const lv_image_dsc_t *app_ui_weather_image_src(int weather_code);
@@ -15,6 +23,8 @@ LV_FONT_DECLARE(font_loading_cn)
 LV_FONT_DECLARE(font_main_title_cn)
 LV_FONT_DECLARE(font_button_cn)
 LV_FONT_DECLARE(font_title_en)
+LV_FONT_DECLARE(font_cockpit_cn)
+LV_FONT_DECLARE(font_cockpit_title_cn)
 LV_FONT_DECLARE(lv_font_source_han_sans_sc_16_cjk)
 LV_IMAGE_DECLARE(logo);
 #define UI_LOCK_SHORT_MS        30
@@ -28,6 +38,9 @@ LV_IMAGE_DECLARE(logo);
 #define UI_MAIN_PHASE_COUNT     3
 #define UI_MAIN_PHASE_DOCK_IDX  2
 #define UI_EXCEPTION_PHASE_COUNT 4
+#define UI_RECEIPT_SHOW_MS      8000U
+#define UI_RECEIPT_NODE_COUNT   5
+#define UI_RECEIPT_METRIC_COUNT 4
 static lv_obj_t *s_main_layer = NULL;
 static lv_obj_t *s_main_wifi_ind = NULL;
 static lv_obj_t *s_main_mqtt_ind = NULL;
@@ -65,8 +78,15 @@ static lv_obj_t *s_exception_back_btn = NULL;
 static lv_obj_t *s_exception_back_label = NULL;
 static lv_obj_t *s_exception_phase_box[UI_EXCEPTION_PHASE_COUNT] = {0};
 static lv_obj_t *s_exception_phase_label[UI_EXCEPTION_PHASE_COUNT] = {0};
+static lv_obj_t *s_receipt_layer = NULL;
+static lv_obj_t *s_receipt_title = NULL;
+static lv_obj_t *s_receipt_node[UI_RECEIPT_NODE_COUNT] = {0};
+static lv_obj_t *s_receipt_node_dot[UI_RECEIPT_NODE_COUNT] = {0};
+static lv_obj_t *s_receipt_metric_value[UI_RECEIPT_METRIC_COUNT] = {0};
+static lv_obj_t *s_receipt_photo = NULL;
 static lv_timer_t *s_main_clock_timer = NULL;
 static lv_timer_t *s_main_task_blink_timer = NULL;
+static lv_timer_t *s_receipt_timer = NULL;
 static app_ui_exception_demo_cb_t s_exception_demo_cb = NULL;
 static app_ui_voice_toggle_cb_t s_voice_toggle_cb = NULL;
 static app_ui_exception_back_cb_t s_exception_back_cb = NULL;
@@ -89,6 +109,12 @@ static char s_main_weather_text[96] = "同步中";
 static int s_main_weather_code = 99;
 static char s_exception_weather_text[96] = "晴\n31℃";
 static int s_exception_weather_code = 0;
+static volatile bool s_receipt_visible = false;
+static uint32_t s_receipt_generation = 0;
+static char s_receipt_metric_text[UI_RECEIPT_METRIC_COUNT][48] = {
+    "--", "--", "--", "--",
+};
+static char s_receipt_photo_text[64] = "照片处理中";
 static lv_obj_t *app_get_active_screen(void)
 {
 #if LVGL_VERSION_MAJOR >= 9
@@ -1086,6 +1112,15 @@ bool app_ui_show_main_screen(void)
         return false;
     }
     lv_obj_t *scr = app_get_active_screen();
+    if (s_receipt_layer != NULL)
+    {
+        lv_obj_add_flag(s_receipt_layer, LV_OBJ_FLAG_HIDDEN);
+        s_receipt_visible = false;
+    }
+    if (s_receipt_timer != NULL)
+    {
+        lv_timer_pause(s_receipt_timer);
+    }
     if (s_exception_layer != NULL)
     {
         lv_obj_add_flag(s_exception_layer, LV_OBJ_FLAG_HIDDEN);
@@ -1700,4 +1735,342 @@ void app_ui_main_screen_apply_weather_state(const char *weather_text,
         app_ui_apply_main_task_visual_unlocked(false);
     }
     bsp_display_unlock();
+}
+
+static void app_ui_receipt_timer_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    const bool blocked = app_ui_ordinary_receipt_blocked();
+    s_receipt_timer = NULL;
+    if (blocked)
+    {
+        s_receipt_visible = false;
+        s_receipt_generation = 0U;
+        return;
+    }
+    if (s_receipt_layer != NULL)
+    {
+        lv_obj_add_flag(s_receipt_layer, LV_OBJ_FLAG_HIDDEN);
+    }
+    s_receipt_visible = false;
+    s_receipt_generation = 0U;
+    if (s_main_layer != NULL)
+    {
+        lv_obj_clear_flag(s_main_layer, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(s_main_layer);
+    }
+}
+
+static void app_ui_receipt_set_node_style(int index, int state)
+{
+    if (index < 0 || index >= UI_RECEIPT_NODE_COUNT ||
+        s_receipt_node[index] == NULL ||
+        s_receipt_node_dot[index] == NULL)
+    {
+        return;
+    }
+    lv_color_t accent = lv_color_hex(0x94A3B8);
+    lv_color_t fill = lv_color_hex(0xF8FAFC);
+    if (state == 1)
+    {
+        accent = lv_color_hex(0x0F766E);
+        fill = lv_color_hex(0xECFDF5);
+    }
+    else if (state == 2)
+    {
+        accent = lv_color_hex(0x0284C7);
+        fill = lv_color_hex(0xF0F9FF);
+    }
+    else if (state == 3)
+    {
+        accent = lv_color_hex(0xB91C1C);
+        fill = lv_color_hex(0xFEF2F2);
+    }
+    lv_obj_set_style_bg_color(s_receipt_node[index], fill, 0);
+    lv_obj_set_style_border_color(s_receipt_node[index], accent, 0);
+    lv_obj_set_style_bg_color(s_receipt_node_dot[index], accent, 0);
+}
+
+static void app_ui_create_completion_receipt_unlocked(lv_obj_t *scr)
+{
+    if (s_receipt_layer != NULL)
+    {
+        return;
+    }
+
+    s_receipt_layer = lv_obj_create(scr);
+    lv_obj_set_size(s_receipt_layer, BSP_LCD_H_RES, BSP_LCD_V_RES);
+    lv_obj_set_style_bg_color(s_receipt_layer, lv_color_hex(0xF7F9FC), 0);
+    lv_obj_set_style_bg_grad_color(s_receipt_layer, lv_color_hex(0xECFDF5), 0);
+    lv_obj_set_style_bg_grad_dir(s_receipt_layer, LV_GRAD_DIR_VER, 0);
+    lv_obj_set_style_bg_opa(s_receipt_layer, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_receipt_layer, 0, 0);
+    lv_obj_set_style_radius(s_receipt_layer, 0, 0);
+    lv_obj_set_style_pad_all(s_receipt_layer, 0, 0);
+    lv_obj_clear_flag(s_receipt_layer, LV_OBJ_FLAG_SCROLLABLE);
+
+    s_receipt_title = lv_label_create(s_receipt_layer);
+    lv_obj_set_width(s_receipt_title, 600);
+    lv_obj_set_style_text_color(s_receipt_title, lv_color_hex(0x0F766E), 0);
+    lv_obj_set_style_text_font(s_receipt_title, &font_cockpit_title_cn, 0);
+    lv_obj_set_style_text_align(s_receipt_title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(s_receipt_title, "配送完成");
+    lv_obj_align(s_receipt_title, LV_ALIGN_TOP_MID, 0, 48);
+
+    lv_obj_t *evidence_panel = app_ui_create_soft_panel(s_receipt_layer, 924, 112, 10);
+    lv_obj_align(evidence_panel, LV_ALIGN_TOP_MID, 0, 118);
+    static const char *const node_labels[UI_RECEIPT_NODE_COUNT] = {
+        "任务授权", "AI确认", "标签接驳", "货物确认", "照片证据",
+    };
+    const int32_t node_w = 160;
+    const int32_t node_gap = 18;
+    for (int i = 0; i < UI_RECEIPT_NODE_COUNT; i++)
+    {
+        s_receipt_node[i] = lv_obj_create(evidence_panel);
+        lv_obj_set_size(s_receipt_node[i], node_w, 64);
+        lv_obj_set_style_bg_color(s_receipt_node[i], lv_color_hex(0xF8FAFC), 0);
+        lv_obj_set_style_bg_opa(s_receipt_node[i], LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(s_receipt_node[i], 1, 0);
+        lv_obj_set_style_border_color(s_receipt_node[i], lv_color_hex(0x94A3B8), 0);
+        lv_obj_set_style_radius(s_receipt_node[i], 8, 0);
+        lv_obj_set_style_pad_all(s_receipt_node[i], 0, 0);
+        lv_obj_clear_flag(s_receipt_node[i], LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_pos(s_receipt_node[i], 26 + i * (node_w + node_gap), 24);
+
+        s_receipt_node_dot[i] = lv_obj_create(s_receipt_node[i]);
+        lv_obj_set_size(s_receipt_node_dot[i], 12, 12);
+        lv_obj_set_style_bg_color(s_receipt_node_dot[i], lv_color_hex(0x94A3B8), 0);
+        lv_obj_set_style_bg_opa(s_receipt_node_dot[i], LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(s_receipt_node_dot[i], 0, 0);
+        lv_obj_set_style_radius(s_receipt_node_dot[i], 6, 0);
+        lv_obj_set_style_pad_all(s_receipt_node_dot[i], 0, 0);
+        lv_obj_align(s_receipt_node_dot[i], LV_ALIGN_LEFT_MID, 18, 0);
+
+        lv_obj_t *node_label = lv_label_create(s_receipt_node[i]);
+        lv_obj_set_width(node_label, 108);
+        lv_obj_set_style_text_color(node_label, lv_color_hex(0x334155), 0);
+        lv_obj_set_style_text_font(node_label, &font_cockpit_cn, 0);
+        lv_label_set_text(node_label, node_labels[i]);
+        lv_obj_align(node_label, LV_ALIGN_LEFT_MID, 42, 0);
+    }
+
+    static const char *const metric_labels[UI_RECEIPT_METRIC_COUNT] = {
+        "模型置信度", "Tag / 距离", "货物重量", "总耗时",
+    };
+    const int32_t metric_x[UI_RECEIPT_METRIC_COUNT] = {0, 382, 0, 382};
+    const int32_t metric_y[UI_RECEIPT_METRIC_COUNT] = {0, 0, 92, 92};
+    lv_obj_t *metric_panel = lv_obj_create(s_receipt_layer);
+    lv_obj_set_size(metric_panel, 744, 174);
+    lv_obj_set_style_bg_opa(metric_panel, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(metric_panel, 0, 0);
+    lv_obj_set_style_pad_all(metric_panel, 0, 0);
+    lv_obj_clear_flag(metric_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_align(metric_panel, LV_ALIGN_TOP_MID, 0, 258);
+    for (int i = 0; i < UI_RECEIPT_METRIC_COUNT; i++)
+    {
+        lv_obj_t *card = app_ui_create_soft_panel(metric_panel, 362, 78, 8);
+        lv_obj_set_pos(card, metric_x[i], metric_y[i]);
+        lv_obj_t *label = lv_label_create(card);
+        lv_obj_set_width(label, 150);
+        lv_obj_set_style_text_color(label, lv_color_hex(0x64748B), 0);
+        lv_obj_set_style_text_font(label, &font_cockpit_cn, 0);
+        lv_label_set_text(label, metric_labels[i]);
+        lv_obj_align(label, LV_ALIGN_LEFT_MID, 20, 0);
+        s_receipt_metric_value[i] = lv_label_create(card);
+        lv_obj_set_width(s_receipt_metric_value[i], 232);
+        lv_obj_set_style_text_color(s_receipt_metric_value[i], lv_color_hex(0x0F172A), 0);
+        lv_obj_set_style_text_font(s_receipt_metric_value[i], &font_cockpit_cn, 0);
+        lv_obj_set_style_text_align(s_receipt_metric_value[i], LV_TEXT_ALIGN_RIGHT, 0);
+        lv_label_set_text_static(s_receipt_metric_value[i], s_receipt_metric_text[i]);
+        lv_obj_align(s_receipt_metric_value[i], LV_ALIGN_RIGHT_MID, -20, 0);
+    }
+
+    s_receipt_photo = lv_label_create(s_receipt_layer);
+    lv_obj_set_width(s_receipt_photo, 700);
+    lv_obj_set_style_text_color(s_receipt_photo, lv_color_hex(0x0284C7), 0);
+    lv_obj_set_style_text_font(s_receipt_photo, &font_cockpit_cn, 0);
+    lv_obj_set_style_text_align(s_receipt_photo, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text_static(s_receipt_photo, s_receipt_photo_text);
+    lv_obj_align(s_receipt_photo, LV_ALIGN_BOTTOM_MID, 0, -76);
+
+    lv_obj_add_flag(s_receipt_layer, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void app_ui_update_completion_receipt_unlocked(
+    const app_ui_completion_receipt_view_t *view)
+{
+    int32_t confidence = (int32_t)(view->ai_confidence * 100.0f + 0.5f);
+    if (confidence < 0) confidence = 0;
+    if (confidence > 100) confidence = 100;
+    if (view->ai_valid)
+    {
+        snprintf(s_receipt_metric_text[0], sizeof(s_receipt_metric_text[0]), "%ld%%", (long)confidence);
+    }
+    else
+    {
+        strlcpy(s_receipt_metric_text[0], "--", sizeof(s_receipt_metric_text[0]));
+    }
+    if (view->tag_valid)
+    {
+        if (view->distance_mm > 0)
+        {
+            snprintf(s_receipt_metric_text[1],
+                sizeof(s_receipt_metric_text[1]),
+                "Tag %u · %ld cm",
+                (unsigned)view->tag_id,
+                (long)((view->distance_mm + 5) / 10));
+        }
+        else
+        {
+            snprintf(s_receipt_metric_text[1],
+                sizeof(s_receipt_metric_text[1]),
+                "Tag %u · --",
+                (unsigned)view->tag_id);
+        }
+    }
+    else
+    {
+        strlcpy(s_receipt_metric_text[1], "--", sizeof(s_receipt_metric_text[1]));
+    }
+    if (view->weight_valid)
+    {
+        snprintf(s_receipt_metric_text[2],
+            sizeof(s_receipt_metric_text[2]),
+            "%ld g",
+            (long)view->weight_g);
+    }
+    else
+    {
+        strlcpy(s_receipt_metric_text[2], "--", sizeof(s_receipt_metric_text[2]));
+    }
+    const uint32_t total_seconds = view->total_duration_ms / 1000U;
+    snprintf(s_receipt_metric_text[3],
+        sizeof(s_receipt_metric_text[3]),
+        "%lu分%lu秒",
+        (unsigned long)(total_seconds / 60U),
+        (unsigned long)(total_seconds % 60U));
+    for (int i = 0; i < UI_RECEIPT_METRIC_COUNT; i++)
+    {
+        lv_obj_invalidate(s_receipt_metric_value[i]);
+    }
+
+    app_ui_receipt_set_node_style(0, 1);
+    app_ui_receipt_set_node_style(1, view->ai_valid ? 1 : 0);
+    app_ui_receipt_set_node_style(2, view->tag_valid ? 1 : 0);
+    app_ui_receipt_set_node_style(3, view->weight_valid ? 1 : 0);
+    if (view->photo_state == APP_UI_RECEIPT_PHOTO_READY)
+    {
+        app_ui_receipt_set_node_style(4, 1);
+        snprintf(s_receipt_photo_text,
+            sizeof(s_receipt_photo_text),
+            "照片摘要 %s",
+            view->photo_sha256_prefix);
+        lv_obj_set_style_text_color(s_receipt_photo, lv_color_hex(0x0F766E), 0);
+    }
+    else if (view->photo_state == APP_UI_RECEIPT_PHOTO_FAILED)
+    {
+        app_ui_receipt_set_node_style(4, 3);
+        strlcpy(s_receipt_photo_text, "照片证据失败", sizeof(s_receipt_photo_text));
+        lv_obj_set_style_text_color(s_receipt_photo, lv_color_hex(0xB91C1C), 0);
+    }
+    else
+    {
+        app_ui_receipt_set_node_style(4, 2);
+        strlcpy(s_receipt_photo_text, "照片处理中", sizeof(s_receipt_photo_text));
+        lv_obj_set_style_text_color(s_receipt_photo, lv_color_hex(0x0284C7), 0);
+    }
+    lv_obj_invalidate(s_receipt_photo);
+}
+
+static bool app_ui_show_receipt_layer_unlocked(uint32_t generation)
+{
+    s_receipt_generation = generation;
+    if (s_main_layer != NULL)
+    {
+        lv_obj_add_flag(s_main_layer, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (s_exception_layer != NULL)
+    {
+        lv_obj_add_flag(s_exception_layer, LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_obj_clear_flag(s_receipt_layer, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(s_receipt_layer);
+    s_receipt_visible = true;
+    if (s_receipt_timer == NULL)
+    {
+        s_receipt_timer = lv_timer_create(app_ui_receipt_timer_cb, UI_RECEIPT_SHOW_MS, NULL);
+    }
+    if (s_receipt_timer == NULL)
+    {
+        lv_obj_add_flag(s_receipt_layer, LV_OBJ_FLAG_HIDDEN);
+        s_receipt_visible = false;
+        s_receipt_generation = 0U;
+        return false;
+    }
+
+    lv_timer_set_period(s_receipt_timer, UI_RECEIPT_SHOW_MS);
+    lv_timer_set_repeat_count(s_receipt_timer, 1);
+    lv_timer_reset(s_receipt_timer);
+    lv_timer_resume(s_receipt_timer);
+    return true;
+}
+
+bool app_ui_show_completion_receipt(const app_ui_completion_receipt_view_t *view)
+{
+    if (app_ui_ordinary_receipt_blocked())
+    {
+        return false;
+    }
+    if (view == NULL || view->task_generation == 0U)
+    {
+        return false;
+    }
+    if (!bsp_display_lock(UI_LOCK_BOOT_MS))
+    {
+        return false;
+    }
+    if (app_ui_ordinary_receipt_blocked())
+    {
+        bsp_display_unlock();
+        return false;
+    }
+    app_ui_create_completion_receipt_unlocked(app_get_active_screen());
+    app_ui_update_completion_receipt_unlocked(view);
+    const bool shown = app_ui_show_receipt_layer_unlocked(view->task_generation);
+    bsp_display_unlock();
+    return shown;
+}
+
+void app_ui_update_completion_receipt(const app_ui_completion_receipt_view_t *view)
+{
+    if (app_ui_ordinary_receipt_blocked())
+    {
+        return;
+    }
+    if (view == NULL ||
+        !s_receipt_visible ||
+        view->task_generation != s_receipt_generation)
+    {
+        return;
+    }
+    if (!bsp_display_lock(UI_LOCK_SHORT_MS))
+    {
+        return;
+    }
+    if (!app_ui_ordinary_receipt_blocked() &&
+        s_receipt_visible &&
+        view->task_generation == s_receipt_generation)
+    {
+        app_ui_update_completion_receipt_unlocked(view);
+    }
+    bsp_display_unlock();
+}
+
+bool app_ui_completion_receipt_is_visible(void)
+{
+    if (app_ui_ordinary_receipt_blocked())
+    {
+        return false;
+    }
+    return s_receipt_visible;
 }

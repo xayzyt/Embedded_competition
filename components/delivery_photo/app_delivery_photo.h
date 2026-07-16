@@ -22,6 +22,7 @@ typedef enum {
 
 typedef struct {
     app_delivery_photo_status_t status;
+    uint32_t task_generation;
     uint16_t target_id;
     uint32_t size;
     uint16_t width;
@@ -45,7 +46,8 @@ esp_err_t app_delivery_photo_register_status_callback(app_delivery_photo_status_
 esp_err_t app_delivery_photo_begin_order(const char *order_id,
                                          const char *request_id,
                                          const char *order_name,
-                                         uint16_t target_id);
+                                         uint16_t target_id,
+                                         uint32_t task_generation);
 esp_err_t app_delivery_photo_request_once(const char *trigger);
 bool app_delivery_photo_should_capture_frame(void);
 esp_err_t app_delivery_photo_submit_frame(const uint8_t *rgb565,

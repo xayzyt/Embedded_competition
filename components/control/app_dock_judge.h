@@ -36,6 +36,7 @@ typedef struct {
 } app_dock_judge_config_t;
 // 获取默认参数并初始化/重置判定器。
 void app_dock_judge_get_default_config(app_dock_judge_config_t *out);
+bool app_dock_judge_get_config(app_dock_judge_config_t *out);
 esp_err_t app_dock_judge_init(const app_dock_judge_config_t *cfg);
 esp_err_t app_dock_judge_set_target_id(uint16_t target_tag_id, bool enable_filter);
 void app_dock_judge_reset(void);

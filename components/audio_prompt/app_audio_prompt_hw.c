@@ -15,7 +15,7 @@ static const char *TAG = "audio_prompt_hw";
 #define APP_AUDIO_PROMPT_SAMPLE_RATE       22050U
 #define APP_AUDIO_PROMPT_CHANNELS          1U
 #define APP_AUDIO_PROMPT_BITS              16U
-#define APP_AUDIO_PROMPT_VOLUME            65
+#define APP_AUDIO_PROMPT_INITIAL_VOLUME    65U
 #define APP_AUDIO_PROMPT_DMA_MIN_FREE      (48U * 1024U)
 #define APP_AUDIO_PROMPT_DMA_MIN_LARGEST   (16U * 1024U)
 
@@ -28,6 +28,8 @@ typedef struct {
     esp_codec_dev_handle_t codec_dev;
     bool codec_opened;
     bool ready;
+    uint8_t current_volume;
+    bool volume_valid;
 } app_audio_prompt_hw_ctx_t;
 
 static app_audio_prompt_hw_ctx_t s_hw = {0};
@@ -74,6 +76,7 @@ static void app_audio_prompt_hw_log_dma(const char *stage)
 void app_audio_prompt_hw_deinit(void)
 {
     s_hw.ready = false;
+    s_hw.volume_valid = false;
 
     if (s_hw.codec_dev != NULL)
     {
@@ -228,10 +231,15 @@ static esp_err_t app_audio_prompt_hw_create_codec(void)
     }
 
     const int vol_ret = esp_codec_dev_set_out_vol(s_hw.codec_dev,
-        APP_AUDIO_PROMPT_VOLUME);
+        APP_AUDIO_PROMPT_INITIAL_VOLUME);
     if (vol_ret != ESP_CODEC_DEV_OK)
     {
         ESP_LOGW(TAG, "set speaker volume failed: %d", vol_ret);
+    }
+    else
+    {
+        s_hw.current_volume = APP_AUDIO_PROMPT_INITIAL_VOLUME;
+        s_hw.volume_valid = true;
     }
 
     esp_codec_dev_sample_info_t sample_info = {
@@ -289,6 +297,33 @@ esp_err_t app_audio_prompt_hw_init(void)
 bool app_audio_prompt_hw_is_ready(void)
 {
     return s_hw.ready && s_hw.codec_opened && s_hw.codec_dev != NULL;
+}
+
+esp_err_t app_audio_prompt_hw_set_volume(uint8_t volume)
+{
+    if (volume > 100U)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!app_audio_prompt_hw_is_ready())
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_hw.volume_valid && s_hw.current_volume == volume)
+    {
+        return ESP_OK;
+    }
+
+    const int ret = esp_codec_dev_set_out_vol(s_hw.codec_dev, volume);
+    if (ret != ESP_CODEC_DEV_OK)
+    {
+        ESP_LOGW(TAG, "set speaker volume to %u failed: %d", (unsigned)volume, ret);
+        return ESP_FAIL;
+    }
+
+    s_hw.current_volume = volume;
+    s_hw.volume_valid = true;
+    return ESP_OK;
 }
 
 esp_err_t app_audio_prompt_hw_write(const uint8_t *data, size_t len)

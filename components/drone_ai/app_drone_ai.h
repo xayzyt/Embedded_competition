@@ -9,6 +9,27 @@
 extern "C" {
 #endif
 #define APP_DRONE_AI_SAMPLE_INTERVAL_FRAMES 8U
+
+// AI 最近一次推理的分类结果。该快照只读，不参与门控判定。
+typedef enum {
+    APP_DRONE_AI_CLASS_NODRONE = 0,
+    APP_DRONE_AI_CLASS_DRONE = 1,
+} app_drone_ai_class_t;
+
+typedef struct {
+    bool valid;                       // 是否已有有效推理结果。
+    bool confirmed;                   // 当前任务是否已确认无人机。
+    app_drone_ai_class_t label;       // 最近一次推理类别。
+    float nodrone_score;              // 非无人机 softmax 分数。
+    float drone_score;                // 无人机 softmax 分数。
+    uint8_t hit_count;                // 当前任务有效命中数。
+    uint8_t confirm_hits;             // 确认所需命中数。
+    uint32_t motion_score;            // 当前画面运动量。
+    uint32_t frame_seq;               // 推理输入帧序号。
+    uint32_t infer_ms;                // 最近一次推理耗时。
+    uint32_t result_ms;               // 最近结果产生时间。
+} app_drone_ai_snapshot_t;
+
 // 无人机 AI 模块吞吐和确认状态统计。
 typedef struct {
     uint32_t submitted;  // 已提交帧数。
@@ -38,6 +59,7 @@ uint32_t app_drone_ai_last_drone_seen_ms(void);
 // 生成调试文案和读取统计。
 void app_drone_ai_format_status(char *buf, size_t buf_len);
 void app_drone_ai_get_stats(app_drone_ai_stats_t *out);
+bool app_drone_ai_get_snapshot(app_drone_ai_snapshot_t *out);
 #ifdef __cplusplus
 }
 #endif

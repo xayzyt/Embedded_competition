@@ -22,6 +22,8 @@
 #include "sdkconfig.h"
 #include "app_image_utils.h"
 
+extern "C" bool app_safety_takeover_is_active(void) __attribute__((weak));
+
 static const char *TAG = "drone_ai";
 
 #define DRONE_AI_MODEL_PARTITION_LABEL "model"
@@ -41,23 +43,6 @@ static const char *TAG = "drone_ai";
 #define DRONE_AI_MOTION_REJECT_DIFF   80U
 #define DRONE_AI_MOTION_COOLDOWN_MS   500U
 #define DRONE_AI_MALLOC_PSRAM_LIMIT   0U
-
-typedef enum {
-    APP_DRONE_AI_CLASS_NODRONE = 0,
-    APP_DRONE_AI_CLASS_DRONE = 1,
-} app_drone_ai_class_t;
-
-typedef struct {
-    bool valid;
-    bool confirmed;
-    app_drone_ai_class_t label;
-    float nodrone_score;
-    float drone_score;
-    uint8_t hit_count;
-    uint32_t motion_score;
-    uint32_t frame_seq;
-    uint32_t infer_ms;
-} app_drone_ai_result_t;
 
 typedef struct {
     uint8_t *rgb;
@@ -87,7 +72,7 @@ static uint32_t s_last_motion_reject_ms = 0;
 static uint32_t s_submit_seq = 0;
 static uint32_t s_infer_count = 0;
 static uint32_t s_drop_count = 0;
-static app_drone_ai_result_t s_latest = {};
+static app_drone_ai_snapshot_t s_latest = {};
 static uint8_t *s_motion_prev_gray = nullptr;
 static bool s_motion_prev_valid = false;
 static uint16_t s_sample_x[DRONE_AI_INPUT_W] = {};
@@ -523,7 +508,7 @@ static void app_drone_ai_update_result(uint32_t frame_seq,
                                        uint32_t motion_score,
                                        uint32_t tick_ms)
 {
-    app_drone_ai_result_t latest = {};
+    app_drone_ai_snapshot_t latest = {};
 
     latest.valid = true;
     latest.label = (drone_score >= nodrone_score) ? APP_DRONE_AI_CLASS_DRONE : APP_DRONE_AI_CLASS_NODRONE;
@@ -532,6 +517,8 @@ static void app_drone_ai_update_result(uint32_t frame_seq,
     latest.frame_seq = frame_seq;
     latest.infer_ms = infer_ms;
     latest.motion_score = motion_score;
+    latest.result_ms = tick_ms;
+    latest.confirm_hits = DRONE_AI_CONFIRM_HITS;
 
     taskENTER_CRITICAL(&s_ai_mux);
     const bool candidate_hit = (latest.label == APP_DRONE_AI_CLASS_DRONE) &&
@@ -929,7 +916,7 @@ void app_drone_ai_format_status(char *buf, size_t buf_len)
         return;
     }
 
-    app_drone_ai_result_t latest = {};
+    app_drone_ai_snapshot_t latest = {};
     bool inited = false;
 
     taskENTER_CRITICAL(&s_ai_mux);
@@ -983,4 +970,25 @@ void app_drone_ai_get_stats(app_drone_ai_stats_t *out)
     out->confirm_hits = DRONE_AI_CONFIRM_HITS;
     out->confirmed = s_confirmed;
     taskEXIT_CRITICAL(&s_ai_mux);
+}
+
+bool app_drone_ai_get_snapshot(app_drone_ai_snapshot_t *out)
+{
+    if (app_safety_takeover_is_active != nullptr &&
+        app_safety_takeover_is_active())
+    {
+        return false;
+    }
+    if (out == NULL)
+    {
+        return false;
+    }
+
+    taskENTER_CRITICAL(&s_ai_mux);
+    *out = s_latest;
+    out->confirmed = s_confirmed;
+    out->hit_count = s_hit_count;
+    out->confirm_hits = DRONE_AI_CONFIRM_HITS;
+    taskEXIT_CRITICAL(&s_ai_mux);
+    return out->valid;
 }

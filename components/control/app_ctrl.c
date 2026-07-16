@@ -44,6 +44,25 @@ typedef struct {
 static TaskHandle_t s_ctrl_task = NULL;
 static bool s_task_callback_registered = false;
 
+typedef struct {
+    bool valid;
+    uint32_t generation;
+    uint32_t start_ms;
+    uint16_t target_id;
+    bool ai_valid;
+    float ai_confidence;
+    uint32_t ai_confirm_ms;
+    bool tag_valid;
+    uint16_t matched_tag_id;
+    int32_t final_distance_mm;
+    uint16_t stable_frames;
+    bool weight_valid;
+    int32_t delivery_weight_g;
+} app_ctrl_demo_trace_t;
+
+static portMUX_TYPE s_demo_mux = portMUX_INITIALIZER_UNLOCKED;
+static app_ctrl_demo_trace_t s_demo_trace = {0};
+
 static void app_ctrl_on_task_event(app_task_event_t event,
     const app_task_snapshot_t *snap,
     void *user_ctx)
@@ -108,6 +127,94 @@ static bool app_ctrl_ch32_status_requests_delivery_photo(const app_ch32_line_t *
         ((msg->proto_flags & APP_CH32_FLAG_CARGO_PRESENT) != 0U);
 }
 
+static bool app_ctrl_is_normal_task(const app_task_snapshot_t *task)
+{
+    return task != NULL &&
+        task->generation != 0U &&
+        strcmp(task->source, "safety") != 0;
+}
+
+static void app_ctrl_demo_reset_locked(const app_task_snapshot_t *task)
+{
+    memset(&s_demo_trace, 0, sizeof(s_demo_trace));
+    s_demo_trace.valid = true;
+    s_demo_trace.generation = task->generation;
+    s_demo_trace.start_ms = task->state_since_ms;
+    s_demo_trace.target_id = task->target_id;
+}
+
+static void app_ctrl_demo_update(const app_ctrl_cycle_t *cycle)
+{
+    if (app_safety_takeover_is_active())
+    {
+        return;
+    }
+    if (cycle == NULL ||
+        !app_ctrl_is_normal_task(&cycle->task))
+    {
+        return;
+    }
+
+    app_drone_ai_snapshot_t ai = {0};
+    const bool have_ai = app_drone_ai_get_snapshot(&ai);
+
+    taskENTER_CRITICAL(&s_demo_mux);
+    if (!s_demo_trace.valid || s_demo_trace.generation != cycle->task.generation)
+    {
+        app_ctrl_demo_reset_locked(&cycle->task);
+    }
+    if (!s_demo_trace.ai_valid &&
+        have_ai &&
+        ai.confirmed &&
+        ai.result_ms >= s_demo_trace.start_ms)
+    {
+        s_demo_trace.ai_valid = true;
+        s_demo_trace.ai_confidence = ai.drone_score;
+        s_demo_trace.ai_confirm_ms = ai.result_ms;
+    }
+    if (!s_demo_trace.tag_valid &&
+        cycle->ready_level &&
+        cycle->dock.vision_valid &&
+        cycle->dock.target_id_ok)
+    {
+        s_demo_trace.tag_valid = true;
+        s_demo_trace.matched_tag_id = cycle->dock.tag_id;
+        s_demo_trace.final_distance_mm = cycle->dock.est_distance_mm;
+        s_demo_trace.stable_frames = cycle->dock.stable_count;
+    }
+    taskEXIT_CRITICAL(&s_demo_mux);
+}
+
+static void app_ctrl_demo_capture_weight(const app_ch32_line_t *msg)
+{
+    if (app_safety_takeover_is_active() ||
+        msg == NULL ||
+        msg->type != APP_CH32_LINE_PROTO_STATUS ||
+        msg->payload_len < 8U ||
+        !app_ctrl_ch32_status_requests_delivery_photo(msg))
+    {
+        return;
+    }
+
+    app_task_snapshot_t task = {0};
+    if (!app_task_peek_snapshot(&task) ||
+        !task.active ||
+        task.state != APP_TASK_STATE_DOCKING ||
+        !app_ctrl_is_normal_task(&task))
+    {
+        return;
+    }
+
+    taskENTER_CRITICAL(&s_demo_mux);
+    if (!s_demo_trace.valid || s_demo_trace.generation != task.generation)
+    {
+        app_ctrl_demo_reset_locked(&task);
+    }
+    s_demo_trace.weight_valid = true;
+    s_demo_trace.delivery_weight_g = msg->proto_weight_g;
+    taskEXIT_CRITICAL(&s_demo_mux);
+}
+
 static void app_ctrl_request_delivery_photo_if_needed(const app_ch32_line_t *msg)
 {
     if (!app_ctrl_ch32_status_requests_delivery_photo(msg))
@@ -127,11 +234,13 @@ static void app_ctrl_request_delivery_photo_if_needed(const app_ch32_line_t *msg
     (void)app_delivery_photo_request_once(trigger);
 }
 
-// 只有 AI 已确认无人机且任务正在等待靠近时才开启 AprilTag。
+// AI 已确认后，等待靠近和已鉴权阶段都保持 AprilTag 门控。
+// 已鉴权时仍需真实的 READY 结果，供 CH32 暂未就绪时安全重试。
 static bool app_ctrl_apriltag_enabled(const app_task_snapshot_t *task)
 {
     return task->active &&
-           task->state == APP_TASK_STATE_WAIT_APPROACH &&
+           (task->state == APP_TASK_STATE_WAIT_APPROACH ||
+            task->state == APP_TASK_STATE_AUTH_PASSED) &&
            app_drone_ai_is_drone_confirmed();
 }
 
@@ -191,6 +300,7 @@ static void app_ctrl_task(void *arg)
         }
         app_ctrl_runtime_step(&cycle);
         app_ctrl_request_proto_stage_prompt(&history, cycle.runtime.proto_stage);
+        app_ctrl_demo_update(&cycle);
         app_ctrl_ui_publish(&cycle);
 
         history.prev_ready_level = cycle.ready_level;
@@ -206,11 +316,76 @@ void app_ctrl_on_ch32_line(const app_ch32_line_t *msg, void *user_ctx)
     (void)user_ctx;
     app_ctrl_runtime_on_ch32_line(msg);
     app_safety_takeover_on_ch32_line(msg);
+    app_ctrl_demo_capture_weight(msg);
     app_ctrl_request_delivery_photo_if_needed(msg);
     if (msg != NULL && msg->type == APP_CH32_LINE_PROTO_STATUS)
     {
         app_ui_exception_demo_update_ch32((int)msg->proto_stage, msg->proto_detail);
     }
+}
+
+bool app_ctrl_get_completion_receipt(uint32_t task_generation,
+    app_ui_completion_receipt_view_t *out)
+{
+    if (app_safety_takeover_is_active())
+    {
+        return false;
+    }
+    if (out == NULL || task_generation == 0U)
+    {
+        return false;
+    }
+
+    app_task_snapshot_t task = {0};
+    if (!app_task_peek_snapshot(&task) ||
+        task.generation != task_generation ||
+        task.state != APP_TASK_STATE_COMPLETED ||
+        !app_ctrl_is_normal_task(&task))
+    {
+        return false;
+    }
+
+    app_ctrl_demo_trace_t trace = {0};
+    taskENTER_CRITICAL(&s_demo_mux);
+    trace = s_demo_trace;
+    taskEXIT_CRITICAL(&s_demo_mux);
+    if (!trace.valid || trace.generation != task_generation)
+    {
+        return false;
+    }
+
+    memset(out, 0, sizeof(*out));
+    out->task_generation = task_generation;
+    out->ai_valid = trace.ai_valid;
+    out->ai_confidence = trace.ai_confidence;
+    out->tag_valid = trace.tag_valid;
+    out->tag_id = trace.matched_tag_id;
+    out->distance_mm = trace.final_distance_mm;
+    out->stable_frames = trace.stable_frames;
+    out->weight_valid = trace.weight_valid;
+    out->weight_g = trace.delivery_weight_g;
+    out->total_duration_ms = task.state_since_ms - trace.start_ms;
+    out->photo_state = APP_UI_RECEIPT_PHOTO_PROCESSING;
+
+    app_delivery_photo_info_t photo = {0};
+    if (app_delivery_photo_get_info(&photo) &&
+        photo.task_generation == task_generation)
+    {
+        if (photo.status == APP_DELIVERY_PHOTO_STATUS_FAILED)
+        {
+            out->photo_state = APP_UI_RECEIPT_PHOTO_FAILED;
+        }
+        else if (photo.sha256_hex[0] != '\0' &&
+            (photo.status == APP_DELIVERY_PHOTO_STATUS_READY ||
+             photo.status == APP_DELIVERY_PHOTO_STATUS_UPLOADING ||
+             photo.status == APP_DELIVERY_PHOTO_STATUS_UPLOADED))
+        {
+            out->photo_state = APP_UI_RECEIPT_PHOTO_READY;
+            memcpy(out->photo_sha256_prefix, photo.sha256_hex, 8U);
+            out->photo_sha256_prefix[8] = '\0';
+        }
+    }
+    return true;
 }
 
 // 初始化机械状态，并监听任务切换事件。
