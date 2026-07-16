@@ -26,6 +26,55 @@ Implementation constraints:
 - UI animation must never drive business state or mechanical actions.
 - Avoid per-frame LVGL allocation and avoid drawing directly into camera buffers.
 
+### Current ordinary-mode scope lock (2026-07-16)
+
+- The accepted implementation scope is the ordinary task handoff transition, P4 camera
+  cockpit, and ordinary completion receipt only.
+- The safety-takeover state machine, safety UI, 10-second countdown, typhoon callback,
+  recovery/failure screens, safety fonts, CH32 safety actions, and safety preview branch
+  are frozen and must remain visually and functionally unchanged.
+- The ordinary preview uses a 52 px top strip, a 58 px bottom strip, a real Tag
+  quadrilateral, one dominant-direction arrow, and textual distance/stability status.
+  The earlier distance-band and stability-ring concepts are superseded by this compact
+  layout so the 1024×600 camera view remains unobstructed.
+- A normal order uses a 1.5-second dark cockpit-style handoff page after the camera is
+  ready. It shows only the real task target and generation-bound state; Tag 0 is valid.
+  The page is skipped for missing/stale tasks and for safety takeover.
+- The temporary power-on delivery-report preview has been removed. The receipt is shown
+  only for a real, generation-matched ordinary task that reaches `COMPLETED`.
+- Phase 3, cloud evidence publishing, and the optional offline phase remain deferred. The
+  user authorized Phase 4 Mini Program digital-twin work as the next effort on 2026-07-16.
+  No safety-route UI work is authorized now.
+
+Implementation status:
+
+- Phase 1 ordinary P4 cockpit: implemented and builds successfully; hardware FPS/heap
+  acceptance remains to be measured on the target board.
+- Phase 2 ordinary P4 generation-isolated evidence trace and 8-second receipt: implemented
+  and builds successfully; Mini Program/cloud extensions remain deferred.
+- Latest ordinary UI refinements (distance retention, aligned HUD margins, task handoff
+  page, font additions, and removal of the boot receipt preview) are implemented but have
+  not been compiled because the user explicitly requested no build.
+- Safety regression: protected source/font hashes match the branch HEAD; full visual and
+  timing regression remains to be run on hardware.
+- Phase 4 Mini Program digital twin: authorized and not yet implemented. It begins as a
+  Mini Program-only change using existing high-level device/order states. A fine-grained
+  P4 payload extension is conditional, additive, and limited to read-only telemetry.
+
+### Ordinary task handoff transition
+
+- Use a 1024×600 opaque deep-navy layer with one centered 860×300 panel.
+- Show `普通配送`, `任务已接收`, the real `TAG N`, and the three static stages
+  `任务接收 / 目标锁定 / 进入识别`; do not show hard-coded communication, weather,
+  or camera states.
+- Create all LVGL objects during UI initialization. Showing the page only updates a fixed
+  target buffer, visibility, and z-order; it creates no objects and starts no animation.
+- Use a view containing `generation`, `target_valid`, and `target_id`. Poll the owning task
+  every 50 ms during the 1.5-second dwell so cancellation, replacement, or safety takeover
+  invalidates the page promptly.
+- Use only `font_cockpit_cn`, `font_cockpit_title_cn`, and the existing ASCII title font.
+  Safety fonts remain unchanged.
+
 ## 2. Phase 1 — Transparent AI visual docking cockpit
 
 ### Experience
@@ -111,7 +160,8 @@ Present every completed delivery as five linked pieces of evidence:
 4. Physical cargo confirmation from HX711.
 5. Delivery photo and SHA-256 digest.
 
-After completion, the P4 displays a receipt for 8–10 seconds containing:
+After a real ordinary task reaches `COMPLETED`, the P4 displays a receipt for 8 seconds
+containing:
 
 - order name or ID suffix;
 - AI model confidence captured at confirmation;
@@ -121,7 +171,8 @@ After completion, the P4 displays a receipt for 8–10 seconds containing:
 - total task duration;
 - photo status and the first eight hexadecimal digest characters.
 
-The receipt then returns to the existing main screen automatically.
+The receipt then returns to the existing main screen automatically. It is never shown at
+power-on and is never shown for safety, failed, cancelled, or generation-mismatched tasks.
 
 ### Data model
 
@@ -227,7 +278,22 @@ machine.
 - One scenario cannot leave weather, target, AI gate, or safety-overlay state active in
   the next scenario.
 
-## 5. Phase 4 — Mini Program digital twin
+## 5. Phase 4 – Mini Program digital twin
+
+### Scope boundary (authorized 2026-07-16)
+
+- Build the view and all visual animation in the Mini Program order-detail page first.
+- The current P4 MQTT snapshot already reports high-level task state, target, matched Tag,
+  cargo completion, fault, weather, photo, and order identity. That is enough for a truthful
+  first version and does not require a P4 change.
+- Exact door/tray/cargo animation requires the CH32 protocol stage, which P4 currently uses
+  internally but does not publish in its MQTT task snapshot. If that fidelity is required,
+  add only backward-compatible read-only fields such as `mechanical_stage` and real
+  `weight_g` in the P4 cloud publisher and pass them through the cloud function.
+- Do not modify the P4 display, control state machine, AI model/thresholds, AprilTag gates,
+  CH32 commands/protocol, mechanical parameters, safety takeover, or timing for the twin.
+- Never synthesize a physical stage from elapsed time. Missing, old, or unknown telemetry
+  renders the twin in a neutral waiting state.
 
 ### Experience
 
@@ -286,6 +352,9 @@ or associate evidence with the wrong order.
 
 ## 7. Implementation order
 
+Current execution order: Phase 4 is the next authorized slice. Phase 3 remains deferred,
+so implementing the digital twin does not authorize safety-route changes.
+
 ### Hours 0–16
 
 - Expose the real AI live result.
@@ -328,4 +397,3 @@ The three messages the judge should remember are:
 > The system shows how it decides.  
 > The judge can challenge its safety logic.  
 > Every delivery produces verifiable evidence.
-
