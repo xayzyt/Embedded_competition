@@ -672,6 +672,11 @@ void CH32_App_Init(void)
     PushRod_Init();
     HX711_Init();
 
+    /* 上电回收推杆1s，确保每次上电推杆都能回到初始位置 */
+    PushRod_Retract();
+    Delay_Ms(1000);
+    PushRod_Stop();
+
     ch32_app_stop_motion();
 
     memset(&s_app, 0, sizeof(s_app));
